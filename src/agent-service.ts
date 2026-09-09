@@ -5,6 +5,9 @@ import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { RobinhoodMarketData } from "./market-data.ts";
+import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
+import { PaperController } from "./paper-controller.ts";
+import { PaperReviews } from "./paper-reviews.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
 export interface AgentRun extends SampleResult {
@@ -19,20 +22,37 @@ export class TradingAgentService {
   readonly strategies: readonly AgentStrategy[];
   readonly broker: RobinhoodConnection;
   readonly market: RobinhoodMarketData;
-  constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection()) {
+  readonly paper: PaperController;
+  readonly reviews: PaperReviews;
+  #closing?: Promise<void>;
+  constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection(),
+    testing: { market?: PaperMarket; ready?: () => boolean; clock?: () => number; auto?: boolean } = {}) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
     this.broker = broker; this.market = new RobinhoodMarketData(broker);
     if (new Set(strategies.map(s => s.id)).size !== strategies.length) throw new Error("Duplicate strategy ID");
+    this.paper = new PaperController(this.dataDirectory, strategies, testing.market ?? new RobinhoodPaperMarket(broker),
+      testing.ready ?? (() => this.broker.status().paperDataAvailable), testing.clock, testing.auto);
+    this.reviews = new PaperReviews(this.paper);
+  }
+  close() {
+    return this.#closing ??= (async () => {
+      try { await this.reviews.close(); } finally {
+        try { await this.paper.close(); } finally { await this.broker.close(); }
+      }
+    })();
   }
   readiness() {
-    return { server: "ready", mode: "sample_and_read_only_data", brokerage: this.broker.status().state,
+    return { server: "ready", mode: "sample_and_paper", brokerage: this.broker.status().state,
       brokerDetails: this.broker.status(),
-      requiresOpenAIKey: false, capabilities: ["strategy_discovery", "configuration_preview", "synthetic_sample_runs", "run_history", "browser_authorization", "connected_equity_quotes"],
-      unavailable: ["market_hours_paper_runner", "real_orders", "position_mutations"],
+      requiresOpenAIKey: false, capabilities: ["strategy_discovery", "configuration_preview", "synthetic_sample_runs", "run_history", "browser_authorization", "connected_equity_quotes", "continuous_paper_runs", "paper_pnl", "browser_reviewed_paper_position_changes", "explicit_recovery"],
+      unavailable: ["real_orders", "brokerage_position_mutations"],
       onboarding: [
         "Discover strategies and preview a configuration without credentials.",
         "Run the bundled synthetic sample and inspect its events.",
         "Use connect_robinhood to obtain a browser authorization link on the server's machine. Credentials remain in memory; never paste them into chat.",
+        "Configure a paper strategy for a supported session, then explicitly start it before the opening candle completes. Required market-data tools must be authorized.",
+        "Inspect paper status, events and estimated P&L. Propose a trim or close and review it in your local browser.",
+        "A running HTTP process survives chat disconnection, not process exit. Restart requires authorization and explicit management-only recovery of existing paper positions.",
       ] };
   }
   catalog() { return this.strategies.map(({ id, version, name, description, capabilities }) => ({ id, version, name, description, capabilities })); }

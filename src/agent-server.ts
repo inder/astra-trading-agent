@@ -45,7 +45,7 @@ export async function runAgentServer(args = process.argv.slice(2)) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--help") {
-      console.log("trading-agent-mcp [--transport stdio|http] [--port 8787] [--data-dir DIRECTORY]\nSamples and optional read-only market data. HTTP binds 127.0.0.1 and requires TRADING_AGENT_MCP_TOKEN (32+ characters). Startup requires no brokerage or LLM key."); return;
+      console.log("astra-trading-agent [--transport stdio|http] [--port 8787] [--data-dir DIRECTORY]\nSamples and continuous PAPER strategies with read-only Robinhood data. HTTP binds 127.0.0.1 and requires TRADING_AGENT_MCP_TOKEN (32+ characters). Startup requires no brokerage or LLM key. No real orders."); return;
     }
     if (!["--transport", "--port", "--data-dir"].includes(arg!) || !args[i + 1] || args[i + 1]!.startsWith("--")) throw new Error("Invalid server arguments; use --help");
     const value = args[++i]!;
@@ -55,18 +55,21 @@ export async function runAgentServer(args = process.argv.slice(2)) {
   }
   if (!["stdio", "http"].includes(transport) || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid transport or port");
   const service = new TradingAgentService(dataDirectory);
+  const closeService = () => service.close().catch(() => {
+    console.error("Astra stopped, but final paper state could not be saved. Inspect run history before recovery."); process.exitCode = 1;
+  });
   if (transport === "stdio") {
     const server = createAgentMcpServer(service);
     await server.connect(new StdioServerTransport());
-    server.server.onclose = () => { void service.broker.close(); };
-    process.once("SIGTERM", () => { void service.broker.close().finally(() => server.close()); });
-    process.once("SIGINT", () => { void service.broker.close().finally(() => server.close()); });
+    server.server.onclose = () => { void closeService(); };
+    process.once("SIGTERM", () => { void closeService().finally(() => server.close()); });
+    process.once("SIGINT", () => { void closeService().finally(() => server.close()); });
   } else {
     const server = agentHttpServer(service, process.env.TRADING_AGENT_MCP_TOKEN ?? "");
     server.requestTimeout = 10000; server.headersTimeout = 10000;
     await new Promise<void>((ok, fail) => { server.once("error", fail); server.listen(port, "127.0.0.1", ok); });
-    console.error("Trading Agent sample-only MCP listening on loopback. Use --help for connection settings.");
-    const stop = () => { server.close(); server.closeIdleConnections(); void service.broker.close(); };
+    console.error("Astra Trading Agent for Robinhood: paper-only MCP listening on loopback. Use --help for connection settings.");
+    const stop = () => { server.close(); server.closeIdleConnections(); void closeService(); };
     process.once("SIGTERM", stop); process.once("SIGINT", stop);
   }
 }

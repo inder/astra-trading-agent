@@ -1,44 +1,69 @@
 # Architecture
 
-Client LLM → MCP adapter → shared service → registered strategy adapter.
+Astra Trading Agent for Robinhood is one shared framework, not a separate chat
+implementation for each bot. The local MCP-compatible client supplies the LLM.
 
-`agent-mcp.ts` defines validated tool schemas and bounded capabilities.
-`agent-service.ts` handles discovery, preview, idempotency and persistence.
-`agent-strategies.ts` registers strategy versions via `AgentStrategy`.
-`orb-options.ts` contains the extracted deterministic engine. `orb-config.ts`
-holds its supported risk settings. Neither requires a broker or language model.
+```text
+Chat client → MCP adapter → TradingAgentService
+                            ├─ registry → sample adapters
+                            ├─ PaperController → strategy PaperRuntime
+                            │                     └─ PaperMarket → Robinhood reads
+                            ├─ PaperReviews → local browser → serialized control
+                            └─ immutable event/checkpoint journal
+```
+
+The MCP layer owns tool schemas, not strategy logic. The service owns the shared
+controller, reviews and brokerage lifetime. The broker adapter owns independent
+OAuth/PKCE and memory-only tokens. The market adapter maps bounded data requests
+to allowlisted reads. No component needs a model key or copies Codex credentials.
 
 ## Adding a strategy
 
-Implement `AgentStrategy` with stable ID/version, capability metadata, validated
-configuration preview, and a deterministic synthetic-sample adapter returning
-common events and summary. Register it in `agentStrategies`. Do not add
-strategy-specific tools or chat parsing. Tests should cover invalid inputs,
-deterministic outcomes, duplicate requests and transport-independent discovery.
-The shared service accepts an injected registry so extension is testable without
-changing the MCP server. The initial sample interface is deliberately not yet a
-general live-runner interface.
+Implement `AgentStrategy`: stable ID/version, capabilities, validated preview,
+synthetic adapter, and optional `paperFactory`. The factory returns a
+`PaperRuntime` with `step`, `control`, `checkpoint`, and normalized `view`.
+Register it in `agentStrategies`; do not add strategy-specific chat parsing.
+The initial implementation is `orb-paper-runtime.ts`, with the deterministic
+engine in `orb-options.ts` and supported settings in `orb-config.ts`.
 
-## Next milestones
+Runtime adapters do not own credentials, transports, scheduling, approval or
+file paths. The common controller owns lifecycle boundaries. The current setup
+schema is equity-session-oriented (date, symbols, optional premarket). Strategies
+needing other parameters require a versioned schema extension, not an executable
+payload. The calendar is NY equity sessions in 2026; other markets need explicit
+support and tests. No uploads, generated code or shell commands are exposed.
 
-1. Verify the implemented customer-owned Robinhood browser authorization against
-   a real account. `broker-connection.ts` owns PKCE, the ephemeral callback,
-   in-memory tokens and restricted MCP reads; `market-data.ts` returns normalized
-   quotes without provider prose or account data. Disconnected startup still works.
-2. Add an independently supervised paper runtime, normalized position/P&L read
-   models, structured event logs, crash reconciliation and explicit lifecycle
-   controls. A chat connection must not own its lifetime.
-3. Add reviewed controls with expiring, exact, state-bound approval; never trust
-   a model-generated `confirmed: true` as user approval.
-4. Design authenticated remote HTTPS access and client onboarding. The current
-   development HTTP transport is not a substitute for OAuth or tenant isolation.
-5. Validate a second real strategy and a clean-machine installation before
-   claiming the complete extensible product is ready.
+Each strategy must test inputs, entry/exit invariants, budgets, recovery, stale
+data, idempotency and a synthetic full-workflow example. Publishing never changes
+the pinned version/configuration of an existing run.
 
-No arbitrary strategy uploads or runtime code generation are exposed over MCP.
-New packages are reviewed, tested and versioned by developers.
+## Transactions and recovery
 
-The memory-only authorization lifetime currently matches the MCP server process.
-Before independent supervised paper workers share a provider connection, design
-an authenticated local control boundary or serialized secure credential store;
-do not copy live tokens into command arguments, logs, or child-process configs.
+Configuration does not start itself. An explicit start reserves the strategy/date
+and acquires exclusive local ownership. Timer ticks and user controls share a
+serialized queue. Each complete simulated transaction publishes its events and
+checkpoint together. A failed tick discards uncommitted in-memory simulation.
+This model is PAPER-only: real orders would need external reconciliation and
+order idempotency, because external side effects cannot be rolled back this way.
+
+Stopping retains positions. Restart does not auto-run anything; explicit recovery
+manages prior positions only, never makes new entries after a gap. Shutdown
+closes review intake, stops/checkpoints runs and disconnects the broker. A separate
+HTTP process survives chat disconnects; client-owned stdio may stop with its client.
+The local ownership-acquisition guard serializes dead-owner recovery; a crash
+inside that short critical section fails closed for offline inspection.
+
+## Reviewed paper controls
+
+A proposal binds run, symbol, action, exact rounded quantity, expected remaining
+quantity and a two-minute expiration. Browser approval requires a separate cookie,
+form token, exact loopback origin/host, and single use. Execution rechecks position
+state and fresh data inside the strategy queue. It cannot affect another run or
+actual account holdings. This is not a real-trade authorization system.
+
+## Outside this release
+
+Remote HTTPS/client OAuth, durable credential storage, process supervision,
+multi-tenancy, account-wide reporting and real-order execution are not implemented.
+A real Robinhood login, market-hours freshness and the user's chat-client setup
+remain attended acceptance gates; mock tests do not establish those facts.

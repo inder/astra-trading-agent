@@ -7,6 +7,8 @@ import type { AddressInfo } from "node:net";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 export const ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading";
+export const MARKET_READS = ["get_equity_quotes", "get_equity_technical_indicators", "get_equity_historicals", "get_option_chains", "get_option_instruments", "get_option_quotes"] as const;
+export type MarketRead = typeof MARKET_READS[number];
 const allowedURLs = new Set([
   ROBINHOOD_MCP_URL,
   "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading",
@@ -41,7 +43,7 @@ export class SessionOAuthProvider implements OAuthClientProvider {
   #interactive = true;
   constructor(redirectUrl: string) { this.redirectUrl = redirectUrl; }
   get clientMetadata(): OAuthClientMetadata {
-    return { client_name: "Astra Trading Agent", redirect_uris: [this.redirectUrl],
+    return { client_name: "Astra Trading Agent for Robinhood", redirect_uris: [this.redirectUrl],
       grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" };
   }
   state() { return this.#state; }
@@ -89,7 +91,7 @@ const network = robinhoodFetch();
 const defaults: ConnectionDependencies = {
   authorize: (provider, options) => auth(provider, { ...options, fetchFn: network }),
   connect: async provider => {
-    const client = new Client({ name: "astra-market-data", version: "0.2.0" });
+    const client = new Client({ name: "astra-market-data", version: "0.3.0" });
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(ROBINHOOD_MCP_URL), { authProvider: provider, fetch: network }));
       return client;
@@ -116,6 +118,7 @@ export class RobinhoodConnection {
       lastMarketReadAt: this.#lastVerifiedAt,
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
+      paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),
       note: "Robinhood may authorize broader access. This adapter only allows market-data reads. Restart requires authorization again." };
   }
   begin(): Promise<unknown> {
@@ -188,9 +191,9 @@ export class RobinhoodConnection {
     const client = this.#client; this.#client = undefined; this.#tools.clear(); this.#state = "not_connected"; this.#lastVerifiedAt = null;
     await client?.close();
   }
-  async read(tool: "get_equity_quotes" | "get_equity_technical_indicators", args: Record<string, unknown>): Promise<unknown> {
+  async read(tool: MarketRead, args: Record<string, unknown>): Promise<unknown> {
     // Runtime allowlist, not just a TypeScript annotation.
-    if (!["get_equity_quotes", "get_equity_technical_indicators"].includes(tool)) throw new Error("Broker mutation or unsupported tool blocked");
+    if (!(MARKET_READS as readonly string[]).includes(tool)) throw new Error("Broker mutation or unsupported tool blocked");
     if (this.#state !== "connected" || !this.#client || !this.#tools.has(tool)) throw new Error("Connect Robinhood market data first");
     try {
       const result = await this.#client.callTool({ name: tool, arguments: args });

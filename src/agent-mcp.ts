@@ -3,7 +3,7 @@ import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
-  const server = new McpServer({ name: "astra-trading-agent", version: "0.2.0" });
+  const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: "0.3.0" });
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
   const guarded = (action: () => unknown) => {
@@ -14,6 +14,10 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       return { ...reply({ error: error instanceof SyntaxError ? "Saved run is unreadable" : code ? (code === "ENOENT" ? "Run not found" : "Run storage unavailable") :
         error instanceof Error ? error.message : "Request failed" }), isError: true };
     }
+  };
+  const asyncGuarded = async (action: () => Promise<unknown>) => {
+    try { return reply(await action()); }
+    catch (error) { return guarded(() => { throw error; }); }
   };
   server.registerTool("get_readiness", { description: "Discover available capabilities and onboarding prerequisites. No credentials required.",
     inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply(service.readiness()));
@@ -48,5 +52,32 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }
       catch { return { ...reply({ error: "Market quotes unavailable or invalid. Check broker status; no orders were submitted." }), isError: true }; }
     });
+  const runId = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
+  const runSchema = z.object({ runId }).strict();
+  const date = z.string().regex(/^2026-\d{2}-\d{2}$/);
+  const paperWrite = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+  server.registerTool("configure_paper_strategy", { description: "Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports 2026 only.",
+    inputSchema: z.object({ ...configSchema, runId, date }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
+    a => guarded(() => service.paper.configure(a)));
+  server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
+  server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. Does not place real orders.",
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true)));
+  server.registerTool("stop_paper_run", { description: "Stop monitoring a PAPER run. Retains open simulated positions and disables their automated exits. This does NOT close them; use a reviewed position close first if desired.",
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId)));
+  server.registerTool("list_paper_runs", { description: "List paper runs and identify detached runs needing explicit recovery.",
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => guarded(() => ({ runs: service.paper.list() })));
+  server.registerTool("get_paper_run", { description: "Read PAPER positions, configuration, latest events, committed budget and estimated option P&L. Stale marks are null, not current prices. P&L excludes fees and is not brokerage P&L.",
+    inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.paper.status(a.runId)));
+  server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",
+    inputSchema: z.object({ runId, after: z.number().int().min(-1).default(-1), limit: z.number().int().min(1).max(100).default(20) }).strict(), annotations: readOnly },
+    a => guarded(() => ({ pages: service.paper.events(a.runId, a.after, a.limit) })));
+  server.registerTool("get_daily_pnl", { description: "Aggregate this installation's simulated option P&L for a date, not brokerage account performance. Includes feesExcluded and missing-mark indicators.",
+    inputSchema: z.object({ date }).strict(), annotations: readOnly }, a => guarded(() => service.paper.daily(a.date)));
+  server.registerTool("propose_position_change", { description: "Propose a trim by percentage of current whole contracts, or close all, ONLY for this run's PAPER position. Returns exact rounded quantity and a short-lived local browser review URL. The user approves in the browser; requesting this tool does not execute the sale.",
+    inputSchema: z.object({ runId, symbol: z.string().regex(/^[A-Z][A-Z0-9.-]{0,9}$/), action: z.enum(["trim", "close"]), percent: z.number().positive().max(100).optional() }).strict(), annotations: paperWrite },
+    a => asyncGuarded(() => service.reviews.propose(a.runId, a.symbol, a.action, a.percent)));
+  server.registerTool("get_position_review", { description: "Read approval status of a paper position-change proposal. This tool cannot approve a proposal.",
+    inputSchema: z.object({ reviewId: z.string().regex(/^[A-Za-z0-9_-]{32}$/) }).strict(), annotations: readOnly }, a => guarded(() => service.reviews.status(a.reviewId)));
   return server;
 }

@@ -1,4 +1,4 @@
-# Astra Trading Agent
+# Astra Trading Agent for Robinhood
 
 A self-hosted MCP server with a versioned library of deterministic trading
 strategies. Your MCP-compatible chat application provides the conversational
@@ -7,11 +7,13 @@ model; this server provides validated tools and durable run records.
 Independent project, not affiliated with OpenAI or Robinhood. The MCP server is
 model-agnostic; its name does not require a particular model or provider.
 
-**Developer milestone: synthetic strategy runs plus optional read-only equity
-quotes.** Independent browser authorization is implemented and mock-tested;
-successful Robinhood login and market-hours delivery still require a user test.
-There are no real orders, continuous paper strategy runs, or real-account P&L.
-There is no live flag. Installing it does not start trading. This is not a
+**Version 0.3: the end-to-end PAPER workflow is implemented and tested with mocked
+market data.** Configure and start continuous strategies, inspect positions and
+option P&L, review trims/closes in your browser, and recover saved positions.
+Independent browser authorization is mock-tested; successful Robinhood login and
+market-hours delivery still need an attended acceptance test. No real orders or
+real-account P&L are supported. There is no live flag. Installing it does not
+start a strategy. This is not a
 production trading system or a claim of strategy profitability.
 
 ## Quick start
@@ -72,11 +74,13 @@ npm start -- --transport http --port 8787
 
 The endpoint is `http://127.0.0.1:8787/mcp` and requires an HTTP Authorization
 Bearer header. There is no browser CORS access, public listener, hosted endpoint
-or OAuth onboarding yet. Do not publish or tunnel this development endpoint as
+or inbound client OAuth onboarding. Do not publish or tunnel this endpoint as
 a production service. Connecting cloud chat applications requires a separately
 designed authenticated HTTPS deployment; localhost support is not cloud-client
 compatibility. The token grants access to all sample records in that server's
-data directory: this release is single-owner, not multi-tenant.
+data directory, paper controls and broker read connection: this release is
+single-owner, not multi-tenant. Keep the HTTP process running independently of
+the chat client if strategies need to continue after the chat disconnects.
 
 ## Tools
 
@@ -91,6 +95,16 @@ data directory: this release is single-owner, not multi-tenant.
 | `connect_robinhood` | Start browser authorization; never accepts credentials in chat |
 | `get_broker_status` | Check authorization and available read capabilities |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
+| `configure_paper_strategy` | Save session settings without starting |
+| `start_paper_run` | Start continuous simulation after authorization |
+| `resume_paper_run` | Recover existing positions only, no new entries |
+| `stop_paper_run` | Stop monitoring; does **not** close paper positions |
+| `list_paper_runs` | List history and attachment/recovery state |
+| `get_paper_run` | Positions, budget and estimated option P&L |
+| `get_paper_events` | Page through the immutable decision journal |
+| `get_daily_pnl` | Daily simulated P&L, never account-wide P&L |
+| `propose_position_change` | Create a local browser review for a trim/close |
+| `get_position_review` | Read approval status; cannot approve a sale |
 
 `trading-agent://readiness` is also available as an MCP resource.
 
@@ -125,6 +139,34 @@ Implementation references: [Robinhood onboarding](https://robinhood.com/us/en/su
 Public metadata was checked on September 9, 2026. No authenticated production
 session is claimed by the mocked OAuth tests.
 
+## Complete paper workflow
+
+Use the running MCP server, not the short-lived `connect` diagnostic. Follow the
+[end-to-end walkthrough](docs/PAPER-WORKFLOW.md) for exact inputs and expected
+results. Discover strategies, authorize Robinhood, configure a supported session
+and ticker list, review settings, then explicitly start before 9:32 a.m. New York
+time. Ask for positions, daily paper P&L or event history. Ask for a 25% trim or
+full close and review the exact whole-contract quantity in your local browser.
+Stopping monitoring retains positions; request closes first if that is intended.
+
+The first strategy supports strict opening-range and separate drive-then-balance
+setups, with optional final-two-minute premarket range inclusion. It allows two
+to four calls per entry, at most two tickers/session, $2,000 including a $1 per
+contract fee reserve per ticker, $4,000 total. Proceeds never replenish the budget.
+Selection prefers the nearest Friday expiration, four contracts, then three,
+then two; within that quantity, nearer strikes and tighter spreads win.
+
+The stock's range low minus 0.1% is the protective threshold. A breach below it
+requests all remaining calls be sold. An unfilled protective exit stays pending
+through rebounds and recovery. The profit ladder sells whole contracts at stock
+gains of 5%, 10%, 15%, and 20% from entry, not option-price gains. User trims count
+toward contracts already sold; they do not add extra later-rung sales.
+
+Simulation assumes fresh ask entry and fresh bid sales, **not executions**. It
+does not model queue position, partial fills, market impact or actual fees. P&L
+excludes fees; stale marks become unavailable. Polled quotes cannot prove no
+unseen intrasecond crossing occurred. Data errors halt the run for inspection.
+
 ## Persistence and stopping
 
 Default data directory: `~/.trading-agent`, overridable with
@@ -135,9 +177,24 @@ without overwrite. Retrying the same ID and inputs returns the existing result;
 changing inputs with that ID fails. Different clients must name their run
 explicitly; there is no shared “selected position” state.
 
-Samples complete synchronously. Closing the server does not erase their records.
-There is no background market monitor in this release. Stop a manually launched
-server with Ctrl-C; a stdio client owns the process it launches.
+Paper runs store immutable revisions in `paper/<runId>/`, with events, pinned
+settings/version and checkpoint published together. One process owns a run and
+one run reserves each strategy/date. Do not edit journals or reservations to
+reset budgets. Logs grow during sessions; no automatic deletion policy exists.
+
+The HTTP timer continues after chat disconnection while its process/computer
+stay running. **Stdio follows its client's process lifetime.** No launch daemon
+or automatic restart is installed. Ctrl-C stops monitoring and checkpoints;
+a crash preserves the last committed revision. Reauthorize after restart and
+explicitly resume existing positions. Recovery allows no new entries after a
+gap and no expired sessions. The runner attempts to flatten simulated positions
+one minute before close; missing valid quotes leave unresolved positions visible,
+without pretending to sell, exercise or manage them overnight. There is no
+automatic date rollover. The exchange calendar supports **2026 only**.
+
+A crash during ownership acquisition can leave an `acquiring` guard. It blocks
+automatic recovery for offline inspection. Never repair ownership while another
+server might still be running.
 
 ## Extension and release roadmap
 

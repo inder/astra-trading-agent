@@ -224,7 +224,7 @@ interface SymbolState {
 }
 export type OrbIntent =
   | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; range: SetupRange }
-  | { kind: "sell_to_close"; reason: "protective_stop" | "profit_trim" | "user_trim" | "user_close"; symbol: string; contractId: string; quantity: number; stockPrice: number; at: number };
+  | { kind: "sell_to_close"; reason: "protective_stop" | "profit_trim" | "user_trim" | "user_close" | "session_close"; symbol: string; contractId: string; quantity: number; stockPrice: number; at: number };
 export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPositions: number }
 export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
@@ -243,6 +243,10 @@ export class OrbOptionsEngine {
   failRange(symbol: string): void {
     const s = this.#need(symbol); if (s.status !== "forming") throw new Error("Opening range already finalized");
     s.status = "watching"; s.strictStatus = "disqualified"; s.balanceStatus = "watching";
+  }
+  disableStrict(symbol: string): void {
+    const s = this.#need(symbol);
+    if (s.status === "watching") s.strictStatus = "disqualified";
   }
   observe(symbol: string, stockPrice: number, at: number, observedAt = at): OrbIntent[] {
     const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
@@ -307,16 +311,36 @@ export class OrbOptionsEngine {
     if (!p.remainingQuantity) s.status = "closed";
   }
   failSale(symbol: string): void { const s = this.#need(symbol); if (!s.pendingSale) throw new Error("No pending sale"); s.pendingSale = 0; }
-  requestPositionSale(symbol: string, reason: "user_trim" | "user_close", quantity: number, expectedRemainingQuantity: number,
+  requestPositionSale(symbol: string, reason: "user_trim" | "user_close" | "protective_stop" | "session_close", quantity: number, expectedRemainingQuantity: number,
     stockPrice: number, at: number): OrbIntent[] {
     const s = this.#need(symbol), p = s.position;
     if (s.status !== "open" || !p || s.pendingSale || !Number.isSafeInteger(quantity) || quantity <= 0 ||
       !Number.isSafeInteger(expectedRemainingQuantity) || expectedRemainingQuantity !== p.remainingQuantity || quantity > p.remainingQuantity ||
-      (reason === "user_close" && quantity !== p.remainingQuantity) || !(stockPrice > 0) || !Number.isFinite(at)) return [];
+      (reason !== "user_trim" && quantity !== p.remainingQuantity) || !(stockPrice > 0) || !Number.isFinite(at)) return [];
     s.pendingSale = quantity;
     return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity, stockPrice, at }];
   }
   snapshot(): OrbSnapshot { return { symbols: Object.fromEntries([...this.#state].map(([k, v]) => [k, structuredClone(v)])), reservedPositions: this.#reserved }; }
+  restore(raw: OrbSnapshot): void {
+    if (!raw || !raw.symbols || Object.keys(raw.symbols).length !== this.config.symbols.length ||
+      !Number.isInteger(raw.reservedPositions) || raw.reservedPositions < 0 || raw.reservedPositions > this.config.maximumPositions)
+      throw new Error("Invalid engine checkpoint");
+    let reserved = 0;
+    for (const symbol of this.config.symbols) {
+      const s = raw.symbols[symbol];
+      if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0)
+        throw new Error("Checkpoint contains incomplete transaction");
+      if (["open", "closed"].includes(s.status)) {
+        const p = s.position; reserved++;
+        if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||
+          !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isInteger(p.originalQuantity) || p.originalQuantity < 2 || p.originalQuantity > 4 ||
+          !Number.isInteger(p.remainingQuantity) || p.remainingQuantity < 0 || p.remainingQuantity > p.originalQuantity ||
+          (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0)) throw new Error("Invalid saved position");
+      } else if (s.position) throw new Error("Unexpected saved position");
+    }
+    if (reserved !== raw.reservedPositions) throw new Error("Invalid saved risk reservations");
+    this.#state = new Map(this.config.symbols.map(symbol => [symbol, structuredClone(raw.symbols[symbol]!)])); this.#reserved = reserved;
+  }
   #reserve(symbol: string, stockPrice: number, at: number, range: SetupRange): OrbIntent[] {
     const s = this.#need(symbol);
     if (s.status !== "watching") return [];

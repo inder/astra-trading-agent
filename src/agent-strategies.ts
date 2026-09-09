@@ -1,5 +1,7 @@
 import { OrbOptionsEngine, selectOrbCall, type OrbIntent, type OrbOptionsConfig } from "./orb-options.ts";
 import { openingRangeConfig, type StrategySetupInput } from "./orb-config.ts";
+import type { PaperFactory } from "./paper-runtime.ts";
+import { OrbPaperRuntime } from "./orb-paper-runtime.ts";
 
 export interface SampleEvent { sequence: number; type: string; data: unknown }
 export interface SampleResult { events: SampleEvent[]; summary: Record<string, unknown> }
@@ -8,14 +10,16 @@ export interface AgentStrategy {
   capabilities: readonly string[];
   preview(input: StrategySetupInput): unknown;
   runSample(config: unknown): SampleResult;
+  paperFactory?: PaperFactory;
 }
 
 // Transport-independent plug-in contract: no chat, filesystem, credentials or broker.
 
 export const openingRangeStrategy: AgentStrategy = {
-  id: "opening-range-options", version: "0.1.0", name: "Opening-range call options",
+  id: "opening-range-options", version: "0.2.0", name: "Opening-range call options",
   description: "Deterministic strict opening-range and drive-then-balance call-option strategy.",
-  capabilities: ["synthetic_sample", "configuration_preview"],
+  capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
+  paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
   preview: input => openingRangeConfig(input),
   runSample(raw): SampleResult {
     const engine = new OrbOptionsEngine(raw as OrbOptionsConfig), config = engine.config;

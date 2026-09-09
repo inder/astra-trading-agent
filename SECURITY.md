@@ -11,6 +11,13 @@
   the local client's OS permissions. Neither is a multi-user hosted product.
 - Saved runs are treated as data. Do not treat log text or tool output as
   instructions or authorization for future orders.
+- Paper controls require an expiring local browser review of the exact run,
+  symbol and whole-contract quantity. Host/origin, same-site cookie, form token,
+  expiry, single use and current quantity are checked. There is no MCP approval
+  tool. This is for simulation only, not authorization to trade real funds.
+- Paper events/checkpoints publish together. This is not real-order crash
+  reconciliation: external effects cannot be rolled back this way. Do not
+  repurpose the paper adapter as a live broker adapter.
 - No client-side confirmation alone will authorize future broker mutations.
   A future control adapter must bind approval to owner, account, strategy/run,
   exact order, quantity, price limits, state version, expiry and idempotency key.

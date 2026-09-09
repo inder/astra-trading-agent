@@ -1,35 +1,53 @@
-# Initial milestone readiness
+# Paper-workflow readiness — version 0.3
 
-Implemented: credential-free MCP startup, versioned strategy discovery,
-configuration preview, deterministic synthetic runs, immutable completed sample
-logs, retries, stdio and authenticated loopback HTTP transports.
+The local end-to-end PAPER workflow is implemented: credential-free discovery,
+configuration, independent browser authorization, continuously scheduled runs,
+option selection, assumed fills, positions and estimated P&L, reviewed trims/
+closes, durable history, stop and explicit management-only recovery.
 
-Implemented and mock-tested: customer browser authorization, memory-only tokens,
-restricted upstream MCP reads, equity quote normalization and freshness flags.
-Production login and quote delivery still need a user-approved acceptance test.
+## Evidence
 
-Not implemented: continuous paper runs, real trades, position close/trim tools, real-account P&L, remote HTTPS
-onboarding, multi-tenant operation, or deployment into a chat application.
+The automated suite exercises real MCP over stdio and authenticated loopback
+HTTP, plus an MCP-client paper scenario from setup through browser-reviewed close
+and journal inspection. SDK OAuth discovery, registration, PKCE, callback security
+and tool checks use mocked provider responses. Continuous market-data and
+simulated entry, marking, trim and exit tests also use invented data.
 
-The bundled opening-range engine supports both strict and balance setup logic.
-The built-in demo specifically exercises the strict entry, two-position cap,
-sizing, trims and stop, not complete market-history or fill simulation.
-The inherited exchange calendar only supports 2026. The sample uses a fixed
-supported date and must not be described as a current-session trading run.
+Checks cover both entry setups, optional premarket history, whole-contract sizing,
+fee reserves and two-name/session limits, duplicate ownership, no budget recycling,
+stale/future/foreign data, deferred protective exits surviving rebounds/restarts,
+provider failure, revisions, recovery, session/early-close handling, and unresolved
+exits remaining visible at close. A timer test verifies progress without a chat
+client driving each tick. CI repeats typecheck and tests on Node 24 and 26.
 
-This repository is an extracted first milestone, not a published production
-release. No private configs, brokerage records, session transcripts, logs or
-source repository history belong in it.
+## Attended acceptance gate
 
-## Verified for this milestone
+After installation, follow [the full walkthrough](PAPER-WORKFLOW.md). The owner
+must approve Robinhood in a browser, verify required tools, then verify
+market-hours history and fresh option/equity quotes during a paper session.
+The authenticated production path has NOT been exercised by automated tests.
+The chosen chat application's MCP setup also needs an owner acceptance test.
+No real-account readiness or trading performance is claimed.
 
-Local typecheck and all 31 tests pass, including real MCP client/server
-handshakes over stdio and authenticated loopback HTTP. Tests cover missing
-credentials, schema validation, synthetic sizing/exits, stored-run retries,
-corrupt records, invalid paths, plug-in injection, unauthorized HTTP requests,
-cross-origin/host rejection and request-size limits. No brokerage was contacted.
-OAuth tests exercise SDK discovery, registration and PKCE against mocks, callback
-rejection/expiry, concurrent setup, denied consent and unavailable tools. The
-provider's public metadata was fetched without credentials; authenticated account
-access has not been tested. No end-to-end chat-application connection is claimed.
-The CI workflow repeats checks on Node 24 and 26 after each push.
+## Known limits
+
+- PAPER only: no real orders, live flag, account holdings or account-wide P&L.
+- Assumed ask/bid fills, no execution guarantees, partial fills or actual fees.
+  P&L excludes fees; missing marks are unavailable, never zero-valued marks.
+- Target one-second polling is not streaming. Latency and five-second freshness/
+  gap checks can conservatively skip entries; unseen crossings remain possible.
+- Memory-only tokens: restart needs authorization and explicit recovery.
+  Recovery makes no new entries after a monitoring gap.
+- A running local process is required. HTTP can outlive chat connections; stdio
+  follows its client. No launch daemon, cloud hosting or public client OAuth.
+- Calendar supports 2026 with known holidays/early closes. No automatic rollover
+  or recovery after session end.
+- Missing exit quotes leave unresolved paper positions visible. No invented
+  liquidation, exercise or overnight management.
+- Single owner, one run per strategy/date, no account sharing or multi-tenancy.
+- Journals grow during runs; no automatic retention/deletion. Keep data private.
+- License selection is pending. Public source alone is not an open-source
+  license; package publication remains disabled pending release review.
+
+SignalDeck's private experiments, processes, credentials and history stay outside
+this distribution. Development never submits actual brokerage orders.

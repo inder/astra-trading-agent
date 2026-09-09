@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { installAgent } from "../src/install-agent.ts";
+import { verifyRegisteredCodexClient } from "./codex-client-probe.ts";
 
 if (process.env.GITHUB_ACTIONS !== "true") throw new Error("This acceptance script is restricted to disposable GitHub runners");
 const call = (command: string, args: string[]) => {
@@ -32,4 +33,5 @@ for (const client of ["codex", "claude-code"] as const) {
 }
 assert.deepEqual(JSON.parse(call("codex", ["mcp", "get", "astra-unrelated-fixture", "--json"])), beforeCodex);
 assert.deepEqual(JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8")).mcpServers["astra-unrelated-fixture"], beforeClaude);
-console.log(JSON.stringify({ platform: process.platform, freshCheckoutWithSpaces: true, preservedOtherConnections: true, evidence }, null, 2));
+const actualClient = await verifyRegisteredCodexClient();
+console.log(JSON.stringify({ platform: process.platform, freshCheckoutWithSpaces: true, preservedOtherConnections: true, evidence, actualClient }, null, 2));

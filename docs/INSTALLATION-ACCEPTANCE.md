@@ -16,6 +16,11 @@ register Astra, checks the actual persisted settings, launches exactly the store
 command, and exercises discovery and a synthetic sample. Reinstallation must
 preserve the connection, and unrelated fixture connections must remain unchanged.
 
+The Codex gate additionally starts the real pinned client's app-server, opens an
+ephemeral local session without a model turn, verifies Astra is `connected`, and
+calls `get_readiness`, `list_strategies`, and `run_sample` through Codex itself.
+This verifies client loading and calls, not just an independent SDK handshake.
+
 The local suite separately checks preview-only behavior, private backups,
 malformed settings, mismatched existing Astra entries, failed preflight, and
 settings changed during verification. The desktop JSON adapter is unit-tested;
@@ -44,3 +49,31 @@ Do not describe a fresh-install matrix as passing until that revision's jobs pas
 Handoff must distinguish verified local-install mechanics from these external
 gates. It must not call a configuration fragment or unit-test pass a completed
 fresh-computer conversational installation.
+
+## Independent installation trial — September 9, 2026
+
+A fresh installation agent, without development history or procedural coaching,
+was given the public repository URL and asked to install Astra for Codex in a
+disposable Linux computer. Node/npm/Git and Codex were already installed, as in
+the intended starting environment. No host directories or credentials were
+mounted or copied. The agent installed public revision
+`837b3a1e4869395f4c493218945531f7f3ad7d24`, following the published runbook:
+
+- Dependency installation, typecheck and all 61 tests passed.
+- Setup, preview, client registration and the stored-command sample passed.
+- Reinstallation made no configuration changes or duplicate connection.
+- No manual JSON assembly, path editing or product-specific advice was needed.
+- A separate actual Codex client check loaded all 19 Astra tools and successfully
+  called readiness, discovery and the synthetic sample with zero real orders.
+
+There was one infrastructure interruption: the container stopped during setup.
+After the environment was restarted, setup and the remaining checks exited
+successfully. No Astra defect was established from that interruption.
+
+This was an LLM-directed installation using an isolated target, not a signed-in
+Codex model conversation inside that target. A credentialless model attempt
+returned HTTP 401 as expected. Client tool invocation was verified separately
+through its local protocol. Claude Code registration is covered by the clean
+macOS/Linux CI matrix; a Claude model-driven installation and Desktop GUI reload
+have not been tested. The user's own client login, tool permissions/reload,
+Robinhood consent and market-hours acceptance remain explicit external steps.

@@ -35,6 +35,15 @@ or settings access cannot gain those capabilities merely from a repository URL.
 then prints machine-specific registration settings. It never modifies your chat
 client settings, contacts Robinhood or starts a market strategy on its own.
 
+For a locally capable agent, `npm run install-agent -- --client codex --apply`
+also performs checked registration and verifies the saved launch command. It
+supports `codex`, `claude-code`, and a `claude-desktop` configuration adapter.
+Without `--apply` it only previews. Existing settings are preserved; conflicting
+Astra entries require explicit review. Client permission/reload and Robinhood
+browser consent are not bypassed. See the [acceptance criteria](docs/INSTALLATION-ACCEPTANCE.md)
+for exactly what has and has not been tested; ordinary Claude web chat does not
+become a local installer merely by receiving a URL.
+
 ### Manual installation
 
 Requires Node.js 24 or newer and npm. No OpenAI key, Robinhood credentials, or

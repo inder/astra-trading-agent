@@ -48,6 +48,32 @@ If any check fails, diagnose it before reporting a successful installation.
 
 ## 3. Register only this MCP server
 
+After identifying the local client, use the explicit installer rather than
+asking the user to copy configuration JSON. Preview first; apply under the
+user's installation authorization and the host's normal permission checks:
+
+```sh
+npm run install-agent -- --client codex
+npm run install-agent -- --client codex --apply
+```
+
+Use `claude-code` for Claude Code or `claude-desktop` for the Desktop local-MCP
+configuration. Never confuse Claude Code with a plain web chat. Codex/Claude Code
+registration requires that client's official CLI; if missing, the installing
+agent should install/locate it with appropriate permission, not delegate mechanical
+configuration work back to the user. Codex uses `codex mcp add`; Claude Code uses
+`claude mcp add-json --scope user`. Desktop uses a checked JSON merge. No broad
+settings replacement, auto-removal or automatic conflict resolution is allowed.
+
+The installer backs up pre-existing config privately, refuses conflicting Astra
+entries, verifies the saved launch settings, then probes that exact command with
+a synthetic sample. Rerunning matching settings does not duplicate or rewrite
+the connection. Samples are saved in the private data directory; they do not
+create real trades. `--data-dir` can set a user-owned absolute data location.
+It reports `activeChatToolsVerified: false` until the installing agent performs
+the actual-client check in the next section. A saved config is not a claim the
+current chat has refreshed its tool list.
+
 Inspect the client's existing Astra entry without exposing unrelated credentials.
 If it already matches, do not duplicate it. If it conflicts, explain the specific
 change and obtain any required approval. Preserve all unrelated servers/settings.
@@ -70,6 +96,9 @@ interrupting an active session. Do not mistake a remote-connector URL field for
 local stdio configuration. Official references:
 [local MCP setup](https://modelcontextprotocol.io/docs/develop/connect-local-servers),
 [Claude local versus remote connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+Claude Code CLI registration reference:
+[official Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
 
 The default install uses stdio, which follows the client's process lifetime. If
 the user explicitly wants monitoring to continue after chat closure, explain and

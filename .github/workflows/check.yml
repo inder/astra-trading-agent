@@ -17,3 +17,27 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run demo
+  clean-install:
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install official client CLIs without account credentials
+        run: npm install --global @openai/codex@0.153.4 @anthropic-ai/claude-code@2.1.266
+      - name: Clone the public repo into a fresh path containing spaces
+        run: |
+          git clone https://github.com/inder/astra-trading-agent.git "${{ runner.temp }}/astra fresh checkout"
+          git -C "${{ runner.temp }}/astra fresh checkout" checkout --detach "$GITHUB_SHA"
+      - run: npm ci
+        working-directory: ${{ runner.temp }}/astra fresh checkout
+      - run: npm run setup
+        working-directory: ${{ runner.temp }}/astra fresh checkout
+      - name: Verify real client registration, preserved settings, reruns and stored launch commands
+        run: node test/clean-install.ts
+        working-directory: ${{ runner.temp }}/astra fresh checkout

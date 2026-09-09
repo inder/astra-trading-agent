@@ -1,5 +1,8 @@
 # Astra Trading Agent development
 
+For a user request to install or set up this project, follow [INSTALL.md](INSTALL.md).
+Installation is not authorization to start a strategy or approve broker access.
+
 Keep this a general, self-hosted framework. Strategies plug into shared contracts;
 do not add separate conversational interfaces for individual strategies.
 

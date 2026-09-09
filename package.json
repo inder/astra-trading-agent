@@ -10,11 +10,12 @@
     "start": "node src/agent-server.ts",
     "demo": "node src/demo.ts",
     "connect": "node src/connect.ts",
+    "setup": "node src/setup.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
   },
-  "files": ["src/", "README.md", "SECURITY.md", "docs/", "LICENSE"],
+  "files": ["src/", "README.md", "INSTALL.md", "AGENTS.md", "CLAUDE.md", "SECURITY.md", "docs/", "LICENSE"],
   "dependencies": { "@modelcontextprotocol/sdk": "1.30.0", "zod": "3.25.76" },
   "devDependencies": { "@types/node": "24.3.0", "typescript": "5.9.2" }
 }

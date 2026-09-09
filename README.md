@@ -18,6 +18,25 @@ production trading system or a claim of strategy profitability.
 
 ## Quick start
 
+### Install through your coding agent
+
+One-line request:
+
+> Install Astra Trading Agent for Robinhood from https://github.com/inder/astra-trading-agent using its INSTALL.md instructions.
+
+Give a locally capable coding agent this repository URL and ask it to install
+Astra. [INSTALL.md](INSTALL.md) is the agent-facing runbook: prerequisites,
+verification, client registration, preservation of existing settings, and
+Robinhood onboarding. The agent performs the mechanics; the user handles any
+required permissions and browser consent. A chat client without local execution
+or settings access cannot gain those capabilities merely from a repository URL.
+
+`npm run setup` verifies the real local MCP handshake and a synthetic sample,
+then prints machine-specific registration settings. It never modifies your chat
+client settings, contacts Robinhood or starts a market strategy on its own.
+
+### Manual installation
+
 Requires Node.js 24 or newer and npm. No OpenAI key, Robinhood credentials, or
 Codex installation is needed for the server or sample.
 

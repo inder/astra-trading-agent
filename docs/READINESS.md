@@ -7,6 +7,12 @@ closes, durable history, stop and explicit management-only recovery.
 
 ## Evidence
 
+Agent-guided installation is documented in the root INSTALL.md, linked from the
+README, AGENTS.md and CLAUDE.md. The setup helper is tested against an isolated
+real MCP process and emits local client settings without modifying them. Actual
+registration/reload in a user's chat application remains an installation check,
+not something the helper claims to have done.
+
 The automated suite exercises real MCP over stdio and authenticated loopback
 HTTP, plus an MCP-client paper scenario from setup through browser-reviewed close
 and journal inspection. SDK OAuth discovery, registration, PKCE, callback security

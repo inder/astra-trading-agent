@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.trading-agent/
+data/
+output/
+*.log
+*.tgz
+.DS_Store
+coverage/

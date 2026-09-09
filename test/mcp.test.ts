@@ -20,7 +20,7 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   t.after(async () => { await client.close(); rmSync(dir, { recursive: true, force: true }); });
   await client.connect(transport);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 6);
+  assert.equal(tools.length, 9);
   assert.ok(!tools.some(t => /close|sell|buy|live|shell|credential/.test(t.name)));
   assert.equal(unpack(await client.callTool({ name: "get_readiness", arguments: {} })).brokerage, "not_connected");
   const bad = await client.callTool({ name: "run_sample", arguments: { requestId: "../x" } });
@@ -59,7 +59,7 @@ test("HTTP rejects unauthenticated, cross-origin, hostile-host and oversized req
   const client = new Client({ name: "http-test", version: "1" });
   try {
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 6);
-    assert.equal(unpack(await client.callTool({ name: "get_readiness", arguments: {} })).mode, "sample_only");
+    assert.equal((await client.listTools()).tools.length, 9);
+    assert.equal(unpack(await client.callTool({ name: "get_readiness", arguments: {} })).mode, "sample_and_read_only_data");
   } finally { await client.close(); }
 });

@@ -1,7 +1,8 @@
 # Security and release boundaries
 
 - No credentials are bundled, requested in chat, or copied from the originating
-  private workspace. There is no Robinhood integration in this distribution.
+  private workspace. Optional Robinhood authorization stores tokens in memory
+  only; there is no disk credential store in this milestone.
 - Do not commit environment files, run records, account exports or access tokens.
 - Use a private data directory owned by the same OS user. This application is
   not a security boundary against another process running as that user.
@@ -16,6 +17,15 @@
 - Authentication, account reconciliation, stale-data controls, partial fills,
   expiry handling and protective-exit recovery require independent verification
   before live support can be released. A synthetic test is not that verification.
+- OAuth discovery, registration and token requests are restricted to pinned
+  Robinhood HTTPS endpoints. Cross-host credential forwarding and redirects are
+  blocked. Callback state, PKCE, exact loopback Host/path and expiry are checked.
+- Browser authorization must happen on the server's machine. Do not tunnel the
+  callback or put the returned authorization link in public logs/issues.
+- The upstream token may have broad permissions. The application exposes only
+  allowlisted reads, never a generic MCP proxy or account/order tool. Review the
+  provider consent screen yourself. Restarting the server clears local tokens;
+  revocation of the provider's grant must be managed with Robinhood separately.
 
 Do not post credentials or private account details in public issues. Use GitHub
 private vulnerability reporting if enabled, or request a private reporting

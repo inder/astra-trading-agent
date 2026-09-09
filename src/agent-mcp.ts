@@ -3,7 +3,7 @@ import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
-  const server = new McpServer({ name: "astra-trading-agent", version: "0.1.0" });
+  const server = new McpServer({ name: "astra-trading-agent", version: "0.2.0" });
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
   const guarded = (action: () => unknown) => {
@@ -36,5 +36,17 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     inputSchema: z.object({ runId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict(), annotations: readOnly }, a => guarded(() => service.getRun(a.runId)));
   server.registerResource("readiness", "trading-agent://readiness", { mimeType: "application/json" },
     () => ({ contents: [{ uri: "trading-agent://readiness", mimeType: "application/json", text: JSON.stringify(service.readiness()) }] }));
+  server.registerTool("connect_robinhood", { description: "Start user-approved browser OAuth authorization for Robinhood market data. Returns a Robinhood URL; the user must review and approve access in a desktop browser on the server's machine. Never ask for passwords, tokens or codes in chat. No orders are enabled.",
+    inputSchema: z.object({}).strict(), annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } }, async () => {
+      try { return reply(await service.broker.begin()); }
+      catch { return { ...reply({ error: "Unable to start broker authorization. Check connectivity and try again." }), isError: true }; }
+    });
+  server.registerTool("get_broker_status", { description: "Check browser-authorization progress and verified read capabilities. No account numbers or tokens are returned.",
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply(service.broker.status()));
+  server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
+    inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } }, async a => {
+      try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }
+      catch { return { ...reply({ error: "Market quotes unavailable or invalid. Check broker status; no orders were submitted." }), isError: true }; }
+    });
   return server;
 }

@@ -1,6 +1,6 @@
 {
   "name": "astra-trading-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Self-hosted, sample-first MCP trading strategy framework",
   "type": "module",
@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node src/agent-server.ts",
     "demo": "node src/demo.ts",
+    "connect": "node src/connect.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"

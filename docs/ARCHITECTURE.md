@@ -21,9 +21,10 @@ general live-runner interface.
 
 ## Next milestones
 
-1. Add a broker-neutral market-data provider and secure, customer-owned
-   authorization flow. Advertise only verified capabilities; disconnected startup
-   must continue to work. Do not import private Codex session credentials.
+1. Verify the implemented customer-owned Robinhood browser authorization against
+   a real account. `broker-connection.ts` owns PKCE, the ephemeral callback,
+   in-memory tokens and restricted MCP reads; `market-data.ts` returns normalized
+   quotes without provider prose or account data. Disconnected startup still works.
 2. Add an independently supervised paper runtime, normalized position/P&L read
    models, structured event logs, crash reconciliation and explicit lifecycle
    controls. A chat connection must not own its lifetime.
@@ -36,3 +37,8 @@ general live-runner interface.
 
 No arbitrary strategy uploads or runtime code generation are exposed over MCP.
 New packages are reviewed, tested and versioned by developers.
+
+The memory-only authorization lifetime currently matches the MCP server process.
+Before independent supervised paper workers share a provider connection, design
+an authenticated local control boundary or serialized secure credential store;
+do not copy live tokens into command arguments, logs, or child-process configs.

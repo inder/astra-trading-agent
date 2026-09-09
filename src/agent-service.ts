@@ -3,6 +3,8 @@ import { closeSync, constants, fsyncSync, linkSync, mkdirSync, openSync, readFil
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
+import { RobinhoodConnection } from "./broker-connection.ts";
+import { RobinhoodMarketData } from "./market-data.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
 export interface AgentRun extends SampleResult {
@@ -15,18 +17,22 @@ const validId = (id: string) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,64}$
 export class TradingAgentService {
   readonly dataDirectory: string;
   readonly strategies: readonly AgentStrategy[];
-  constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies) {
+  readonly broker: RobinhoodConnection;
+  readonly market: RobinhoodMarketData;
+  constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection()) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
+    this.broker = broker; this.market = new RobinhoodMarketData(broker);
     if (new Set(strategies.map(s => s.id)).size !== strategies.length) throw new Error("Duplicate strategy ID");
   }
   readiness() {
-    return { server: "ready", mode: "sample_only", brokerage: "not_connected",
-      requiresOpenAIKey: false, capabilities: ["strategy_discovery", "configuration_preview", "synthetic_sample_runs", "run_history"],
-      unavailable: ["broker_authorization", "live_market_data", "market_hours_paper_runner", "real_orders", "position_mutations"],
+    return { server: "ready", mode: "sample_and_read_only_data", brokerage: this.broker.status().state,
+      brokerDetails: this.broker.status(),
+      requiresOpenAIKey: false, capabilities: ["strategy_discovery", "configuration_preview", "synthetic_sample_runs", "run_history", "browser_authorization", "connected_equity_quotes"],
+      unavailable: ["market_hours_paper_runner", "real_orders", "position_mutations"],
       onboarding: [
         "Discover strategies and preview a configuration without credentials.",
         "Run the bundled synthetic sample and inspect its events.",
-        "Independent Robinhood authorization is not implemented in this distribution. Do not paste brokerage credentials into chat.",
+        "Use connect_robinhood to obtain a browser authorization link on the server's machine. Credentials remain in memory; never paste them into chat.",
       ] };
   }
   catalog() { return this.strategies.map(({ id, version, name, description, capabilities }) => ({ id, version, name, description, capabilities })); }

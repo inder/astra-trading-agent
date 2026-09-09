@@ -4,8 +4,11 @@ Implemented: credential-free MCP startup, versioned strategy discovery,
 configuration preview, deterministic synthetic runs, immutable completed sample
 logs, retries, stdio and authenticated loopback HTTP transports.
 
-Not implemented: customer Robinhood authorization, actual market data, continuous
-paper runs, real trades, position close/trim tools, real-account P&L, remote HTTPS
+Implemented and mock-tested: customer browser authorization, memory-only tokens,
+restricted upstream MCP reads, equity quote normalization and freshness flags.
+Production login and quote delivery still need a user-approved acceptance test.
+
+Not implemented: continuous paper runs, real trades, position close/trim tools, real-account P&L, remote HTTPS
 onboarding, multi-tenant operation, or deployment into a chat application.
 
 The bundled opening-range engine supports both strict and balance setup logic.
@@ -20,10 +23,13 @@ source repository history belong in it.
 
 ## Verified for this milestone
 
-Local typecheck and all 24 tests pass, including real MCP client/server
+Local typecheck and all 31 tests pass, including real MCP client/server
 handshakes over stdio and authenticated loopback HTTP. Tests cover missing
 credentials, schema validation, synthetic sizing/exits, stored-run retries,
 corrupt records, invalid paths, plug-in injection, unauthorized HTTP requests,
 cross-origin/host rejection and request-size limits. No brokerage was contacted.
-The CI workflow repeats checks on Node 24 and 26; remote results must be checked
-after the first push. No end-to-end chat-application connection is claimed.
+OAuth tests exercise SDK discovery, registration and PKCE against mocks, callback
+rejection/expiry, concurrent setup, denied consent and unavailable tools. The
+provider's public metadata was fetched without credentials; authenticated account
+access has not been tested. No end-to-end chat-application connection is claimed.
+The CI workflow repeats checks on Node 24 and 26 after each push.

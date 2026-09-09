@@ -7,8 +7,10 @@ model; this server provides validated tools and durable run records.
 Independent project, not affiliated with OpenAI or Robinhood. The MCP server is
 model-agnostic; its name does not require a particular model or provider.
 
-**Initial developer milestone: synthetic samples only.** No brokerage access,
-live data, real orders, or real-account P&L is implemented in this distribution.
+**Developer milestone: synthetic strategy runs plus optional read-only equity
+quotes.** Independent browser authorization is implemented and mock-tested;
+successful Robinhood login and market-hours delivery still require a user test.
+There are no real orders, continuous paper strategy runs, or real-account P&L.
 There is no live flag. Installing it does not start trading. This is not a
 production trading system or a claim of strategy profitability.
 
@@ -86,11 +88,42 @@ data directory: this release is single-owner, not multi-tenant.
 | `run_sample` | Run synthetic data and save events; idempotent request ID |
 | `list_runs` | Read saved sample history |
 | `get_run` | Read configuration, decisions and outcome |
+| `connect_robinhood` | Start browser authorization; never accepts credentials in chat |
+| `get_broker_status` | Check authorization and available read capabilities |
+| `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
 
 `trading-agent://readiness` is also available as an MCP resource.
 
-No tools execute shell commands, accept arbitrary filesystem paths, request
-credentials, fetch market data or submit brokerage orders.
+No tools execute shell commands, accept arbitrary filesystem paths, read account
+positions or submit brokerage orders. The upstream client enforces a runtime
+allowlist of market-data reads even if Robinhood advertises order tools.
+
+## Connect Robinhood independently
+
+Ask your connected MCP client to connect Robinhood. Open the returned Robinhood
+authorization link in a **desktop browser on the machine running Astra**. Review
+the permissions on Robinhood's page. The provider returns to a temporary
+loopback callback; passwords, authorization codes and access tokens never need
+to be pasted into chat. Ask for broker status, then request quotes.
+
+This uses Robinhood's published MCP endpoint, OAuth discovery, dynamic client
+registration and PKCE. Every callback validates an unpredictable state value;
+attempts expire after ten minutes. Credentials are **memory-only** in this
+milestone and disappear when the server exits. Authorize again after restart.
+No credentials are copied from Codex or any other application. Robinhood's
+consent may grant broader capabilities than this adapter uses; the local
+read-only restriction is not a claim that Robinhood issued a read-only token.
+
+`npm run connect` is an attended diagnostic using the same flow. It verifies
+the MCP handshake and required quote tool, then disconnects. To keep reading
+quotes, authorize through the running MCP server instead. No browser window is
+opened automatically. Remote/headless callback routing is not supported yet.
+
+Implementation references: [Robinhood onboarding](https://robinhood.com/us/en/support/articles/agentic-trading-overview/),
+[resource metadata](https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading),
+[authorization metadata](https://agent.robinhood.com/.well-known/oauth-authorization-server/mcp/trading).
+Public metadata was checked on September 9, 2026. No authenticated production
+session is claimed by the mocked OAuth tests.
 
 ## Persistence and stopping
 

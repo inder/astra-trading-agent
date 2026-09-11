@@ -4,7 +4,7 @@ export interface StrategySettings {
   entryWindowMinutes?: number; budgetCentsPerPosition?: number; budgetCentsPerDay?: number; minimumContracts?: number;
   maximumContractsPerTrade?: number | null; maximumPositions?: number; maxOptionSpreadFraction?: number; feeReserveCentsPerContract?: number;
   stopBufferFraction?: number; firstTargetMultiple?: number; middleTargetMultiple?: number; finalTargetMultiple?: number; backstopFraction?: number;
-  flattenLeadMinutes?: number;
+  flattenLeadMinutes?: number; pollMs?: number; maxQuoteAgeMs?: number; maxObservationGapMs?: number; rangeDeadlineMs?: number; readFailureHaltMs?: number;
 }
 export interface StrategySetupInput extends StrategySettings { date: string; symbols: string[]; includePremarketLeadMinutes: 0 | 2 }
 export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig => parseOrbOptionsConfig({
@@ -23,9 +23,11 @@ export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig 
   backstopFraction: input.backstopFraction ?? SETTINGS.backstopFraction.default,
   feeReserveCentsPerContract: input.feeReserveCentsPerContract ?? SETTINGS.feeReserveCentsPerContract.default,
   maxOptionSpreadFraction: input.maxOptionSpreadFraction ?? SETTINGS.maxOptionSpreadFraction.default,
-  maxQuoteAgeMs: 5000,
-  maxObservationGapMs: 5000,
-  pollMs: 1000,
+  maxQuoteAgeMs: input.maxQuoteAgeMs ?? SETTINGS.maxQuoteAgeMs.default,
+  maxObservationGapMs: input.maxObservationGapMs ?? SETTINGS.maxObservationGapMs.default,
+  pollMs: input.pollMs ?? SETTINGS.pollMs.default,
+  rangeDeadlineMs: input.rangeDeadlineMs ?? SETTINGS.rangeDeadlineMs.default,
+  readFailureHaltMs: input.readFailureHaltMs ?? SETTINGS.readFailureHaltMs.default,
   includePremarketLeadMinutes: input.includePremarketLeadMinutes,
   entryWindowMinutes: input.entryWindowMinutes ?? ENTRY_WINDOW_MINUTES.default,
   flattenLeadMinutes: input.flattenLeadMinutes ?? SETTINGS.flattenLeadMinutes.default,

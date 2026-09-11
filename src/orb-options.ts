@@ -1,4 +1,4 @@
-import { addDays, isTradingDay, isWeekEnder, tradingSessionsBetween } from "./daily-history.ts";
+import { addDays, isTradingDay, isWeekEnder, sessionTimes, tradingSessionsBetween } from "./daily-history.ts";
 import { timestamp } from "./validation.ts";
 export interface CallQuote { id: string; bid: number; ask: number; askSize: number; updatedAt: string; retrievedAt: string }
 
@@ -7,7 +7,7 @@ export interface OrbOptionsConfig {
   budgetCentsPerPosition: number; budgetCentsPerDay: number; minimumContracts: number; maximumContractsPerTrade: number | null;
   maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
-  maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number;
+  maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number; rangeDeadlineMs: number; readFailureHaltMs: number;
   includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
 }
 /** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
@@ -31,6 +31,14 @@ export const SETTINGS = {
   backstopFraction: { default: 0.5, min: 0.05, max: 0.95 },
   // Minutes before the close when everything still held sells and new entries stop (founder default 1 = 3:59 pm ET).
   flattenLeadMinutes: { default: 1, min: 1, max: 60 },
+  // Market-data timing. The gap rule itself is an invariant (never infer an unobserved price path); its length is a setting.
+  pollMs: { default: 1000, min: 250, max: 30_000 },
+  maxQuoteAgeMs: { default: 5000, min: 1000, max: 60_000 },
+  maxObservationGapMs: { default: 5000, min: 1000, max: 60_000 },
+  // How long after the first two-minute candle to keep retrying its bars before skipping a stock.
+  rangeDeadlineMs: { default: 60_000, min: 0, max: 600_000 },
+  // How long market-data reads may keep failing before the run halts.
+  readFailureHaltMs: { default: 60_000, min: 5000, max: 900_000 },
 } as const;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
@@ -38,7 +46,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
-    "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs",
+    "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs", "rangeDeadlineMs", "readFailureHaltMs",
     "includePremarketLeadMinutes", "entryWindowMinutes", "flattenLeadMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
@@ -54,8 +62,10 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     !inRange(c.maxOptionSpreadFraction, SETTINGS.maxOptionSpreadFraction, false) || !inRange(c.flattenLeadMinutes, SETTINGS.flattenLeadMinutes) ||
     // The cheapest possible contract is $0.01 (100 cents) plus the fee reserve: a minimum that can never fit trades nothing all day.
     c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
-    !Number.isSafeInteger(c.maxQuoteAgeMs) || c.maxQuoteAgeMs < 1000 ||
-    !Number.isSafeInteger(c.maxObservationGapMs) || c.maxObservationGapMs < 1000 || !Number.isSafeInteger(c.pollMs) || c.pollMs < 250 || c.pollMs > 30000 ||
+    !inRange(c.pollMs, SETTINGS.pollMs) || !inRange(c.maxQuoteAgeMs, SETTINGS.maxQuoteAgeMs) || !inRange(c.maxObservationGapMs, SETTINGS.maxObservationGapMs) ||
+    !inRange(c.rangeDeadlineMs, SETTINGS.rangeDeadlineMs) || !inRange(c.readFailureHaltMs, SETTINGS.readFailureHaltMs) ||
+    // A poll must fit inside the gap twice (one missed poll is not a gap) and a quote must be allowed to age one poll.
+    c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs || c.readFailureHaltMs < 2 * c.pollMs ||
     ![0, 2].includes(c.includePremarketLeadMinutes) ||
     !Number.isSafeInteger(c.entryWindowMinutes) || c.entryWindowMinutes < ENTRY_WINDOW_MINUTES.min || c.entryWindowMinutes > ENTRY_WINDOW_MINUTES.max)
     throw new Error("Invalid opening-range options configuration");
@@ -193,6 +203,8 @@ interface Position {
 interface SymbolState {
   status: Status; range: SetupRange | null; openingRange: OpeningRange | null; endReason: EndReason | null;
   lastTradeMs: number | null; lastObservationMs: number | null; lastPrice: number | null;
+  /** While the range's bars are pending: the lowest trade observed at or after the range's end, judged by setRange. */
+  lowAfterRangeEnd: number | null;
   position: Position | null; pendingSale: number; pendingReason: SaleReason | null;
 }
 export type OrbIntent =
@@ -202,26 +214,35 @@ export type OrbIntent =
 export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPositions: number }
 export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
+  /** When the opening range ends is a calendar fact; its high and low come from bars that may arrive later. */
+  readonly #rangeEndMs: number;
+  /** When the opening range ends (epoch ms): the one source for the runtime's range window. */
+  get rangeEndMs(): number { return this.#rangeEndMs; }
   constructor(config: OrbOptionsConfig) {
     this.config = parseOrbOptionsConfig(config);
+    this.#rangeEndMs = sessionTimes(this.config.date).open + this.config.openingRangeMinutes * 60000;
     this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null,
-      lastTradeMs: null, lastObservationMs: null, lastPrice: null, position: null, pendingSale: 0, pendingReason: null }]));
+      lastTradeMs: null, lastObservationMs: null, lastPrice: null, lowAfterRangeEnd: null, position: null, pendingSale: 0, pendingReason: null }]));
   }
   setRange(symbol: string, range: OpeningRange): void {
     const s = this.#need(symbol);
     const duration = (this.config.openingRangeMinutes + this.config.includePremarketLeadMinutes) * 60000;
     if (s.status !== "forming" || range.endMs - range.startMs !== duration || !(range.high >= range.low && range.low > 0)) throw new Error("Invalid/finalized opening range");
     s.openingRange = structuredClone(range); s.range = { ...structuredClone(range), setup: "opening_range" }; s.status = "watching";
+    // Trades observed while the bars were pending count: one beneath the low already ended the day. None of them can
+    // enter (the entry rule is a level, so a stock still above the high enters on the next live observation).
+    if (s.lowAfterRangeEnd !== null && s.lowAfterRangeEnd < range.low) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
+    s.lowAfterRangeEnd = null;
   }
   /** No usable opening range: the symbol has no route to an entry today. */
   failRange(symbol: string, reason: "range_unavailable" | "late_first_quote" = "range_unavailable"): void {
     const s = this.#need(symbol); if (s.status !== "forming") throw new Error("Opening range already finalized");
     s.status = "disqualified"; s.endReason = reason;
   }
-  /** End watching for the day (never affects an entry or position already in progress). */
+  /** End watching, or waiting for a range, for the day (never affects an entry or position already in progress). */
   disqualify(symbol: string, reason: EndReason): void {
     const s = this.#need(symbol);
-    if (s.status === "watching") { s.status = "disqualified"; s.endReason = reason; }
+    if (s.status === "watching" || s.status === "forming") { s.status = "disqualified"; s.endReason = reason; }
   }
   /** New entries stop entryWindowMinutes after the open; open positions keep being managed. */
   entryDeadline(): number | null {
@@ -242,6 +263,7 @@ export class OrbOptionsEngine {
     if (s.lastTradeMs !== null && at - s.lastTradeMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
     if (s.lastTradeMs !== null && at <= s.lastTradeMs) return [];
     s.lastTradeMs = at; s.lastPrice = stockPrice;
+    if (s.status === "forming" && at >= this.#rangeEndMs) s.lowAfterRangeEnd = Math.min(s.lowAfterRangeEnd ?? stockPrice, stockPrice);
     if (s.status === "watching" && s.openingRange && at >= s.openingRange.endMs) {
       // The founder's rule: a trade beneath the opening-range low ends the day for this symbol, even if it later rallies.
       // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
@@ -330,7 +352,8 @@ export class OrbOptionsEngine {
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0 || s.pendingReason !== null)
         throw new Error("Checkpoint contains incomplete transaction");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
-        (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)))
+        (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)) ||
+        !(s.lowAfterRangeEnd === null || ((s.status === "forming" || s.status === "disqualified") && Number.isFinite(s.lowAfterRangeEnd) && s.lowAfterRangeEnd > 0)))
         throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;

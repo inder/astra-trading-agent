@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { sessionTimes } from "../src/daily-history.ts";
 import { OrbOptionsEngine, backstopPrice, preferredWeeklyExpiration, parseOpeningRange, parseOrbOptionsConfig,
   replayOpeningRange, selectOrbCall, targetSchedule, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
 
@@ -8,13 +9,14 @@ const config: OrbOptionsConfig = {
   stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
   maximumPositions: 2, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopFraction: .5,
   feeReserveCentsPerContract: 100, maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
+  rangeDeadlineMs: 60000, readFailureHaltMs: 60000,
   includePremarketLeadMinutes: 0, entryWindowMinutes: 90, flattenLeadMinutes: 1,
 };
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 const range = { high: 105, low: 100, startMs: 0, endMs: 120000 };
 /** An open CRWV position: stock entry at 106 (range 100–105), option entry at $4.00, backstop $2.00. */
 const opened = (quantity: number, extra: Partial<OrbOptionsConfig> = {}) => {
-  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000, ...extra }); e.setRange("CRWV", range);
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], ...extra }); e.setRange("CRWV", range);
   assert.equal(e.observe("CRWV", 106, 120001)[0]?.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), quantity, 106, 4, 2);
   return e;
 };
@@ -34,6 +36,31 @@ test("risk and sizing are user settings with validated ranges and cross-checks",
   assert.throws(() => parseOrbOptionsConfig({ ...config, maximumContractsPerTrade: 1 }));           // below the minimum
   assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 10000, budgetCentsPerDay: 10000, minimumContracts: 100 })); // can never fit
   assert.throws(() => parseOrbOptionsConfig({ ...config, symbols: ["MU", "MU"] }));
+  // Timing settings: a poll fits in the gap twice and a quote may age one poll; the gap itself is capped at a minute.
+  assert.equal(parseOrbOptionsConfig({ ...config, pollMs: 250, maxObservationGapMs: 1000, maxQuoteAgeMs: 1000 }).pollMs, 250);
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 3000 }));                        // gap 5 s < two 3 s polls
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 2000, maxQuoteAgeMs: 1500 }));    // quote age under one poll
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxObservationGapMs: 60001 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, rangeDeadlineMs: 600001 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, readFailureHaltMs: 4999 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 1000.5 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 3000, maxObservationGapMs: 6000, readFailureHaltMs: 5000 }));   // halt before two polls
+});
+test("while a range's bars are pending, observations keep the lowest later trade and any gap for when the range arrives", () => {
+  const rangeEnd = sessionTimes(config.date).open + 120000, real = { high: 105, low: 100, startMs: rangeEnd - 120000, endMs: rangeEnd };
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "SOXL", "MU"], maximumPositions: 3 });
+  assert.deepEqual(e.observe("CRWV", 99, rangeEnd - 1000), []);      // traded inside the range itself: never counts against it
+  assert.deepEqual(e.observe("CRWV", 106, rangeEnd + 1000), [], "no entry before the range is known");
+  e.observe("SOXL", 106, rangeEnd); e.observe("SOXL", 99.99, rangeEnd + 1000); e.observe("SOXL", 107, rangeEnd + 2000);
+  e.observe("MU", 104, rangeEnd); e.observe("MU", 104, rangeEnd + 6000);   // a 6 s gap while waiting
+  e.setRange("CRWV", real); e.setRange("SOXL", real);
+  const s = e.snapshot().symbols;
+  assert.equal(s.CRWV!.status, "watching");
+  assert.deepEqual([s.SOXL!.status, s.SOXL!.endReason], ["disqualified", "opening_low_failed"]);
+  assert.deepEqual([s.MU!.status, s.MU!.endReason], ["disqualified", "observation_gap"]);
+  assert.throws(() => e.setRange("MU", real), /finalized/, "a stock already out cannot take a range");
+  assert.equal(e.observe("CRWV", 106, rangeEnd + 2000)[0]?.kind, "enter_calls", "the first live observation above the high enters");
+  assert.equal(s.CRWV!.lowAfterRangeEnd, null, "judged and cleared by setRange");
 });
 test("two exact regular one-minute bars form the opening range", () => {
   const raw = { data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "regular", bars: [
@@ -144,7 +171,7 @@ test("a target fires at exactly its multiple of the entry premium, not a cent be
   const last = sale(e.observeOption("CRWV", 20, 135000)); assert.equal(last.quantity, 1); assert.deepEqual(last.targets, [5]); e.confirmSale("CRWV", 1);
   assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
   // Cents-shaped premiums: $1.37 doubles at $2.74, not $2.73.
-  const odd = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000 }); odd.setRange("CRWV", range);
+  const odd = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); odd.setRange("CRWV", range);
   odd.observe("CRWV", 106, 120001); odd.confirmEntry("CRWV", id(1), 4, 106, 1.37, .69);
   assert.deepEqual(odd.observeOption("CRWV", 2.73, 130000), []); assert.equal(sale(odd.observeOption("CRWV", 2.74, 131000)).quantity, 2);
 });
@@ -247,7 +274,7 @@ test("article-shaped days: CRWV holds its low and breaks out later; SOXL and MU 
   assert.equal(failing.snapshot().symbols.MU!.endReason, "opening_low_failed");
 });
 test("new entries stop at the configurable window; open positions keep being managed", () => {
-  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], entryWindowMinutes: 60, maxObservationGapMs: 3_600_000 });
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], entryWindowMinutes: 60 });
   e.setRange("CRWV", range); e.setRange("MU", range);
   assert.equal(e.observe("CRWV", 106, 59 * 60000)[0]?.kind, "enter_calls");
   e.confirmEntry("CRWV", id(1), 4, 106, 4, 2);
@@ -279,6 +306,7 @@ test("engine state round-trips through a checkpoint, and a tampered checkpoint i
   assert.throws(tamper(t => { t.symbols.CRWV.endReason = "opening_low_failed"; }), /symbol state/); // watching with a reason
   assert.throws(tamper(t => { t.symbols.MU.endReason = "made_up"; }), /symbol state/);
   assert.throws(tamper(t => { t.symbols.CRWV.openingRange = null; }), /symbol state/);          // watching without a range
+  assert.throws(tamper(t => { t.symbols.CRWV.lowAfterRangeEnd = 99; }), /symbol state/);        // a pending low after the range was judged
   // An open position after its first target: the exit-ladder fields round-trip and are validated.
   const open = opened(4); open.observeOption("CRWV", 8, 130000); open.confirmSale("CRWV", 2);
   const good = open.snapshot(), again = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); again.restore(good);

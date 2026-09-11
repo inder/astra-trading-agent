@@ -10,6 +10,7 @@ import { createAgentMcpServer } from "../src/agent-mcp.ts";
 import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
+import { StepError } from "../src/paper-runtime.ts";
 import type { PaperMarket } from "../src/paper-market.ts";
 import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
@@ -175,7 +176,123 @@ test("the opening-low failure is written to the journal with its reason", async 
   f.setTime(open + 120000); f.prices.DEMOA = 104; await runtime.step();
   f.advance(); f.prices.DEMOA = 99.5;
   const events = await runtime.step();
-  assert.deepEqual(events.filter(e => e.type === "setup_disqualified").map(e => e.data), [{ symbol: "DEMOA", reason: "opening_low_failed" }]);
+  assert.deepEqual(events.filter(e => e.type === "setup_disqualified").map(e => e.data),
+    [{ symbol: "DEMOA", reason: "opening_low_failed", price: 99.5, tradeAt: new Date(open + 121000).toISOString() }]);
+});
+test("late bars: stocks are observed while the bars are pending; a low breach then ends the day and no entry comes from that wait", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setBarsReady(false); f.setTime(open + 120000); f.prices.DEMOA = 106; f.prices.DEMOB = 106;
+  const waiting = await runtime.step();                                    // both above the (unknown) high: nothing can enter yet
+  assert.deepEqual(waiting.filter(e => ["opening_range", "paper_entry", "setup_disqualified"].includes(e.type)), []);
+  f.advance(); f.prices.DEMOB = 99.5; await runtime.step();                // DEMOB trades beneath the low before the bars arrive
+  f.advance(); f.prices.DEMOB = 106; f.setBarsReady(true);
+  const arrived = await runtime.step();
+  assert.deepEqual(arrived.filter(e => e.type === "setup_disqualified").map(e => e.data), [{ symbol: "DEMOB", reason: "opening_low_failed", lowSeen: 99.5 }]);
+  assert.deepEqual(arrived.filter(e => e.type === "paper_entry").map(e => (e.data as any).symbol), ["DEMOA"], "DEMOA enters on the first live quote after the range");
+  assert.ok(arrived.findIndex(e => e.type === "opening_range") < arrived.findIndex(e => e.type === "paper_entry"));
+});
+test("bars that never publish skip the stock only after the range deadline, with one data_gap per outage", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.outage("bars"); f.setTime(open + 120000);
+  const journal: any[] = [];
+  for (let s = 0; s <= 60; s++) { if (s === 30) { f.restore(); f.setBarsReady(false); } journal.push(...await runtime.step()); f.advance(); }
+  assert.deepEqual(journal.filter(e => e.type === "setup_disqualified"), [], "still waiting at exactly the deadline");
+  assert.deepEqual(journal.filter(e => e.type === "data_gap").map(e => e.data.source), ["bars"]);
+  assert.deepEqual(journal.filter(e => e.type === "data_restored").map(e => e.data), [{ source: "bars", outageMs: 30000 }]);
+  const late = await runtime.step();
+  assert.deepEqual(late.filter(e => e.type === "setup_disqualified").map(e => e.data),
+    [{ symbol: "DEMOA", reason: "range_unavailable" }, { symbol: "DEMOB", reason: "range_unavailable" }]);
+});
+test("a stock first seen after the opening window cannot use its range, whether or not the range had arrived", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setBarsReady(false, "DEMOB"); f.staleStock(6000); f.setTime(open + 120000);
+  const journal: any[] = [];
+  for (let s = 0; s <= 6; s++) { journal.push(...await runtime.step()); f.advance(); }   // quotes stay 6 s old: nothing observed
+  f.staleStock(0); journal.push(...await runtime.step());                                  // first fresh quotes at open + 127 s
+  assert.deepEqual(journal.filter(e => e.type === "setup_disqualified").map(e => [e.data.symbol, e.data.reason]),
+    [["DEMOA", "late_first_quote"], ["DEMOB", "late_first_quote"]]);
+  f.setBarsReady(true); f.advance(); f.prices.DEMOA = 106; f.prices.DEMOB = 106;
+  const after = await runtime.step();
+  assert.deepEqual(after.filter(e => ["opening_range", "paper_entry"].includes(e.type)), [], "neither can enter or take a range later");
+});
+test("a run resumed while a stock's range was pending manages positions only: that stock is done for the day", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  f.service.paper.configure({ ...setup, symbols: ["DEMOA", "DEMOB"] }); await f.service.paper.start(setup.runId);
+  f.setBarsReady(false, "DEMOB"); f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);
+  assert.equal(f.service.paper.status(setup.runId).view.positions.length, 1);
+  await f.service.paper.stop(setup.runId); f.advance(); f.setBarsReady(true);
+  await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOB = 106; await f.service.paper.tick(setup.runId);
+  const resumed = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events);
+  assert.ok(resumed.some(e => e.type === "setup_disqualified" && (e.data as any).symbol === "DEMOB" && (e.data as any).reason === "resumed_management_only"));
+  assert.equal(resumed.filter(e => e.type === "opening_range" && (e.data as any).symbol === "DEMOB").length, 0);
+  assert.deepEqual(f.service.paper.status(setup.runId).view.positions.map(p => p.symbol), ["DEMOA"]);
+});
+test("with premarket minutes the range still ends at 9:32, and a trade beneath its low while bars are pending ends the day", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 2 }), f.market, f.options.clock);
+  f.setBarsReady(false, "DEMOB"); f.setTime(open + 120000); f.prices.DEMOB = 99.5;
+  const first = await runtime.step();
+  assert.deepEqual(first.filter(e => e.type === "opening_range").map(e => e.data),
+    [{ symbol: "DEMOA", range: { high: 105, low: 100, startMs: open - 120000, endMs: open + 120000 } }]);
+  f.advance(); f.prices.DEMOB = 104; f.setBarsReady(true);
+  const second = await runtime.step();
+  assert.deepEqual(second.filter(e => e.type === "setup_disqualified").map(e => e.data), [{ symbol: "DEMOB", reason: "opening_low_failed", lowSeen: 99.5 }]);
+});
+test("a gap while a range is pending ends that stock's day; the range arriving later does not revive it", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setBarsReady(false); f.setTime(open + 120000); await runtime.step();
+  f.outage("quotes"); for (let s = 0; s < 6; s++) { f.advance(); await runtime.step(); }
+  f.restore(); f.advance();
+  const back = await runtime.step();
+  assert.deepEqual(back.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).symbol, (e.data as any).reason]),
+    [["DEMOA", "observation_gap"], ["DEMOB", "observation_gap"]]);
+  f.setBarsReady(true); f.advance(); f.prices.DEMOA = 106;
+  const later = await runtime.step();
+  assert.deepEqual(later.filter(e => ["opening_range", "paper_entry"].includes(e.type)), []);
+});
+test("an outage that stops mattering closes in the journal: bars once no range is pending", async t => {
+  const f = fixture(t, ["DEMOA"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0, rangeDeadlineMs: 2000 }), f.market, f.options.clock);
+  f.outage("bars"); f.setTime(open + 120000);
+  const journal: any[] = [];
+  for (let s = 0; s < 5; s++) { journal.push(...await runtime.step()); f.advance(); }
+  assert.deepEqual(journal.filter(e => e.type.startsWith("data_") || e.type === "setup_disqualified").map(e => [e.type, e.data.source ?? e.data.reason]),
+    [["data_gap", "bars"], ["setup_disqualified", "range_unavailable"], ["data_gap_ended", "bars"]]);
+  assert.equal(runtime.view().dataGapSince, null);
+});
+test("the journal records the run's own freshness verdict, not the market layer's fixed 5 s flag", async t => {
+  const f = fixture(t, ["DEMOA"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0, maxQuoteAgeMs: 10000 }), f.market, f.options.clock);
+  f.setTime(open + 120000); f.staleStock(7000);
+  const events = await runtime.step();
+  assert.equal((events.find(e => e.type === "quote")!.data as any).fresh, true, "7 s old is fresh under a 10 s setting");
+  assert.notEqual((runtime.view().detail as any).symbols.DEMOA.lastObservationMs, null);
+});
+test("a quote stamped after its own fetch (clock skew) is not an observation and cannot throw", async t => {
+  const f = fixture(t, ["DEMOA"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setTime(open + 120000); f.staleStock(-1); f.prices.DEMOA = 106;
+  await runtime.step();
+  assert.equal((runtime.view().detail as any).symbols.DEMOA.lastObservationMs, null);
+  assert.equal(runtime.view().positions.length, 0);
+});
+test("a slow entry does not cost the other stock its observation that tick, but the next poll's gap is honest", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setTime(open + 120000); await runtime.step();
+  f.slowCalls(6000); f.advance(); f.prices.DEMOA = 106;
+  const first = await runtime.step();
+  assert.deepEqual(first.filter(e => e.type === "paper_entry").map(e => (e.data as any).symbol), ["DEMOA"]);
+  assert.equal((runtime.view().detail as any).symbols.DEMOB.status, "watching", "observed as of the shared fetch, before the slow entry");
+  f.slowCalls(0); f.advance();
+  const second = await runtime.step();
+  assert.deepEqual(second.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOB", "observation_gap"]]);
 });
 test("stop persists positions; explicit restart recovery manages only prior positions", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
@@ -203,12 +320,103 @@ test("duplicate processes and second same-date runs cannot recycle reservations"
   second.paper.configure({ ...setup, runId: "another" });
   await assert.rejects(second.paper.start("another"), /already has a run/);
 });
-test("provider outage halts without losing the last committed paper position", async t => {
-  const f = fixture(t); await entered(f); f.outage(); f.advance();
-  await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
-  assert.equal(f.service.paper.status(setup.runId).status, "error");
-  assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
-  assert.equal(f.service.paper.status(setup.runId).attached, false);
+test("one failed read is a journaled data gap, not a halt; the gap rule still judges watched stocks honestly", async t => {
+  const f = fixture(t); await entered(f);
+  f.outage("quotes"); f.advance(); await f.service.paper.tick(setup.runId);
+  let s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "running"); assert.ok(s.events.some(e => e.type === "data_gap" && (e.data as any).source === "quotes"));
+  assert.equal(s.view.dataGapSince, new Date(open + 122000).toISOString());
+  f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
+  s = f.service.paper.status(setup.runId);
+  assert.deepEqual(s.events.find(e => e.type === "data_restored")?.data, { source: "quotes", outageMs: 1000 });
+  assert.equal((s.view.detail as any).symbols.DEMOB.status, "watching", "two seconds between observations is within the gap");
+  f.outage("quotes"); f.advance(6000); await f.service.paper.tick(setup.runId);
+  f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
+  assert.deepEqual(f.service.paper.status(setup.runId).events.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).symbol, (e.data as any).reason]),
+    [["DEMOB", "observation_gap"], ["DEMOC", "observation_gap"]]);
+});
+test("a sustained outage halts a run holding nothing, but not one whose option prices still manage its exits", async t => {
+  const idle = fixture(t); idle.service.paper.configure(setup); await idle.service.paper.start(setup.runId);
+  idle.setTime(open + 120000); await idle.service.paper.tick(setup.runId);
+  idle.outage("quotes"); idle.advance(); await idle.service.paper.tick(setup.runId);
+  idle.advance(60000); await idle.service.paper.tick(setup.runId);                       // out exactly 60 s: not yet
+  idle.advance(1); await assert.rejects(idle.service.paper.tick(setup.runId), /halted/);
+  const halted = idle.service.paper.status(setup.runId);
+  assert.equal(halted.status, "error"); assert.match((halted.events.at(-1)!.data as any).detail, /Market data unavailable for more than 60 s/);
+  // Holding a position with option prices still arriving: the equity outage is journaled and the bid-driven exits work.
+  const held = fixture(t); await entered(held);
+  held.outage("quotes"); held.advance(); await held.service.paper.tick(setup.runId);
+  held.advance(61000); await held.service.paper.tick(setup.runId);
+  assert.equal(held.service.paper.status(setup.runId).status, "running");
+  // The bid halves: the backstop sells, and with nothing left held the outage halts in the same step, keeping the sale.
+  held.setBid(2); held.advance(); await assert.rejects(held.service.paper.tick(setup.runId), /halted/);
+  assert.deepEqual(held.service.paper.status(setup.runId).events.map(e => e.type === "paper_sale" ? `sale:${(e.data as any).reason}` : e.type),
+    ["sale:broker_backstop", "run_halted"]);
+  assert.equal(held.service.paper.status(setup.runId).view.realizedPnlCents, -80000);
+  // Holding a position with option prices out too: halt, keeping the committed position for recovery or settlement.
+  const dark = fixture(t); await entered(dark);
+  dark.outage(); dark.advance(); await dark.service.paper.tick(setup.runId);
+  dark.advance(60001); await assert.rejects(dark.service.paper.tick(setup.runId), /halted/);
+  assert.equal(dark.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
+  assert.equal(dark.service.paper.status(setup.runId).attached, false);
+});
+test("an option-price outage alone never halts: exits wait for a fresh bid and unsold contracts are written off", async t => {
+  const f = fixture(t); await entered(f);
+  f.outage("options"); f.advance(); await f.service.paper.tick(setup.runId);
+  f.advance(61000); f.prices.DEMOA = 99; await f.service.paper.tick(setup.runId);   // the stock stop fires, but no bid can fill it
+  let s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "running"); assert.equal(s.view.positions[0]?.quantity, 4); assert.notEqual(s.view.dataGapSince, null);
+  assert.ok(s.events.some(e => e.type === "sale_deferred"));
+  f.setTime(close); await f.service.paper.tick(setup.runId);
+  s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "completed"); assert.equal(s.view.realizedPnlCents, -160000);
+  assert.equal(f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "paper_sale").length, 0, "no invented fill");
+});
+test("a code defect inside a read halts the run with its message instead of passing as an outage", async t => {
+  const f = fixture(t); await entered(f);
+  f.market.optionQuotes = async () => { throw new TypeError("test-only defect: cannot read bid of undefined"); };
+  f.advance(); await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
+  const halted = f.service.paper.status(setup.runId);
+  assert.equal(halted.status, "error"); assert.match((halted.events.at(-1)!.data as any).detail, /test-only defect/);
+  assert.equal(halted.view.positions[0]?.quantity, 4);
+});
+test("a halted step keeps the events it produced and the runtime's own state", async t => {
+  const f = fixture(t); let state = 0;
+  const plugin: AgentStrategy = { id: "test-only-halting", version: "1", name: "Halting test strategy", description: "Test only",
+    capabilities: ["continuous_paper"], preview: value => value, runSample: () => ({ events: [], summary: {} }),
+    paperFactory: () => ({ async step() { state = 7; throw new StepError(new Error("test-only storage failure"), [{ type: "paper_entry", data: { symbol: "X" } }]); },
+      async control() { throw new Error("No positions"); }, checkpoint: () => ({ state }),
+      view: () => ({ positions: [], committedCents: 0, realizedPnlCents: 0, unrealizedPnlCents: 0, lastQuoteAt: null, complete: false, detail: {} }) }) };
+  const service = new TradingAgentService(f.directory, [plugin], undefined, f.options);
+  try {
+    service.paper.configure({ ...setup, strategyId: plugin.id }); await service.paper.start(setup.runId);
+    await assert.rejects(service.paper.tick(setup.runId), /halted/);
+    const halted = service.paper.status(setup.runId);
+    assert.equal(halted.status, "error"); assert.deepEqual(halted.checkpoint, { state: 7 });
+    assert.deepEqual(halted.events.map(e => e.type), ["paper_entry", "run_halted"]);
+    assert.match((halted.events[1]!.data as any).detail, /storage failure/);
+  } finally { await service.close(); }
+});
+test("the controller's timer follows the runtime's poll interval", async t => {
+  const f = fixture(t); let steps = 0;
+  const plugin: AgentStrategy = { id: "test-only-fast", version: "1", name: "Fast test strategy", description: "Test only",
+    capabilities: ["continuous_paper"], preview: value => value, runSample: () => ({ events: [], summary: {} }),
+    paperFactory: () => ({ pollMs: 50, async step() { steps++; return []; }, async control() { throw new Error("No positions"); }, checkpoint: () => ({}),
+      view: () => ({ positions: [], committedCents: 0, realizedPnlCents: 0, unrealizedPnlCents: 0, lastQuoteAt: null, complete: false, detail: {} }) }) };
+  const auto = new TradingAgentService(f.directory, [plugin], undefined, { ...f.options, auto: true });
+  try {
+    auto.paper.configure({ ...setup, strategyId: plugin.id }); await auto.paper.start(setup.runId);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.ok(steps >= 4, `${steps} steps in 400 ms at a 50 ms poll`);
+  } finally { await auto.close(); }
+});
+test("a detached run's marks go stale on the run's own quote-age setting", async t => {
+  const f = fixture(t); f.service.paper.configure({ ...setup, maxQuoteAgeMs: 10000 }); await f.service.paper.start(setup.runId);
+  f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);
+  await f.service.paper.stop(setup.runId); f.advance(7000);
+  assert.equal(f.service.paper.status(setup.runId).view.unrealizedPnlCents, -4000, "a 7 s old mark is inside a 10 s setting");
+  f.advance(4000); assert.equal(f.service.paper.status(setup.runId).view.unrealizedPnlCents, null);
 });
 test("session-close simulation flattens at the fresh bid one minute before the close", async t => {
   const f = fixture(t); await entered(f); f.setTime(close - 60000);
@@ -246,8 +454,8 @@ test("a run stopped while holding contracts settles after the close: they are wr
   await assert.rejects(f.service.paper.start(setup.runId, true), /expired/, "settled exactly once");
 });
 test("settlement needs no market data or authorization: a halted run settles while every read fails", async t => {
-  const f = fixture(t); await entered(f); f.outage(); f.advance();
-  await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
+  const f = fixture(t); await entered(f); f.outage(); f.advance(); await f.service.paper.tick(setup.runId);
+  f.advance(60001); await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
   f.setTime(close + 60000);
   const fail = async (): Promise<never> => { throw new Error("test-only: no market data after the close"); };
   const dead: PaperMarket = { quotes: fail, bars: fail, calls: fail, optionQuotes: fail };
@@ -272,12 +480,14 @@ test("a crashed run left running with a dead owner process settles after the clo
 });
 test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses new entries from then", async t => {
   const f = fixture(t, ["DEMOA", "DEMOB"]);
-  const config = { ...openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0, entryWindowMinutes: 390, flattenLeadMinutes: 10 }),
-    maxObservationGapMs: 8 * 3_600_000 };   // lets the test jump to the afternoon without an observation-gap disqualification
+  const config = openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0, entryWindowMinutes: 390, flattenLeadMinutes: 10,
+    maxObservationGapMs: 60000 });
   const runtime = new OrbPaperRuntime(config, f.market, f.options.clock);
   f.setTime(open + 120000); await runtime.step();
   f.advance(); f.prices.DEMOA = 106; await runtime.step();
   assert.equal(runtime.view().positions.length, 1);
+  // Poll through the afternoon inside the observation gap, so DEMOB is still watched when the close-out begins.
+  for (let at = open + 171000; at < close - 600001; at += 50000) { f.setTime(at); await runtime.step(); }
   f.setTime(close - 600001); assert.deepEqual((await runtime.step()).filter(e => e.type === "paper_sale"), []);
   f.setTime(close - 600000); f.prices.DEMOB = 106;
   const events = await runtime.step();
@@ -351,6 +561,15 @@ test("chat settings arrive in human units and are pinned to the run in internal 
     backstopPercent: 40, stopBufferPercent: .7, flattenLeadMinutes: 5 })).content as any)[0].text).config;
   assert.deepEqual([exits.firstTargetMultiple, exits.middleTargetMultiple, exits.finalTargetMultiple, exits.backstopFraction, exits.stopBufferFraction,
     exits.flattenLeadMinutes], [1.5, 2.5, 4, .4, .007, 5]);   // .7% pins exactly 0.007, no float noise
+  assert.deepEqual([defaults.pollMs, defaults.maxQuoteAgeMs, defaults.maxObservationGapMs, defaults.rangeDeadlineMs, defaults.readFailureHaltMs],
+    [1000, 5000, 5000, 60000, 60000]);
+  const timing = JSON.parse(((await configure({ runId: "timing", pollSeconds: .5, maxQuoteAgeSeconds: 10, maxObservationGapSeconds: 15,
+    rangeDeadlineSeconds: 90, readFailureHaltSeconds: 120 })).content as any)[0].text).config;
+  assert.deepEqual([timing.pollMs, timing.maxQuoteAgeMs, timing.maxObservationGapMs, timing.rangeDeadlineMs, timing.readFailureHaltMs],
+    [500, 10000, 15000, 90000, 120000]);
+  assert.ok((await configure({ runId: "gap", pollSeconds: 1, maxObservationGapSeconds: 1.5 })).isError, "a gap must hold two polls");
+  const rounded = JSON.parse(((await configure({ runId: "rounded", pollSeconds: .2505 })).content as any)[0].text).config;
+  assert.equal(rounded.pollMs, 251, "seconds become whole milliseconds, rounded half up");
   assert.ok((await configure({ runId: "unordered", firstTargetMultiple: 3, middleTargetMultiple: 3 })).isError, "targets must rise");
   assert.ok((await configure({ runId: "backstop", backstopPercent: 100 })).isError, "a backstop at the entry premium is not a stop");
   assert.ok((await configure({ runId: "fractional", maxPremiumPerTradeDollars: 1000.5 })).isError, "dollars must be whole");

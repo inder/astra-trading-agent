@@ -41,15 +41,22 @@ No real-account readiness or trading performance is claimed.
 - PAPER only: no real orders, live flag, account holdings or account-wide P&L.
 - Assumed ask/bid fills, no execution guarantees, partial fills or actual fees.
   P&L excludes fees; missing marks are unavailable, never zero-valued marks.
-- Target one-second polling is not streaming. Latency and five-second freshness/
-  gap checks can conservatively skip entries; unseen crossings remain possible.
+- Polling (default one second) is not streaming. Latency and the freshness/gap
+  settings (default five seconds) can conservatively skip entries; unseen crossings
+  remain possible. A slow entry that holds up polling past the gap drops the other
+  stocks still being watched, honestly; faster entries arrive in the next slice.
+- A single failed read is a journaled data gap, not a halt; sustained failures
+  (default 60 s) halt, except that open positions keep being managed on option
+  prices through an equity-quote outage. An option-price outage alone never halts:
+  exits wait for a fresh bid and anything unsold at the close is written off.
 - Memory-only tokens: restart needs authorization and explicit recovery.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio
   follows its client. No launch daemon, cloud hosting or public client OAuth.
-- Strategy 0.6.0 replaced the stock-gain trims with option-price targets. Paper
-  runs configured under an earlier version cannot resume or be reconfigured under
-  the same runId; configure a new runId.
+- Strategy 0.7.0 made market-data timing configurable (0.6.0 replaced the
+  stock-gain trims with option-price targets). Paper runs configured under an
+  earlier version cannot resume or be reconfigured under the same runId; configure
+  a new runId.
 - Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover;
   after session end a stopped run can only be settled (unsold contracts written off).
 - Contracts with no fresh bid by the close are written off at -100%. No invented

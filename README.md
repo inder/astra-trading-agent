@@ -183,8 +183,14 @@ candle's high and low (optionally including the last two premarket minutes). A
 trade above the high buys; a trade below the low first ends the day for that stock,
 even if it later rallies. New entries stop after a configurable window
 (`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
-positions are managed all day. Prices are polled about once a second, so a dip
-below the low that reverses between polls can be missed.
+positions are managed all day. Prices are polled about once a second
+(`pollSeconds`), so a dip below the low that reverses between polls can be missed.
+If the first candle's bars publish late, Astra retries them for up to a minute
+(`rangeDeadlineSeconds`) while it keeps watching prices; a trade below the low in
+that wait still ends the day, and nothing enters until the range is known. A
+stock first seen more than `maxObservationGapSeconds` (default 5) after the first
+candle, or unseen for longer than that at any point before an entry, is dropped for
+the day rather than assuming a path it did not see.
 
 Premium is treated as money that can be lost entirely, so the caps are the risk
 control: by default $2,000 per trade and $4,000 per day (including a $1 per
@@ -225,7 +231,14 @@ recovery until a fresh bid fills it.
 Simulation assumes fresh ask entry and fresh bid sales, **not executions**. It
 does not model queue position, partial fills, market impact or actual fees. P&L
 excludes fees; stale marks become unavailable. Polled quotes cannot prove no
-unseen intrasecond crossing occurred. Data errors halt the run for inspection.
+unseen intrasecond crossing occurred. A failed market-data read is journaled as
+a `data_gap` (and `data_restored` when it recovers) and polling continues. The run
+halts for inspection only after reads fail for longer than
+`readFailureHaltSeconds` (default 60); while it holds positions whose option
+prices still arrive, an equity-quote outage does not halt it, so the targets, the
+backstop and the close-out keep working. An outage of option prices alone never
+halts either: exits wait for a fresh bid (never an invented one), the status shows
+`dataGapSince`, and contracts still unsold at the close are written off.
 
 ## Persistence and stopping
 

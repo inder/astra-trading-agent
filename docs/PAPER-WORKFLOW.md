@@ -4,6 +4,13 @@ This is the acceptance path for **Astra Trading Agent for Robinhood**. Everythin
 here is simulation, with no broker orders. Start the server and attach a compatible
 local MCP chat client using the README instructions. The client supplies the LLM.
 
+## Guided setup
+
+You don't need this walkthrough to get started: send any message and Astra leads.
+Its server instructions and `get_readiness` guide tell the chat model what to
+explain at each step and the one question to ask, with a suggested answer. The
+sections below are the same path, tool by tool, for acceptance testing.
+
 ## Discover and authorize
 
 Ask which strategies are available and what needs connecting. `list_strategies`

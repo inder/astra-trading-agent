@@ -115,18 +115,26 @@ If a client restart is still required, report that as pending, not as connected.
 
 Report the installed revision, location, client connection and verification
 outcome without exposing secrets. State that no market strategy is running.
+When the current chat cannot see Astra's tools until the client restarts, end
+your report with the installer's `tellUser` text, word for word, as the one
+thing the user does next. Do not ask them to come back and verify: Astra's first
+reply after the restart shows it loaded.
 
-## 5. Onboard brokerage separately
+## 5. Astra leads onboarding
 
-The installed server works before Robinhood is connected. When the user is ready,
-call `connect_robinhood` through that running server and give them its browser
-authorization link. The user reviews and approves on Robinhood; never request
-passwords/tokens/codes in chat or approve consent on their behalf. Check broker
-status afterward. Memory-only credentials require authorization after restart.
+After the restart the user sends any message. Astra's server instructions and
+the guide returned by `get_readiness` (and by every setup tool, as `next`) lead
+from there: each step explains what Astra can do, then asks one question with a
+suggested answer. The steps are connecting Robinhood market data (the approval
+happens on Robinhood's site in a browser on this computer; `wait_for_robinhood`
+notices it, so nobody types "done"), choosing stocks (`check_symbols` checks
+them), saving the plan, and starting it on a trading morning after the user's
+explicit yes. Never request passwords/tokens/codes in chat or approve consent on
+the user's behalf. Memory-only credentials require authorization after restart.
 
 Do not use the short-lived `npm run connect` diagnostic as the ongoing server's
-connection. Configure/start a paper strategy only after the user requests it.
-Follow [the complete paper walkthrough](docs/PAPER-WORKFLOW.md). Market-hours
+connection. Installation never configures or starts a paper strategy. See
+[the complete paper walkthrough](docs/PAPER-WORKFLOW.md). Market-hours
 freshness is a separate acceptance check. No real order support is included.
 
 ## Updates and removal

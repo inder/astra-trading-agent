@@ -1,6 +1,6 @@
 import { RobinhoodMarketData, type EquityMarketQuote, validateSymbols } from "./market-data.ts";
 import type { RobinhoodConnection } from "./broker-connection.ts";
-import { loadOrbContracts, parseAvailableOrbCallQuotes } from "./option-source.ts";
+import { eligibleChains, loadOrbContracts, parseAvailableOrbCallQuotes } from "./option-source.ts";
 import type { CallQuote, OrbCallContract } from "./orb-options.ts";
 
 export interface OptionCatalog { expiration: string; contracts: OrbCallContract[] }
@@ -30,6 +30,12 @@ export class RobinhoodPaperMarket implements PaperMarket {
         this.#broker.read("get_option_instruments", { chain_id, expiration_dates: expiration_dates.join(","), type: "call", state: "active", tradability: "tradable", ...(cursor ? { cursor } : {}) }),
       optionQuotes: (instrument_ids: readonly string[]) => this.#broker.read("get_option_quotes", { instrument_ids }),
     }, symbol, date);
+  }
+  /** Expiry dates listed on the stock's tradable option chains: one provider read, no instruments or quotes. */
+  async listedExpirations(symbol: string): Promise<string[]> {
+    validateSymbols([symbol]);
+    const chains = eligibleChains(await this.#broker.read("get_option_chains", { underlying_symbol: symbol }), symbol);
+    return [...new Set<string>(chains.flatMap(c => c.expiration_dates.filter((d: unknown) => typeof d === "string")))].sort();
   }
   async optionQuotes(ids: string[]) {
     if (!ids.length || ids.length > 20 || new Set(ids).size !== ids.length || ids.some(id => !/^[a-f0-9-]{36}$/.test(id))) throw new Error("Invalid option IDs");

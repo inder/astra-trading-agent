@@ -1,55 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { RobinhoodConnection, ROBINHOOD_MCP_URL, robinhoodFetch, SessionOAuthProvider, type BrokerToolClient } from "../src/broker-connection.ts";
+import { ROBINHOOD_MCP_URL, robinhoodFetch, SessionOAuthProvider } from "../src/broker-connection.ts";
 import { normalizeMarketQuotes, RobinhoodMarketData } from "../src/market-data.ts";
-
-const metadata = { issuer: ROBINHOOD_MCP_URL, authorization_endpoint: "https://robinhood.com/oauth",
-  token_endpoint: "https://api.robinhood.com/oauth2/token/", registration_endpoint: "https://agent.robinhood.com/oauth/trading/register",
-  response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
-  code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], scopes_supported: ["internal"] };
-const row = (now: number) => ({ quote: { symbol: "DEMOA", state: "active", has_traded: true, last_trade_price: "100",
-  venue_last_trade_time: new Date(now).toISOString(), last_non_reg_trade_price: "99", venue_last_non_reg_trade_time: new Date(now - 60000).toISOString(),
-  bid_price: "99.99", ask_price: "100.01", venue_bid_time: new Date(now).toISOString(), venue_ask_time: new Date(now).toISOString() } });
-function fixture(options: { ttlMs?: number; listing?: { name: string }[] } = {}) {
-  let redirect = "", tokenRequests = 0, verifier = "", closed = 0;
-  const calls: string[] = [];
-  const fakeFetch: typeof fetch = async (input, init) => {
-    const url = String(input);
-    if (url.includes("oauth-protected-resource")) return Response.json({ resource: ROBINHOOD_MCP_URL, authorization_servers: [ROBINHOOD_MCP_URL], scopes_supported: ["internal"] });
-    if (url.includes("oauth-authorization-server")) return Response.json(metadata);
-    if (url.endsWith("/register")) {
-      const client = JSON.parse(init!.body as string); redirect = client.redirect_uris[0];
-      assert.equal(client.token_endpoint_auth_method, "none");
-      return Response.json({ ...client, client_id: "test-public-client" }, { status: 201 });
-    }
-    if (url.endsWith("/token/")) {
-      tokenRequests++; const form = new URLSearchParams(init!.body as string);
-      assert.equal(form.get("redirect_uri"), redirect); assert.equal(form.get("code"), "test-code");
-      verifier = form.get("code_verifier")!; assert.ok(verifier.length >= 43);
-      return Response.json({ access_token: "test-access-secret", refresh_token: "test-refresh-secret", token_type: "Bearer", expires_in: 3600 });
-    }
-    throw new Error("Unexpected fake endpoint");
-  };
-  const client: BrokerToolClient = {
-    listTools: async () => ({ tools: options.listing ?? [{ name: "get_equity_quotes" }, { name: "place_option_order" }] }),
-    callTool: async ({ name }) => { calls.push(name); return { structuredContent: { data: { results: [row(Date.now())] } } }; },
-    close: async () => { closed++; },
-  };
-  const connection = new RobinhoodConnection({
-    authorize: (provider, args) => auth(provider, { ...args, fetchFn: robinhoodFetch(fakeFetch) }),
-    connect: async provider => { assert.equal(provider.tokens()?.access_token, "test-access-secret"); return client; },
-    ttlMs: options.ttlMs ?? 60000,
-  });
-  return { connection, calls, redirect: () => redirect, tokenRequests: () => tokenRequests, verifier: () => verifier, closed: () => closed };
-}
-function callback(authorizationUrl: string, redirect: string, stateOverride?: string) {
-  const url = new URL(redirect);
-  url.searchParams.set("code", "test-code");
-  url.searchParams.set("state", stateOverride ?? new URL(authorizationUrl).searchParams.get("state")!);
-  return url;
-}
+import { brokerFixture as fixture, callback, row } from "./broker-fixture.ts";
 
 test("SDK OAuth discovery, registration and PKCE complete without disk credentials; mutations stay blocked", async t => {
   const f = fixture(); t.after(() => f.connection.close());
@@ -84,6 +38,48 @@ test("authorization expiry closes callback and leaves no connected credentials",
   await f.connection.begin();
   await new Promise(ok => setTimeout(ok, 60));
   assert.equal(f.connection.status().state, "not_connected"); assert.equal(f.tokenRequests(), 0);
+});
+test("waiting for approval returns connected as soon as the browser approval lands", async t => {
+  const f = fixture(); t.after(() => f.connection.close());
+  const begun = await f.connection.begin() as any, started = Date.now();
+  const waiting = f.connection.waitForAuthorization(10000);
+  assert.equal((await fetch(callback(begun.authorizationUrl, f.redirect()))).status, 200);
+  const result = await waiting;
+  assert.equal(result.outcome, "connected"); assert.equal(result.state, "connected"); assert.equal(result.authorizationExpiresAt, null);
+  assert.ok(Date.now() - started < 5000);
+  assert.equal((await f.connection.waitForAuthorization(10000)).outcome, "connected");   // already connected: at once
+});
+test("waiting stops at its limit while the link is open, and reports when the link expires", async t => {
+  const f = fixture(); t.after(() => f.connection.close());
+  await f.connection.begin();
+  const started = Date.now(), result = await f.connection.waitForAuthorization(300);
+  assert.equal(result.outcome, "still_waiting"); assert.equal(result.state, "awaiting_authorization");
+  assert.ok(Date.now() - started >= 300 && Date.now() - started < 2000);
+  assert.ok(Date.parse(result.authorizationExpiresAt!) > Date.now());
+  assert.equal(f.connection.status().authorizationExpiresAt, result.authorizationExpiresAt);
+});
+test("waiting reports an expired link, a declined approval, and no pending approval, without starting one", async t => {
+  const expiring = fixture({ ttlMs: 100 }); t.after(() => expiring.connection.close());
+  await expiring.connection.begin();
+  assert.equal((await expiring.connection.waitForAuthorization(5000)).outcome, "expired");
+  const declined = fixture(); t.after(() => declined.connection.close());
+  const begun = await declined.connection.begin() as any, waiting = declined.connection.waitForAuthorization(5000);
+  const url = callback(begun.authorizationUrl, declined.redirect()); url.searchParams.set("error", "access_denied");
+  await fetch(url);
+  assert.equal((await waiting).outcome, "declined_or_failed");
+  const idle = fixture(); t.after(() => idle.connection.close());
+  const started = Date.now(), result = await idle.connection.waitForAuthorization(10000);
+  assert.equal(result.outcome, "no_pending_approval"); assert.equal(result.state, "not_connected");
+  assert.ok(Date.now() - started < 1000); assert.equal(idle.redirect(), "");   // no approval flow was begun
+});
+test("a cancelled wait ends promptly and leaves the approval open", async t => {
+  const f = fixture(); t.after(() => f.connection.close());
+  await f.connection.begin();
+  const controller = new AbortController(), started = Date.now();
+  setTimeout(() => controller.abort(), 100);
+  const result = await f.connection.waitForAuthorization(10000, controller.signal);
+  assert.equal(result.outcome, "still_waiting"); assert.ok(Date.now() - started < 2000);
+  assert.equal(f.connection.status().state, "awaiting_authorization");
 });
 test("missing required provider tools fails closed after authorization", async t => {
   const f = fixture({ listing: [{ name: "place_option_order" }] }); t.after(() => f.connection.close());

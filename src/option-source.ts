@@ -17,13 +17,16 @@ export function parseAvailableOrbCallQuotes(raw: unknown, ids: readonly string[]
   return result;
 }
 const uuid = (s: unknown): s is string => typeof s === "string" && /^[a-f0-9-]{36}$/.test(s);
-export async function loadOrbContracts(source: OrbOptionSource, symbol: string, date: string): Promise<{ expiration: string; contracts: OrbCallContract[] }> {
-  const raw: any = await source.equityCallChains(symbol);
+/** Standard 100-share option chains on the stock itself that can open positions. */
+export function eligibleChains(raw: any, symbol: string): any[] {
   if (!Array.isArray(raw?.data?.chains) || raw.data.next) throw new Error("Incomplete option chains");
-  const chains = raw.data.chains.filter((x: any) => x && x.symbol === symbol && x.can_open_position === true && uuid(x.id) &&
+  return raw.data.chains.filter((x: any) => x && x.symbol === symbol && x.can_open_position === true && uuid(x.id) &&
     Number(x.trade_value_multiplier) === 100 && (x.cash_component == null || Number(x.cash_component) === 0) && Array.isArray(x.expiration_dates) &&
     Array.isArray(x.underlying_instruments) && x.underlying_instruments.length === 1 && x.underlying_instruments.every((u: any) =>
       u && typeof u.instrument === "string" && u.instrument.length && (u.symbol === "" || u.symbol === symbol)));
+}
+export async function loadOrbContracts(source: OrbOptionSource, symbol: string, date: string): Promise<{ expiration: string; contracts: OrbCallContract[] }> {
+  const chains = eligibleChains(await source.equityCallChains(symbol), symbol);
   const expiration = preferredWeeklyExpiration(chains.flatMap((x: any) => x.expiration_dates), date);
   if (!expiration) throw new EntrySkip("no_qualifying_expiry");
   const contracts: OrbCallContract[] = [];

@@ -8,6 +8,8 @@ import { RobinhoodMarketData } from "./market-data.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
+import { setupGuide, type GuideRun } from "./setup-guide.ts";
+import { checkSymbols, type SymbolSource } from "./symbol-check.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
 export interface AgentRun extends SampleResult {
@@ -25,14 +27,39 @@ export class TradingAgentService {
   readonly paper: PaperController;
   readonly reviews: PaperReviews;
   #closing?: Promise<void>;
+  #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection(),
-    testing: { market?: PaperMarket; ready?: () => boolean; clock?: () => number; auto?: boolean } = {}) {
+    testing: { market?: PaperMarket; symbols?: SymbolSource; ready?: () => boolean; clock?: () => number; auto?: boolean } = {}) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
     this.broker = broker; this.market = new RobinhoodMarketData(broker);
     if (new Set(strategies.map(s => s.id)).size !== strategies.length) throw new Error("Duplicate strategy ID");
-    this.paper = new PaperController(this.dataDirectory, strategies, testing.market ?? new RobinhoodPaperMarket(broker),
-      testing.ready ?? (() => this.broker.status().paperDataAvailable), testing.clock, testing.auto);
+    const live = new RobinhoodPaperMarket(broker);
+    this.#clock = testing.clock ?? Date.now; this.#ready = testing.ready ?? (() => this.broker.status().paperDataAvailable);
+    this.#symbols = testing.symbols ?? live;
+    this.paper = new PaperController(this.dataDirectory, strategies, testing.market ?? live, this.#ready, testing.clock, testing.auto);
     this.reviews = new PaperReviews(this.paper);
+  }
+  /** The next step for the user, from live broker and run state. */
+  guide() {
+    const status = this.broker.status(), runs: GuideRun[] = [], unreadable: string[] = [];
+    // One unreadable record is named and left out rather than taking the guide down; its state is never guessed.
+    for (const id of this.paper.ids()) {
+      try {
+        const r = this.paper.status(id);
+        // Completed runs are history; only the others need their saved plan.
+        runs.push({ runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsSettlement: r.needsSettlement,
+          positions: r.view.positions.length, ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
+      } catch { unreadable.push(id); }
+    }
+    return setupGuide({ now: this.#clock(), strategyId: this.strategies.find(s => s.paperFactory)?.id ?? "", runs, unreadable,
+      broker: { state: status.state, paperDataAvailable: this.#ready(), authorizationExpiresAt: status.authorizationExpiresAt } });
+  }
+  /** Tickers checked against the session the guide would plan next. */
+  async checkSymbols(symbols: string[]) {
+    if (!this.#ready()) throw new Error("Connect Robinhood market data first");
+    const date = this.guide().session?.date;
+    if (!date) throw new Error("No supported session to check against");
+    return checkSymbols(this.#symbols, symbols, date);
   }
   close() {
     return this.#closing ??= (async () => {
@@ -46,15 +73,10 @@ export class TradingAgentService {
       brokerDetails: this.broker.status(),
       requiresOpenAIKey: false, capabilities: ["strategy_discovery", "configuration_preview", "synthetic_sample_runs", "run_history", "browser_authorization", "connected_equity_quotes", "continuous_paper_runs", "paper_pnl", "browser_reviewed_paper_position_changes", "explicit_recovery"],
       unavailable: ["real_orders", "brokerage_position_mutations"],
-      onboarding: [
-        "Discover strategies and preview a configuration without credentials.",
-        "Run the bundled synthetic sample and inspect its events.",
-        "Use connect_robinhood to obtain a browser authorization link on the server's machine. Credentials remain in memory; never paste them into chat.",
-        "Configure a paper strategy for a supported session, then explicitly start it before the opening candle completes. Required market-data tools must be authorized.",
-        "Inspect paper status, events and estimated P&L. Propose a trim or close and review it in your local browser.",
-        "A running HTTP process survives chat disconnection, not process exit. Restart requires authorization and explicit management-only recovery of existing paper positions.",
-      ] };
+      guide: this.#guideOrNull() };
   }
+  // Readiness must answer even when run storage can't be read.
+  #guideOrNull() { try { return this.guide(); } catch { return null; } }
   catalog() { return this.strategies.map(({ id, version, name, description, capabilities }) => ({ id, version, name, description, capabilities })); }
   #strategy(id: string) {
     const strategy = this.strategies.find(s => s.id === id);

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
+import { SUPPORTED_YEARS } from "./daily-history.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: "0.3.0" });
@@ -54,9 +55,10 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     });
   const runId = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
   const runSchema = z.object({ runId }).strict();
-  const date = z.string().regex(/^2026-\d{2}-\d{2}$/);
+  const years = `${SUPPORTED_YEARS[0]}–${SUPPORTED_YEARS.at(-1)}`;
+  const date = z.string().regex(new RegExp(`^(${SUPPORTED_YEARS.join("|")})-\\d{2}-\\d{2}$`));
   const paperWrite = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
-  server.registerTool("configure_paper_strategy", { description: "Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports 2026 only.",
+  server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
     inputSchema: z.object({ ...configSchema, runId, date }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
     a => guarded(() => service.paper.configure(a)));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",

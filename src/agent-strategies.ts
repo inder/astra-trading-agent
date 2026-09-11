@@ -1,4 +1,4 @@
-import { OrbOptionsEngine, selectOrbCall, type OrbIntent, type OrbOptionsConfig } from "./orb-options.ts";
+import { OrbOptionsEngine, preferredWeeklyExpiration, selectOrbCall, type OrbIntent, type OrbOptionsConfig } from "./orb-options.ts";
 import { openingRangeConfig, type StrategySetupInput } from "./orb-config.ts";
 import type { PaperFactory } from "./paper-runtime.ts";
 import { OrbPaperRuntime } from "./orb-paper-runtime.ts";
@@ -16,7 +16,7 @@ export interface AgentStrategy {
 // Transport-independent plug-in contract: no chat, filesystem, credentials or broker.
 
 export const openingRangeStrategy: AgentStrategy = {
-  id: "opening-range-options", version: "0.2.0", name: "Opening-range call options",
+  id: "opening-range-options", version: "0.3.0", name: "Opening-range call options",
   description: "Deterministic strict opening-range and drive-then-balance call-option strategy.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
   paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
@@ -33,6 +33,9 @@ export const openingRangeStrategy: AgentStrategy = {
       engine.setRange(symbol, range); emit("opening_range", { symbol, ...range });
     }
     let committedCents = 0;
+    // The sample's invented chain lists this Friday and next; the live expiry rule picks among them.
+    const expiration = preferredWeeklyExpiration(["2026-09-11", "2026-09-18"], config.date);
+    if (!expiration) throw new Error("Sample chain has no qualifying expiry");
     const handle = (intent: OrbIntent) => {
       emit("strategy_intent", intent);
       if (intent.kind === "enter_calls") {
@@ -40,10 +43,10 @@ export const openingRangeStrategy: AgentStrategy = {
         const id = `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`;
         const at = new Date(intent.at).toISOString();
         const selection = selectOrbCall([{
-          id, symbol: intent.symbol, expiration: "2026-09-11", strike: 101, multiplier: 100,
-          tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:00:00Z",
+          id, symbol: intent.symbol, expiration, strike: 101, multiplier: 100,
+          tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: `${expiration}T19:00:00Z`,
         }], [{ id, bid: 3.9, ask: 4, askSize: 10, updatedAt: at, retrievedAt: at }],
-        intent.symbol, "2026-09-11", intent.stockPrice, config, intent.at);
+        intent.symbol, expiration, intent.stockPrice, config, intent.at);
         if (!selection) { engine.failEntry(intent.symbol); emit("entry_skipped", { symbol: intent.symbol, reason: "selection_failed" }); return; }
         committedCents += selection.committedCents;
         engine.confirmEntry(intent.symbol, id, selection.quantity, intent.stockPrice);

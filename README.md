@@ -181,8 +181,13 @@ The first strategy supports strict opening-range and separate drive-then-balance
 setups, with optional final-two-minute premarket range inclusion. It allows two
 to four calls per entry, at most two tickers/session, $2,000 including a $1 per
 contract fee reserve per ticker, $4,000 total. Proceeds never replenish the budget.
-Selection prefers the nearest Friday expiration, four contracts, then three,
-then two; within that quantity, nearer strikes and tighter spreads win.
+The expiry is the first week-ending expiration at least three trading sessions
+out, counting the trade day: Monday–Wednesday trades use that week's Friday,
+Thursday and Friday trades use the following Friday, and holiday weeks count real
+sessions (a Thursday expiry when Friday is a holiday). If that expiration is not
+listed, the stock is skipped for the day rather than traded in a later expiry.
+Selection prefers four contracts, then three, then two; within that quantity,
+nearer strikes and tighter spreads win.
 
 The stock's range low minus 0.1% is the protective threshold. A breach below it
 requests all remaining calls be sold. An unfilled protective exit stays pending
@@ -218,7 +223,8 @@ explicitly resume existing positions. Recovery allows no new entries after a
 gap and no expired sessions. The runner attempts to flatten simulated positions
 one minute before close; missing valid quotes leave unresolved positions visible,
 without pretending to sell, exercise or manage them overnight. There is no
-automatic date rollover. The exchange calendar supports **2026 only**.
+automatic date rollover. The exchange calendar covers **2026–2027** (NYSE
+holidays and early closes); anything outside it is refused, not guessed.
 
 A crash during ownership acquisition can leave an `acquiring` guard. It blocks
 automatic recovery for offline inspection. Never repair ownership while another

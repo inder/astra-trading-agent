@@ -1,4 +1,4 @@
-import { isTradingDay } from "./daily-history.ts";
+import { addDays, isTradingDay, isWeekEnder, tradingSessionsBetween } from "./daily-history.ts";
 import { timestamp } from "./validation.ts";
 export interface CallQuote { id: string; bid: number; ask: number; askSize: number; updatedAt: string; retrievedAt: string }
 
@@ -181,9 +181,21 @@ export interface OrbCallSelection {
   premiumCents: number; feeReserveCents: number; committedCents: number;
   relativeSpread: number; quoteUpdatedAt: string;
 }
-export function nearestPreferredExpiration(expirations: readonly string[], date: string): string | null {
-  const active = [...new Set(expirations)].filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= date).sort();
-  return active.find(d => new Date(d + "T00:00:00Z").getUTCDay() === 5) ?? active[0] ?? null;
+/** A deliberate no-entry decision (a rule said no), as opposed to missing or stale data. */
+export class EntrySkip extends Error {
+  readonly reason: string;
+  constructor(reason: string) { super(reason); this.reason = reason; }
+}
+export const MIN_EXPIRY_SESSIONS = 3;
+/** Founder rule (2026-09-10): the first week-ending expiry with at least 3 trading sessions counting the
+ *  trade day — Mon–Wed trades use that Friday, Thu/Fri the next; holiday weeks count real sessions (the
+ *  Wednesday before Thanksgiving gets the following Friday). The target must be LISTED; otherwise null,
+ *  because a later expiry is a different trade. Mon/Wed daily expiries are never chosen. */
+export function preferredWeeklyExpiration(listed: readonly string[], date: string): string | null {
+  if (!isTradingDay(date)) throw new Error("Unsupported trade date");
+  for (let d = date, i = 0; i < 21; d = addDays(d, 1), i++)
+    if (isWeekEnder(d) && tradingSessionsBetween(date, d) >= MIN_EXPIRY_SESSIONS) return listed.includes(d) ? d : null;
+  throw new Error("No week-ending expiry within three weeks");
 }
 export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: readonly CallQuote[], symbol: string,
   expiration: string, stockPrice: number, c: OrbOptionsConfig, now: number): OrbCallSelection | null {

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
-import { ENTRY_WINDOW_MINUTES } from "./orb-options.ts";
+import { ENTRY_WINDOW_MINUTES, SETTINGS } from "./orb-options.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: "0.3.0" });
@@ -59,10 +59,26 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const years = `${SUPPORTED_YEARS[0]}–${SUPPORTED_YEARS.at(-1)}`;
   const date = z.string().regex(new RegExp(`^(${SUPPORTED_YEARS.join("|")})-\\d{2}-\\d{2}$`));
   const paperWrite = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+  // Human units at the chat edge (whole dollars, whole numbers); parseOrbOptionsConfig re-validates in internal units.
+  const dollars = (r: { min: number; max: number }) => z.number().int().min(r.min / 100).max(r.max / 100).optional();
+  const whole = (r: { min: number; max: number }) => z.number().int().min(r.min).max(r.max).optional();
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
-    inputSchema: z.object({ ...configSchema, runId, date, entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
-      .describe(`Minutes after the 9:30 ET open during which new entries may start; default ${ENTRY_WINDOW_MINUTES.default} (11:00 ET). Open positions are managed all day.`) }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
-    a => guarded(() => service.paper.configure(a)));
+    inputSchema: z.object({ ...configSchema, runId, date,
+      entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
+        .describe(`Minutes after the 9:30 ET open during which new entries may start; default ${ENTRY_WINDOW_MINUTES.default} (11:00 ET). Open positions are managed all day.`),
+      maxPremiumPerTradeDollars: dollars(SETTINGS.budgetCentsPerPosition).describe(`Most premium one trade may commit, treated as money that can be lost entirely; default $${SETTINGS.budgetCentsPerPosition.default / 100}.`),
+      maxPremiumPerDayDollars: dollars(SETTINGS.budgetCentsPerDay).describe(`Most premium committed per day across trades (sales never refund it); default $${SETTINGS.budgetCentsPerDay.default / 100}.`),
+      minimumContracts: whole(SETTINGS.minimumContracts).describe(`Fewest contracts per entry; the strike nearest the money that fits this many is chosen, then filled to the cap. Default ${SETTINGS.minimumContracts.default}.`),
+      maximumContractsPerTrade: whole(SETTINGS.maximumContractsPerTrade).describe("Optional ceiling on contracts per entry; by default only the displayed ask size limits the fill."),
+      maximumPositions: whole(SETTINGS.maximumPositions).describe(`Most stocks entered per day; default ${SETTINGS.maximumPositions.default}.`),
+      maxOptionSpreadPercent: z.number().min(SETTINGS.maxOptionSpreadFraction.min * 100).max(SETTINGS.maxOptionSpreadFraction.max * 100).optional()
+        .describe(`Widest bid-ask spread accepted, as a percent of the midpoint; default ${SETTINGS.maxOptionSpreadFraction.default * 100}.`),
+      feeReserveCentsPerContract: whole(SETTINGS.feeReserveCentsPerContract).describe(`Cents reserved per contract for fees inside the cap; default ${SETTINGS.feeReserveCentsPerContract.default}.`),
+    }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
+    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
+      budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
+      budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
+      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100 })));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. Does not place real orders.",

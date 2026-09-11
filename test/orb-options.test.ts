@@ -5,7 +5,7 @@ import { OrbOptionsEngine, preferredWeeklyExpiration, parseOpeningRange, parseOr
 
 const config: OrbOptionsConfig = {
   date: "2026-09-08", symbols: ["CRWV", "SOXL", "MU", "INTC"], openingRangeMinutes: 2,
-  stopBufferFraction: .001, budgetCentsPerPosition: 200000, minimumContracts: 2, preferredContracts: 4,
+  stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
   maximumPositions: 2, trimGainFraction: .05, maximumTrimSteps: 4, feeReserveCentsPerContract: 100,
   maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
   includePremarketLeadMinutes: 0, entryWindowMinutes: 90,
@@ -13,10 +13,16 @@ const config: OrbOptionsConfig = {
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 const range = { high: 105, low: 100, startMs: 0, endMs: 120000 };
 
-test("configuration locks the agreed risk and sizing rules", () => {
+test("risk and sizing are user settings with validated ranges and cross-checks", () => {
   assert.equal(parseOrbOptionsConfig(config).budgetCentsPerPosition, 200000);
-  assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 200001 }));
-  assert.throws(() => parseOrbOptionsConfig({ ...config, maximumPositions: 3 }));
+  assert.equal(parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 100000, budgetCentsPerDay: 100000, maximumPositions: 3 }).maximumPositions, 3);
+  assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 9999 }));          // below $100
+  assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerDay: 199999 }));             // day cap under the trade cap
+  assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 150000.5, budgetCentsPerDay: 400000 })); // not whole cents
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maximumPositions: 11 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxOptionSpreadFraction: 0.51 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maximumContractsPerTrade: 1 }));           // below the minimum
+  assert.throws(() => parseOrbOptionsConfig({ ...config, budgetCentsPerPosition: 10000, budgetCentsPerDay: 10000, minimumContracts: 100 })); // can never fit
   assert.throws(() => parseOrbOptionsConfig({ ...config, symbols: ["MU", "MU"] }));
 });
 test("two exact regular one-minute bars form the opening range", () => {
@@ -49,17 +55,64 @@ test("weekly expiry ignores nearer daily expiries and never falls back to a non-
   assert.equal(preferredWeeklyExpiration(["2026-09-09", "2026-09-11", "2026-09-18"], "2026-09-08"), "2026-09-11");
   assert.equal(preferredWeeklyExpiration(["2026-09-09", "2026-09-10"], "2026-09-08"), null);
 });
-test("selector prefers four then three then two and never exceeds all-in budget", () => {
-  const now = Date.parse("2026-09-08T15:00:00Z"), retrieved = new Date(now).toISOString();
-  const contracts = [100, 105, 110].map((strike, i) => ({ id: id(i + 1), symbol: "CRWV", expiration: "2026-09-11", strike, multiplier: 100 as const, tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" }));
-  const quotes = [
-    { id: id(1), bid: 8.9, ask: 9, askSize: 20, updatedAt: retrieved, retrievedAt: retrieved }, // only 2, nearest ITM
-    { id: id(2), bid: 4.8, ask: 5, askSize: 20, updatedAt: retrieved, retrievedAt: retrieved }, // only 3 after fee reserve
-    { id: id(3), bid: 4.7, ask: 4.8, askSize: 20, updatedAt: retrieved, retrievedAt: retrieved }, // four
-  ];
-  const selected = selectOrbCall(contracts, quotes, "CRWV", "2026-09-11", 104, config, now)!;
-  assert.equal(selected.quantity, 4); assert.equal(selected.contract.strike, 110); assert.ok(selected.committedCents <= 200000);
-  assert.equal(selectOrbCall(contracts, quotes.map(q => ({ ...q, ask: 10.01, bid: 10 })), "CRWV", "2026-09-11", 104, config, now), null);
+const sel = { ...config, minimumContracts: 4 };
+const chain = (symbol: string, rows: [strike: number, bid: number, ask: number, askSize: number][], now: number) => {
+  const at = new Date(now).toISOString();
+  return {
+    contracts: rows.map(([strike], i) => ({ id: id(i + 1), symbol, expiration: "2026-09-11", strike, multiplier: 100 as const, tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" })),
+    quotes: rows.map(([, bid, ask, askSize], i) => ({ id: id(i + 1), bid, ask, askSize, updatedAt: at, retrievedAt: at })),
+  };
+};
+test("selector takes the strike nearest the money where at least 4 fit, then fills to the cap", () => {
+  const now = Date.parse("2026-09-08T15:00:00Z");
+  // Stock at 104. 105 is nearest but 4 × $5.01 > $2k; 100 is ITM at $9; 110 fits exactly 4.
+  const { contracts, quotes } = chain("CRWV", [[100, 8.9, 9, 20], [105, 4.8, 5, 20], [110, 4.7, 4.8, 20]], now);
+  const picked = selectOrbCall(contracts, quotes, "CRWV", "2026-09-11", 104, sel, now)!;
+  assert.equal(picked.contract.strike, 110); assert.equal(picked.quantity, 4); assert.ok(picked.committedCents <= 200000);
+  // A nearer strike that fits wins, filled to the cap but not past the displayed ask size.
+  const withNear = chain("CRWV", [[102, 1.95, 2, 6], [110, 4.7, 4.8, 20]], now);
+  assert.deepEqual([selectOrbCall(withNear.contracts, withNear.quotes, "CRWV", "2026-09-11", 104, sel, now)!.contract.strike,
+    selectOrbCall(withNear.contracts, withNear.quotes, "CRWV", "2026-09-11", 104, sel, now)!.quantity], [102, 6]);
+  const deep = chain("CRWV", [[102, 1.95, 2, 500]], now);
+  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, sel, now)!.quantity, 9);   // floor($2,000 / $201 per contract: $2.00 x 100 + $1 fee reserve)
+  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, { ...sel, maximumContractsPerTrade: 5 }, now)!.quantity, 5);
+  // An in-the-money strike is eligible when it is nearest and fits.
+  const itm = chain("CRWV", [[103, 1.45, 1.5, 50], [106, 0.95, 1, 50]], now);
+  assert.equal(selectOrbCall(itm.contracts, itm.quotes, "CRWV", "2026-09-11", 104, sel, now)!.contract.strike, 103);
+  // Fewer than 4 at the ask disqualifies a strike; no fallback to 3 or 2.
+  const thin = chain("CRWV", [[102, 1.95, 2, 3]], now);
+  assert.equal(selectOrbCall(thin.contracts, thin.quotes, "CRWV", "2026-09-11", 104, sel, now), null);
+  // The caller's remaining day budget is the cap: $1,000 still fits 4 at $2.01; $500 does not.
+  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, sel, now, 100000)!.quantity, 4);
+  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, sel, now, 50000), null);
+});
+test("on the article's day the distance from the money follows the stock price", () => {
+  // Black-Scholes calls, 3.5 days to expiry; asks carry a 2% spread. CRWV/SOXL fit 4 near the money; MU at $1,041 cannot.
+  const N = (x: number) => { const t = 1 / (1 + .2316419 * Math.abs(x)), d = .3989423 * Math.exp(-x * x / 2);
+    const p = d * t * (.3193815 + t * (-.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); return x > 0 ? 1 - p : p; };
+  const call = (S: number, K: number, v: number, T = 3.5 / 365) => { const d1 = (Math.log(S / K) + v * v * T / 2) / (v * Math.sqrt(T)); return S * N(d1) - K * N(d1 - v * Math.sqrt(T)); };
+  const now = Date.parse("2026-09-08T15:00:00Z");
+  const pick = (symbol: string, S: number, v: number, strikes: number[]) => {
+    const rows = strikes.map(K => { const ask = Math.max(.05, Math.round(call(S, K, v) * 100) / 100); return [K, Math.round(ask * 98) / 100, ask, 50] as [number, number, number, number]; });
+    const { contracts, quotes } = chain(symbol, rows, now);
+    return selectOrbCall(contracts, quotes, symbol, "2026-09-11", S, { ...sel, symbols: [symbol] }, now)!;
+  };
+  const range = (from: number, to: number, step: number) => Array.from({ length: Math.round((to - from) / step) + 1 }, (_, i) => from + i * step);
+  const crwv = pick("CRWV", 95.3, .9, range(80, 110, 1)), soxl = pick("SOXL", 125.4, .9, range(110, 140, 1)), mu = pick("MU", 1041, .6, range(950, 1150, 5));
+  assert.ok(Math.abs(crwv.contract.strike - 95.3) <= 1 && crwv.quantity >= 4 && crwv.committedCents <= 200000, JSON.stringify(crwv.contract));
+  assert.ok(Math.abs(soxl.contract.strike - 125.4) <= 1 && soxl.quantity >= 4 && soxl.committedCents <= 200000, JSON.stringify(soxl.contract));
+  const muOtm = mu.contract.strike / 1041 - 1;
+  assert.ok(muOtm > .03 && muOtm < .08 && mu.quantity >= 4 && mu.committedCents <= 200000, `MU strike ${mu.contract.strike}`);
+});
+test("larger positions trim proportionally so the fourth level exits fully", () => {
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000 }); e.setRange("CRWV", range);
+  assert.equal(e.observe("CRWV", 106, 120001)[0]?.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), 8, 100);
+  const sold: number[] = [];
+  for (const [i, price] of [105, 110, 115, 120].entries()) {
+    const intent = e.observe("CRWV", price, 130000 + i * 1000)[0];
+    assert.ok(intent?.kind === "sell_to_close"); sold.push(intent.quantity); e.confirmSale("CRWV", intent.quantity);
+  }
+  assert.deepEqual(sold, [2, 2, 2, 2]); assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
 });
 test("a trade beneath the opening-range low ends the day for that symbol; first two breakouts take both slots", () => {
   const e = new OrbOptionsEngine(config); for (const s of config.symbols) e.setRange(s, range);

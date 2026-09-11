@@ -36,8 +36,15 @@ export async function verifyRegisteredCodexClient() {
     child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
     const thread = await request("thread/start", { cwd: process.cwd(), ephemeral: true });
     const threadId = thread.thread.id;
-    const inventory = await request("mcpServerStatus/list", { threadId });
-    const server = inventory.data.find((item: any) => item.name === "astra-trading-agent");
+    // Codex starts MCP servers asynchronously; a single read right after thread/start can still say "starting".
+    // Poll until startup settles (up to 30 s), then require "connected" — a failed or missing server still fails.
+    let server: any;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const inventory = await request("mcpServerStatus/list", { threadId });
+      server = inventory.data.find((item: any) => item.name === "astra-trading-agent");
+      if (server?.runtimeStatus !== "starting") break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
     assert.equal(server?.runtimeStatus, "connected");
     for (const name of ["get_readiness", "list_strategies", "run_sample"]) assert.ok(server.tools[name]);
     async function call(tool: string, args: unknown) {

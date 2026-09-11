@@ -20,7 +20,7 @@ production trading system or a claim of strategy profitability.
 
 ### Install through your coding agent
 
-One-line request:
+One-line prompt for your chatbot:
 
 > Install Astra Trading Agent for Robinhood from https://github.com/inder/astra-trading-agent using its INSTALL.md instructions.
 

@@ -70,7 +70,7 @@ export class ReplayMarket implements PaperMarket {
     return symbols.map(symbol => {
       const price = this.price(symbol, now);
       return price === null
-        ? { symbol, price: null, tradeAt: null, retrievedAt, ageMs: null, fresh: false, regularSession: true, state: "unavailable", bid: null, ask: null }
+        ? { symbol, price: null, tradeAt: null, retrievedAt, ageMs: null, fresh: false, regularSession: false, state: "unavailable", bid: null, ask: null }
         : { symbol, price, tradeAt: new Date(second).toISOString(), retrievedAt, ageMs: now - second, fresh: true, regularSession: true, state: "active", bid: null, ask: null };
     });
   }
@@ -100,7 +100,9 @@ export class ReplayMarket implements PaperMarket {
     return { expiration, contracts };
   }
   async optionQuotes(ids: string[]): Promise<CallQuote[]> {
-    if (!ids.length || ids.length > 20) throw new Error("Invalid option IDs");   // the provider's per-request limit
+    // The same request rules as the real provider: 1 to 20 distinct, well-formed ids, all of them known.
+    if (!ids.length || ids.length > 20 || new Set(ids).size !== ids.length || ids.some(id => !/^[a-f0-9-]{36}$/.test(id) || !this.#contracts.has(id)))
+      throw new Error("Invalid option IDs");
     const now = this.#o.clock(), at = new Date(now).toISOString();
     return ids.flatMap(id => {
       const k = this.#contracts.get(id), stock = k && this.price(k.symbol, now);

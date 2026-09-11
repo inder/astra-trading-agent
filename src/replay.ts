@@ -22,7 +22,9 @@ export interface ReplayResult {
 }
 /** Runs the session tick by tick on a simulated clock, from a minute before the open (catalog prefetch) to the close. */
 export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
-  const { open } = sessionTimes(input.date), pollMs = input.settings.pollMs ?? 1000, firstTick = open - 60000;
+  const { open, close } = sessionTimes(input.date), pollMs = input.settings.pollMs ?? 1000, firstTick = open - 60000;
+  // Claims compare tick times with whole seconds and whole minutes, so ticks must land on both.
+  if (pollMs % 1000 || 60000 % pollMs) throw new Error("Replay needs a poll interval of whole seconds that divides a minute");
   let now = firstTick; const clock = () => now;
   const market = new ReplayMarket({ regular: input.regular, clock, volatility: input.volatility, barLagMs: input.barLagMs });
   const service = new TradingAgentService(input.dataDir, undefined, undefined, { market, clock, ready: () => true, auto: false });
@@ -35,6 +37,8 @@ export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
       try { status = await service.paper.tick(runId); } catch (error) { halted = String((error as Error).message); break; }
       for (const p of status.view.positions) if (p.stage === "breakeven" && breakevenAt[p.symbol] === undefined) breakevenAt[p.symbol] = now;
       if (status.status === "completed") break;
+      // A run that is still going an hour after the close is a failure to report, not a loop to keep spinning.
+      if (now > close + 3600000) { halted = "the run did not complete by the close"; break; }
       now += pollMs;
     }
     const events: ReplayEvent[] = [];
@@ -43,21 +47,23 @@ export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
       if (!pages.length) break;
       for (const page of pages) { for (const e of page.events) events.push({ at: Date.parse(page.at), type: e.type, data: e.data }); after = page.revision; }
     }
-    const final = service.paper.status(runId);
-    return { events, breakevenAt, halted, complete: final.status === "completed", ordersSubmitted: final.ordersSubmitted, pollMs, firstTick };
+    const final = service.paper.status(runId), stoppedBy = events.findLast(e => e.type === "run_halted")?.data?.detail;
+    return { events, breakevenAt, halted: halted && stoppedBy ? `${halted}: ${stoppedBy}` : halted, complete: final.status === "completed",
+      ordersSubmitted: final.ordersSubmitted, pollMs, firstTick };
   } finally { await service.close(); }
 }
 
 /** What the fixtures themselves imply for each stock: its opening range and the first second of the modeled path above
  *  the high or below the low (the same path the replay trades on). */
 export function openingOutcomes(regular: BarsFile, date: string) {
-  const { open } = sessionTimes(date);
+  const symbols = regular.data.results.map(r => r.symbol);
+  const rangeEnd = sessionTimes(date).open + openingRangeConfig({ date, symbols, includePremarketLeadMinutes: 0 }).openingRangeMinutes * 60000;
   return Object.fromEntries(regular.data.results.map(r => {
     const bars = [...r.bars].sort((a, b) => Date.parse(a.begins_at) - Date.parse(b.begins_at));
-    const first = bars.filter(b => Date.parse(b.begins_at) < open + 120000);
+    const first = bars.filter(b => Date.parse(b.begins_at) < rangeEnd);
     const range = { high: Math.max(...first.map(b => +b.high_price)), low: Math.min(...first.map(b => +b.low_price)) };
     let firstAbove: number | null = null, firstBelow: number | null = null;
-    for (const bar of bars.filter(b => Date.parse(b.begins_at) >= open + 120000)) {
+    for (const bar of bars.filter(b => Date.parse(b.begins_at) >= rangeEnd)) {
       for (let s = 0; s < 60 && (firstAbove === null || firstBelow === null); s++) {
         const price = pathPrice(bar, s), at = Date.parse(bar.begins_at) + s * 1000;
         if (firstBelow === null && price < range.low) firstBelow = at;
@@ -74,7 +80,9 @@ export interface Claim { id: string; claim: string; modeled: boolean; pass: bool
 export function checkOracle(result: ReplayResult, regular: BarsFile, date: string, settings: StrategySettings,
   expected: { enters: string[]; lowFails: string[] }): Claim[] {
   const { open, close } = sessionTimes(date), c = openingRangeConfig({ date, symbols: [...expected.enters, ...expected.lowFails], includePremarketLeadMinutes: 0, ...settings });
-  const outcomes = openingOutcomes(regular, date), claims: Claim[] = [];
+  const outcomes = openingOutcomes(regular, date), claims: Claim[] = [], rangeEnd = open + c.openingRangeMinutes * 60000;
+  const missing = [...expected.enters, ...expected.lowFails].filter(s => !outcomes[s]);
+  if (missing.length) throw new Error(`The fixtures have no bars for ${missing.join(", ")}`);
   const of = (type: string, symbol?: string) => result.events.filter(e => e.type === type && (!symbol || e.data?.symbol === symbol));
   const add = (id: string, claim: string, modeled: boolean, pass: boolean, detail: string) => claims.push({ id, claim, modeled, pass, detail });
   // Nothing may pass by default: a write-off, a deferred sale, a data gap or a halt would also leave nothing held at the close.
@@ -86,7 +94,8 @@ export function checkOracle(result: ReplayResult, regular: BarsFile, date: strin
   for (const symbol of expected.lowFails) {
     const o = outcomes[symbol]!, d = of("setup_disqualified", symbol).find(e => e.data.reason === "opening_low_failed");
     add(`${symbol}-low`, `${symbol} trades below its opening low first and is out for the day within the first minute after the range`, false,
-      !!d && o.firstBelow !== null && (o.firstAbove === null || o.firstBelow < o.firstAbove) && d.at < open + 180000 && !of("paper_entry", symbol).length,
+      !!d && o.firstBelow !== null && (o.firstAbove === null || o.firstBelow < o.firstAbove) && d.at >= o.firstBelow && d.at < rangeEnd + 60000 &&
+        !of("paper_entry", symbol).length,
       d ? `opening_low_failed at ${et(d.at)}${o.firstAbove !== null ? `; its high breaks only at ${et(o.firstAbove)}` : ""}` : "not disqualified for its opening low");
   }
   for (const symbol of expected.enters) {
@@ -155,15 +164,26 @@ export function loadFixtures(dir: string, date: string): { regular: BarsFile; sy
 const USAGE = "usage: npm run replay -- <YYYY-MM-DD> [--fixtures DIR] [--iv SYMBOL=0.9,...] [--lag SECONDS] [--check] [--out DIR]";
 const ORACLE_1 = { date: "2026-09-08", enters: ["CRWV"], lowFails: ["SOXL", "MU"] };
 async function main(argv: string[]): Promise<number> {
-  const flag = (name: string) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
+  const flag = (name: string) => {
+    const i = argv.indexOf(name); if (i < 0) return undefined;
+    const value = argv[i + 1]; if (value === undefined || value.startsWith("--")) throw new Error(`${name} needs a value\n${USAGE}`);
+    return value;
+  };
+  const positive = (text: string, name: string, zero = false) => {
+    const v = Number(text); if (!Number.isFinite(v) || v < 0 || (!zero && v === 0)) throw new Error(`${name} must be a ${zero ? "non-negative" : "positive"} number\n${USAGE}`);
+    return v;
+  };
   const date = argv[0];
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { console.error(USAGE); return 2; }
   const root = flag("--fixtures") ?? process.env.ASTRA_REPLAY_FIXTURES;
   if (!root) { console.error(`Replay fixtures are private and not in this repository: pass --fixtures DIR or set ASTRA_REPLAY_FIXTURES.\n${USAGE}`); return 1; }
   const dir = join(root, date), { regular, symbols } = loadFixtures(dir, date);
   const volatility = Object.fromEntries(symbols.map(s => [s, 0.9]));
-  for (const pair of (flag("--iv") ?? "").split(",").filter(Boolean)) { const [s, v] = pair.split("="); volatility[s!] = Number(v); }
-  const lagMs = Number(flag("--lag") ?? 0) * 1000, out = flag("--out") ?? join(dir, "replay-output");
+  for (const pair of (flag("--iv") ?? "").split(",").filter(Boolean)) {
+    const [s, v] = pair.split("="); if (!s || !symbols.includes(s)) throw new Error(`--iv names ${s}, which the fixtures do not have\n${USAGE}`);
+    volatility[s] = positive(v ?? "", `--iv ${s}`);
+  }
+  const lagMs = positive(flag("--lag") ?? "0", "--lag", true) * 1000, out = flag("--out") ?? join(dir, "replay-output");
   mkdirSync(out, { recursive: true });
   const run = (label: string, extra: { volatility?: Record<string, number>; barLagMs?: number; settings?: StrategySettings } = {}) =>
     runReplay({ date, symbols, regular, volatility: extra.volatility ?? volatility, barLagMs: extra.barLagMs ?? lagMs, settings: extra.settings ?? {},

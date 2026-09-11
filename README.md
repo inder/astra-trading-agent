@@ -254,7 +254,7 @@ paper service on a simulated clock. Real minute bars, which you keep privately
 low, high, close, so the replay can understate a winner but never invent an entry
 the minute does not support. Option prices are **modeled**: Black-Scholes at a
 stated volatility (`--iv SYMBOL=0.9`), zero rate, calendar time to expiry, a 4%
-spread, and an assumed strike grid. The output marks every modeled number. The
+spread, and an assumed strike grid within 30% of the day's open. The output marks every modeled number. The
 folder `DIR/<date>/` needs a `manifest.json` and `bars-minute-regular.json` with
 every regular-session minute for every listed stock; anything missing or partial
 is refused, never skipped. `--lag SECONDS` delays bar publication (the range-retry
@@ -262,7 +262,7 @@ path). `--check` evaluates the article's day, 2026-09-08: which stock must enter
 at its first trade above the opening high, which must lose their opening low
 first, and how the exits must end, each claim labeled when modeled prices decide
 it, plus late-bar, all-day-window and volatility variants. Journals go to
-`DIR/<date>/replay-output` unless `--out` says otherwise.
+`DIR/<date>/replay-output` (a new folder per run) unless `--out` says otherwise.
 
 ## Persistence and stopping
 

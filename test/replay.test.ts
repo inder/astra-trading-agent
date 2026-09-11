@@ -31,7 +31,7 @@ const demoC = day([bar(0, 70.5, 71, 70, 70.6), bar(1, 70.6, 70.9, 70.2, 70.6), b
 const bars: BarsFile = { data: { results: [["DEMOA", demoA], ["DEMOB", demoB], ["DEMOC", demoC]].map(([symbol, list]) =>
   ({ symbol: symbol as string, interval: "minute", bounds: "regular", bars: list as MinuteBar[] })) } };
 // One replay of the invented day through the paper service, shared by the tests below; coarse polling keeps it quick.
-const settings = { pollMs: 20000, maxQuoteAgeMs: 20000, maxObservationGapMs: 60000 };
+const settings = { pollMs: 20000, maxQuoteAgeMs: 20000, maxObservationGapMs: 60000, heartbeatMs: 600000 };   // few revisions, fewer disk flushes
 const dataDir = mkdtempSync(join(tmpdir(), "astra-replay-test-")); after(() => rmSync(dataDir, { recursive: true, force: true }));
 let shared: Promise<ReplayResult> | undefined;
 const replayed = () => shared ??= runReplay({ date, symbols: ["DEMOA", "DEMOB", "DEMOC"], regular: bars,
@@ -64,6 +64,8 @@ test("the replay market trades every second, publishes bars after their minute, 
   const [a, f] = await market.optionQuotes([atm.id, far.id]);
   assert.ok(a!.bid > 0 && a!.ask > a!.bid && f!.ask < a!.ask, JSON.stringify([a, f]));
   await assert.rejects(market.optionQuotes(catalog.contracts.slice(0, 21).map(k => k.id)), /Invalid option IDs/);
+  await assert.rejects(market.optionQuotes([atm.id, atm.id]), /Invalid option IDs/, "duplicates are refused, as by the provider");
+  await assert.rejects(market.optionQuotes(["00000000-0000-4000-8000-00000000ffff"]), /Invalid option IDs/, "so are ids it never listed");
 });
 test("a replay through the paper service meets its claims: the breakout enters, low failures never do, even a both-break bar", async () => {
   const result = await replayed();
@@ -83,10 +85,32 @@ test("the claims fail for the wrong reasons: a write-off, a stock dropped by ano
   // DEMOB dropped by the entry window instead of its opening low must not count as the low rule working.
   const windowed = { ...result, events: result.events.map(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" ? { ...e, data: { ...e.data, reason: "entry_window_closed" } } : e) };
   assert.ok(checkOracle(windowed, bars, date, settings, { enters: [], lowFails: ["DEMOB"] }).some(k => k.id === "DEMOB-low" && !k.pass));
+  // The modeled claims fail too: over the cap, the wrong first-target quantity, breakeven before the target.
+  const edit = (type: string, change: (d: any) => any) => ({ ...result, events: result.events.map(e => e.type === type && e.data.symbol === "DEMOA" ? { ...e, data: change(e.data) } : e) });
+  const fails = (r: ReplayResult, id: string) => checkOracle(r, bars, date, settings, { enters: ["DEMOA"], lowFails: [] }).some(k => k.id === id && !k.pass);
+  assert.ok(fails(edit("paper_entry", d => ({ ...d, committedCents: 200001 })), "DEMOA-size"));
+  assert.ok(fails(edit("paper_entry", d => ({ ...d, strike: d.stockPrice * 1.1 })), "DEMOA-size"), "a strike 10% away is not near the money");
+  let first = true;
+  assert.ok(fails(edit("paper_sale", d => first && d.reason === "profit_target" ? (first = false, { ...d, quantity: d.quantity - 1 }) : d), "DEMOA-first-target"));
+  const target = result.events.find(e => e.type === "paper_sale" && e.data.reason === "profit_target")!;
+  assert.ok(fails({ ...result, breakevenAt: { DEMOA: target.at - 1 } }, "DEMOA-breakeven"));
+  // A low disqualification earlier than the fixture's first trade below the low is not the rule working.
+  const early = { ...result, events: result.events.map(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" ? { ...e, at: open + 120000 } : e) };
+  assert.ok(checkOracle(early, bars, date, settings, { enters: [], lowFails: ["DEMOB"] }).some(k => k.id === "DEMOB-low" && !k.pass));
   // An entry one poll after the first observed trade above the high is not the breakout entry.
   const late = { ...result, events: result.events.map(e => e.type === "option_selection" && e.data.symbol === "DEMOA"
     ? { ...e, data: { ...e.data, stock: { ...e.data.stock, tradeAt: new Date(Date.parse(e.data.stock.tradeAt) + settings.pollMs).toISOString() } } } : e) };
   assert.ok(checkOracle(late, bars, date, settings, { enters: ["DEMOA"], lowFails: [] }).some(k => k.id === "DEMOA-entry" && !k.pass));
+});
+test("bars published late take the range-retry path and the claims still hold", async t => {
+  const lagDir = mkdtempSync(join(tmpdir(), "astra-replay-test-")); t.after(() => rmSync(lagDir, { recursive: true, force: true }));
+  const result = await runReplay({ date, symbols: ["DEMOA", "DEMOB", "DEMOC"], regular: bars, volatility: { DEMOA: 0.9, DEMOB: 0.9, DEMOC: 0.9 },
+    barLagMs: 30000, settings, dataDir: lagDir });
+  assert.deepEqual(checkOracle(result, bars, date, settings, { enters: ["DEMOA"], lowFails: ["DEMOB", "DEMOC"] }).filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`), []);
+  assert.ok(result.events.some(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" && e.data.lowSeen !== undefined),
+    "DEMOB's low was judged when its late range arrived");
+  await assert.rejects(runReplay({ date, symbols: ["DEMOA"], regular: bars, volatility: {}, barLagMs: 0, settings: { ...settings, pollMs: 7000 }, dataDir: lagDir }),
+    /divides a minute/);
 });
 test("the replay refuses missing or incomplete fixtures loudly instead of skipping", () => {
   const root = mkdtempSync(join(tmpdir(), "astra-replay-fixtures-"));
@@ -102,5 +126,12 @@ test("the replay refuses missing or incomplete fixtures loudly instead of skippi
     assert.throws(() => loadFixtures(join(root, date), date), /200 of 390/);
     const partial = cli(date, "--fixtures", root);
     assert.equal(partial.status, 1); assert.match(partial.stderr, /200 of 390/);
+    // With complete fixtures, malformed flags are refused before anything runs.
+    writeFileSync(join(root, date, "bars-minute-regular.json"), JSON.stringify({ data: { results: [{ symbol: "DEMOA", interval: "minute", bounds: "regular", bars: demoA }] } }));
+    for (const [args, message] of [[["--lag", "abc"], /--lag must be/], [["--iv", "DEMOA=abc"], /--iv DEMOA must be/],
+      [["--iv", "NOPE=0.9"], /do not have/], [["--out", "--check"], /--out needs a value/]] as const) {
+      const bad = cli(date, "--fixtures", root, ...args);
+      assert.equal(bad.status, 1, args.join(" ")); assert.match(bad.stderr, message);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

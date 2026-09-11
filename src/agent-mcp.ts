@@ -3,29 +3,33 @@ import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
 import { ENTRY_WINDOW_MINUTES, SETTINGS } from "./orb-options.ts";
+import { SERVER_INSTRUCTIONS } from "./setup-guide.ts";
+import { SYMBOL_PROBLEMS } from "./symbol-check.ts";
 import { VERSION } from "./version.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
-  const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: VERSION });
+  const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
-  const guarded = (action: () => unknown) => {
-    try { return reply(action()); }
+  // The guided next step rides on setup results too, for clients that don't pass server instructions to their model.
+  const next = () => { try { return service.guide(); } catch { return null; } };
+  const guarded = (action: () => unknown, lead = false) => {
+    try { return reply(lead ? { ...action() as object, next: next() } : action()); }
     catch (error) {
       // Filesystem errors must not leak paths, machine details or stored contents.
       const code = (error as NodeJS.ErrnoException).code;
       return { ...reply({ error: error instanceof SyntaxError ? "Saved run is unreadable" : code ? (code === "ENOENT" ? "Run not found" : "Run storage unavailable") :
-        error instanceof Error ? error.message : "Request failed" }), isError: true };
+        error instanceof Error ? error.message : "Request failed", ...(lead ? { next: next() } : {}) }), isError: true };
     }
   };
-  const asyncGuarded = async (action: () => Promise<unknown>) => {
-    try { return reply(await action()); }
-    catch (error) { return guarded(() => { throw error; }); }
+  const asyncGuarded = async (action: () => Promise<unknown>, lead = false) => {
+    try { const result = await action(); return guarded(() => result, lead); }
+    catch (error) { return guarded(() => { throw error; }, lead); }
   };
-  server.registerTool("get_readiness", { description: "Discover available capabilities and onboarding prerequisites. No credentials required.",
+  server.registerTool("get_readiness", { description: "Call this first in every conversation, and whenever unsure what to do next. Returns Astra's status and its guide: what to explain to the user, the one question to ask, and the next tool. No credentials required.",
     inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply(service.readiness()));
   server.registerTool("list_strategies", { description: "List versioned strategies supported by this installation, not by other legacy programs.",
-    inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply({ strategies: service.catalog() }));
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply({ strategies: service.catalog(), next: next() }));
   const configSchema = {
     strategyId: z.string().min(1).max(80),
     symbols: z.array(z.string().regex(/^[A-Z][A-Z0-9.-]{0,9}$/)).min(1).max(20),
@@ -45,11 +49,17 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     () => ({ contents: [{ uri: "trading-agent://readiness", mimeType: "application/json", text: JSON.stringify(service.readiness()) }] }));
   server.registerTool("connect_robinhood", { description: "Start user-approved browser OAuth authorization for Robinhood market data. Returns a Robinhood URL; the user must review and approve access in a desktop browser on the server's machine. Never ask for passwords, tokens or codes in chat. No orders are enabled.",
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } }, async () => {
-      try { return reply(await service.broker.begin()); }
-      catch { return { ...reply({ error: "Unable to start broker authorization. Check connectivity and try again." }), isError: true }; }
+      try { return reply({ ...await service.broker.begin() as object, next: next() }); }
+      catch { return { ...reply({ error: "Unable to start broker authorization. Check connectivity and try again.", next: next() }), isError: true }; }
     });
+  server.registerTool("wait_for_robinhood", { description: "After sharing the connect_robinhood link, wait here for the user's browser approval instead of asking them to say they are done. Returns an outcome (connected, still_waiting, expired, declined_or_failed or no_pending_approval) and the next step. Waits at most 40 seconds per call; call again while still_waiting. Never starts an approval or accepts credentials.",
+    inputSchema: z.object({ seconds: z.number().int().min(1).max(40).default(30).describe("How long to wait this call; 40 at most, to stay inside chat apps' tool time limits.") }).strict(),
+    annotations: readOnly }, async (a, extra) => reply({ ...await service.broker.waitForAuthorization(a.seconds * 1000, extra.signal), next: next() }));
   server.registerTool("get_broker_status", { description: "Check browser-authorization progress and verified read capabilities. No account numbers or tokens are returned.",
-    inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply(service.broker.status()));
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply({ ...service.broker.status(), next: next() }));
+  server.registerTool("check_symbols", { description: "Check tickers the user proposes before saving a paper plan: each one's latest Robinhood price and whether it lists the week-ending call expiry Astra's entry rule needs for the next session. Read-only: one quote batch and one option-chain read per ticker. Strikes and option prices are judged at entry, not here.",
+    inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } },
+    a => asyncGuarded(async () => ({ ...await service.checkSymbols(a.symbols), problems: SYMBOL_PROBLEMS }), true));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } }, async a => {
       try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }
@@ -102,15 +112,15 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       rangeDeadlineMs: ms(rangeDeadlineSeconds), readFailureHaltMs: ms(readFailureHaltSeconds),
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) })));
-  server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
-  server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true)));
+      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) }), true));
+  server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data, only after the user says yes to the plan. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId), true));
+  server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting, only after the user says yes. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true), true));
   server.registerTool("stop_paper_run", { description: "Stop monitoring a PAPER run. Retains open simulated positions and disables their automated exits. This does NOT close them; use a reviewed position close first if desired.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId)));
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId), true));
   server.registerTool("list_paper_runs", { description: "List paper runs and identify detached runs needing explicit recovery.",
-    inputSchema: z.object({}).strict(), annotations: readOnly }, () => guarded(() => ({ runs: service.paper.list() })));
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => guarded(() => ({ runs: service.paper.list() }), true));
   server.registerTool("get_paper_run", { description: "Read PAPER positions, configuration, latest events, committed budget and estimated option P&L. Stale marks are null, not current prices. P&L excludes fees and is not brokerage P&L.",
     inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.paper.status(a.runId)));
   server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",

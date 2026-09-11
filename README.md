@@ -119,14 +119,16 @@ the chat client if strategies need to continue after the chat disconnects.
 
 | Tool | Purpose |
 | --- | --- |
-| `get_readiness` | Capabilities, absent connections, onboarding guidance |
+| `get_readiness` | Call first: status and the guided next step (what to explain, one question, the next tool) |
 | `list_strategies` | Supported plug-ins and versions |
 | `preview_strategy` | Validate sample settings without writing or starting |
 | `run_sample` | Run synthetic data and save events; idempotent request ID |
 | `list_runs` | Read saved sample history |
 | `get_run` | Read configuration, decisions and outcome |
 | `connect_robinhood` | Start browser authorization; never accepts credentials in chat |
+| `wait_for_robinhood` | Wait (up to 40 s a call) for the user's browser approval, so nobody types "done" |
 | `get_broker_status` | Check authorization and available read capabilities |
+| `check_symbols` | Check proposed tickers: a price and the week-ending expiry the entry rule needs |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
 | `configure_paper_strategy` | Save session settings without starting |
 | `start_paper_run` | Start continuous simulation after authorization |

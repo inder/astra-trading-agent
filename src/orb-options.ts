@@ -11,6 +11,8 @@ export interface OrbOptionsConfig {
   maxEntryQuoteBatches: number; heartbeatMs: number;
   includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
 }
+/** The opening range: the first two minutes of the regular session. A new run must start before it completes. */
+export const OPENING_RANGE_MINUTES = 2;
 /** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
 export const ENTRY_WINDOW_MINUTES = { default: 90, min: 5, max: 390 } as const;
 /** User settings: founder defaults and validated ranges, shared by the MCP schema and config parsing. Premium is treated
@@ -160,9 +162,14 @@ export const MIN_EXPIRY_SESSIONS = 3;
  *  Wednesday before Thanksgiving gets the following Friday). The target must be LISTED; otherwise null,
  *  because a later expiry is a different trade. Mon/Wed daily expiries are never chosen. */
 export function preferredWeeklyExpiration(listed: readonly string[], date: string): string | null {
+  const target = weeklyExpiryTarget(date);
+  return listed.includes(target) ? target : null;
+}
+/** The expiry the rule above targets for a trade date, listed or not. */
+export function weeklyExpiryTarget(date: string): string {
   if (!isTradingDay(date)) throw new Error("Unsupported trade date");
   for (let d = date, i = 0; i < 21; d = addDays(d, 1), i++)
-    if (isWeekEnder(d) && tradingSessionsBetween(date, d) >= MIN_EXPIRY_SESSIONS) return listed.includes(d) ? d : null;
+    if (isWeekEnder(d) && tradingSessionsBetween(date, d) >= MIN_EXPIRY_SESSIONS) return d;
   throw new Error("No week-ending expiry within three weeks");
 }
 /** Round a price in cents up to the contract's valid increment: the small tick below the cutoff, the larger tick at or above it. */

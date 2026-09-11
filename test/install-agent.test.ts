@@ -24,6 +24,10 @@ test("preview never writes settings or launches a server", async t => {
 test("desktop installation merges one entry, preserves unrelated settings and privately backs up", async t => {
   const f = fixture(t); const result = await installAgent(f.options, f.testing);
   assert.equal(result.clientConfigurationVerified, true); assert.equal(result.activeChatToolsVerified, false);
+  // One instruction for the user; after the restart Astra's own guide leads.
+  assert.ok("tellUser" in result);
+  assert.equal(result.tellUser, "Quit Claude Desktop completely and reopen it, then send any message (for example, \"hi\"). " +
+    "Astra will guide you from there: connecting Robinhood market data, choosing stocks, and starting a paper run.");
   const saved = JSON.parse(readFileSync(f.path, "utf8"));
   assert.deepEqual(saved.mcpServers.unrelated, f.other.mcpServers.unrelated); assert.equal(saved.preference, "preserve-me");
   const backups = readdirSync(join(f.directory, "astra-install-backups")); assert.equal(backups.length, 1);

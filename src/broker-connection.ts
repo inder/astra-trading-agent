@@ -120,7 +120,18 @@ export class RobinhoodConnection {
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),
+      authorizationExpiresAt: this.#state === "awaiting_authorization" && this.#expiresAt ? new Date(this.#expiresAt).toISOString() : null,
       note: "Robinhood may authorize broader access. This adapter only allows market-data reads. Restart requires authorization again." };
+  }
+  /** Wait up to ms for a pending browser approval to settle. Never starts one; the checks are in memory only. */
+  async waitForAuthorization(ms: number, signal?: AbortSignal) {
+    const pending = () => this.#state === "preparing" || this.#state === "awaiting_authorization" || this.#state === "verifying";
+    const wasPending = pending(), deadline = Date.now() + ms;
+    while (pending() && !signal?.aborted && Date.now() < deadline) await new Promise(ok => setTimeout(ok, Math.min(250, deadline - Date.now())));
+    const state = this.#state;
+    // A pending approval that ends not connected was closed by its expiry timer (or a shutdown), not declined.
+    const outcome = state === "connected" ? "connected" : pending() ? "still_waiting" : state === "failed" ? "declined_or_failed" : wasPending ? "expired" : "no_pending_approval";
+    return { outcome, state, authorizationExpiresAt: this.status().authorizationExpiresAt };
   }
   begin(): Promise<unknown> {
     if (this.#beginning) return this.#beginning;

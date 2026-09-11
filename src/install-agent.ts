@@ -16,6 +16,10 @@ const run: Runner = (command, args) => {
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 };
 const name = "astra-trading-agent";
+/** How each client loads a newly registered server. After that, Astra's own guide leads. */
+const RESTART: Record<InstallClient, string> = {
+  "codex": "Quit and reopen Codex", "claude-code": "Exit Claude Code and start it again", "claude-desktop": "Quit Claude Desktop completely and reopen it",
+};
 const project = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function read(path: string): string | null {
   try {
@@ -103,7 +107,8 @@ export async function installAgent(options: { client: InstallClient; apply: bool
   return { client: options.client, mode: "installed", changesApplied: !old, alreadyConfigured: !!old,
     clientConfigurationVerified: true, storedLaunchVerified: storedLaunch, preflight: check.verified,
     activeChatToolsVerified: false, brokerConnected: false, marketStrategyStarted: false,
-    next: "Reload this client's MCP connection if needed and call get_readiness from the chat. The host may request permission. Robinhood authorization remains a separate user step." };
+    next: "If this chat can already call Astra's tools, verify them (INSTALL.md section 4). Otherwise end your report with tellUser, word for word, as the one thing the user does next.",
+    tellUser: `${RESTART[options.client]}, then send any message (for example, "hi"). Astra will guide you from there: connecting Robinhood market data, choosing stocks, and starting a paper run.` };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2); let client: InstallClient | undefined, apply = false, dataDirectory: string | undefined;

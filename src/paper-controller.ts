@@ -6,6 +6,7 @@ import type { PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperControl, type PaperEvent } from "./paper-runtime.ts";
 import { sessionTimes } from "./orb-paper-runtime.ts";
 import type { StrategySettings } from "./orb-config.ts";
+import { OPENING_RANGE_MINUTES } from "./orb-options.ts";
 
 export interface PaperSetup extends StrategySettings { runId: string; strategyId: string; date: string; symbols: string[]; includePremarket: boolean }
 export interface PaperRecord {
@@ -14,6 +15,8 @@ export interface PaperRecord {
   events: PaperEvent[]; view: ReturnType<PaperRuntime["view"]>; mode: "paper"; ordersSubmitted: 0;
 }
 const validId = (id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id);
+/** The latest moment a new run may start: before the first two-minute candle completes. */
+export const startDeadline = (date: string) => sessionTimes(date).open + OPENING_RANGE_MINUTES * 60000;
 /** Mark staleness for strategies that do not configure a quote age of their own. */
 const DEFAULT_MARK_STALE_MS = 5000;
 function readJSON(path: string) { const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { return JSON.parse(readFileSync(fd, "utf8")); } finally { closeSync(fd); } }
@@ -118,7 +121,7 @@ export class PaperController {
     if (!this.#ready()) throw new Error("Authorize required paper market-data tools first");
     if (this.#clock() >= session.close) throw new Error("Session expired; no automatic rollover");
     if (!resume && record.status !== "configured") throw new Error("Existing run requires explicit resume");
-    if (!resume && this.#clock() >= session.open + 120000) throw new Error("Start before the first two-minute candle completes");
+    if (!resume && this.#clock() >= startDeadline(record.date)) throw new Error("Start before the first two-minute candle completes");
     if (resume && !record.view.positions.length) throw new Error("Recovery only manages existing paper positions; no new entries after a gap");
     mkdirSync(join(this.#root, "reservations"), { recursive: true, mode: 0o700 });
     const reservation = join(this.#root, "reservations", `${record.strategyId}-${record.date}.json`);

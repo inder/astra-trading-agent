@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
+import { ENTRY_WINDOW_MINUTES } from "./orb-options.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: "0.3.0" });
@@ -59,7 +60,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const date = z.string().regex(new RegExp(`^(${SUPPORTED_YEARS.join("|")})-\\d{2}-\\d{2}$`));
   const paperWrite = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
-    inputSchema: z.object({ ...configSchema, runId, date }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
+    inputSchema: z.object({ ...configSchema, runId, date, entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
+      .describe(`Minutes after the 9:30 ET open during which new entries may start; default ${ENTRY_WINDOW_MINUTES.default} (11:00 ET). Open positions are managed all day.`) }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
     a => guarded(() => service.paper.configure(a)));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));

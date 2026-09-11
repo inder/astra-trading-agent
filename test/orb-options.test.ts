@@ -101,6 +101,25 @@ test("new entries stop at the configurable window; open positions keep being man
   assert.throws(() => parseOrbOptionsConfig({ ...config, entryWindowMinutes: 4 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, entryWindowMinutes: 391 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, entryWindowMinutes: 90.5 }));
+  assert.equal(parseOrbOptionsConfig({ ...config, entryWindowMinutes: 5 }).entryWindowMinutes, 5);
+  assert.equal(parseOrbOptionsConfig({ ...config, entryWindowMinutes: 390 }).entryWindowMinutes, 390);
+});
+test("the entry window is anchored to the 9:30 open even when premarket minutes widen the range", () => {
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], includePremarketLeadMinutes: 2 });
+  e.setRange("CRWV", { high: 105, low: 100, startMs: -120000, endMs: 120000 });
+  assert.equal(e.entryDeadline(), 90 * 60000);
+});
+test("engine state round-trips through a checkpoint, and a tampered checkpoint is refused", () => {
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "SOXL", "MU"] });
+  e.setRange("CRWV", range); e.setRange("SOXL", range); e.failRange("MU");
+  e.observe("SOXL", 99, 120001);
+  const saved = e.snapshot(), copy = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "SOXL", "MU"] }); copy.restore(saved);
+  assert.deepEqual(copy.snapshot(), saved);
+  const tamper = (patch: (s: any) => void) => { const t = structuredClone(saved) as any; patch(t); return () => copy.restore(t); };
+  assert.throws(tamper(t => { t.symbols.SOXL.endReason = null; }), /symbol state/);            // disqualified without a reason
+  assert.throws(tamper(t => { t.symbols.CRWV.endReason = "opening_low_failed"; }), /symbol state/); // watching with a reason
+  assert.throws(tamper(t => { t.symbols.MU.endReason = "made_up"; }), /symbol state/);
+  assert.throws(tamper(t => { t.symbols.CRWV.openingRange = null; }), /symbol state/);          // watching without a range
 });
 test("one ticker with an unusable opening range can fail closed without blocking the basket", () => {
   const e = new OrbOptionsEngine({ ...config, symbols: ["INTC", "CRWV"] }); e.failRange("INTC"); e.setRange("CRWV", range);

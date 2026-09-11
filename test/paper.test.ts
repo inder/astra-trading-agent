@@ -136,6 +136,9 @@ test("stop persists positions; explicit restart recovery manages only prior posi
   await second.paper.start(setup.runId, true);
   f.prices.DEMOB = 106; await second.paper.tick(setup.runId);
   assert.deepEqual(second.paper.status(setup.runId).view.positions.map(p => p.symbol), ["DEMOA"]);
+  // Symbols still watching when the run stopped are done for the day, and the journal says why.
+  const reasons = second.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "setup_disqualified").map(e => e.data);
+  assert.deepEqual(reasons, [{ symbol: "DEMOB", reason: "resumed_management_only" }, { symbol: "DEMOC", reason: "resumed_management_only" }]);
   f.advance(); f.prices.DEMOA = 99; await second.paper.tick(setup.runId);
   assert.equal(second.paper.status(setup.runId).view.positions.length, 0);
   await second.close();

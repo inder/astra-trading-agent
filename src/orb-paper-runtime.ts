@@ -17,7 +17,7 @@ export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<stri
   protectiveExits: Record<string, "protective_stop" | "session_close"> }
 export class OrbPaperRuntime implements PaperRuntime {
   #config: OrbOptionsConfig; #market: PaperMarket; #clock: () => number; #engine: OrbOptionsEngine;
-  #saved: Omit<OrbPaperCheckpoint, "engine">; #session: { open: number; close: number };
+  #saved: Omit<OrbPaperCheckpoint, "engine">; #session: { open: number; close: number }; #resumeNotes: string[] = [];
   constructor(raw: unknown, market: PaperMarket, clock = Date.now, checkpoint?: unknown) {
     this.#config = parseOrbOptionsConfig(raw); this.#market = market; this.#clock = clock;
     this.#engine = new OrbOptionsEngine(this.#config); this.#session = sessionTimes(this.#config.date);
@@ -37,6 +37,9 @@ export class OrbPaperRuntime implements PaperRuntime {
       const { engine: _, ...rest } = structuredClone(s); this.#saved = { ...rest, resumed: true, complete: false };
       // A gap may hide a low breach. Recovery manages existing positions only.
       for (const h of Object.values(this.#saved.holdings)) h.mark = null;
+      // Recovery manages prior positions only, so symbols still watching are done for the day, and say so.
+      for (const [symbol, state] of Object.entries(this.#engine.snapshot().symbols))
+        if (state.status === "watching") { this.#engine.disqualify(symbol, "resumed_management_only"); this.#resumeNotes.push(symbol); }
     }
   }
   checkpoint(): OrbPaperCheckpoint { return { ...structuredClone(this.#saved), engine: this.#engine.snapshot() }; }
@@ -87,6 +90,7 @@ export class OrbPaperRuntime implements PaperRuntime {
   async step(): Promise<PaperEvent[]> {
     const now = this.#clock(), { open, close } = this.#session, c = this.#config; const events: PaperEvent[] = [];
     if (this.#saved.complete || now < open + 120000) return events;
+    for (const symbol of this.#resumeNotes.splice(0)) events.push({ type: "setup_disqualified", data: { symbol, reason: "resumed_management_only" } });
     if (now >= close) { this.#saved.complete = true; return [{ type: "session_ended", data: { remainingPositions: this.view().positions.length, noAutomaticCarryOrExercise: true } }]; }
     if (!this.#saved.loaded) {
       const bars = await this.#market.bars(c.symbols, open - c.includePremarketLeadMinutes * 60000, open + 120000, c.includePremarketLeadMinutes > 0);

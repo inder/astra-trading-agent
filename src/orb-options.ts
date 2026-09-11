@@ -133,8 +133,8 @@ export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: rea
 
 type Status = "forming" | "watching" | "disqualified" | "entry_pending" | "open" | "closed" | "skipped";
 /** Why a symbol stopped watching without entering; surfaced in views and the journal. */
-export type EndReason = "opening_low_failed" | "range_unavailable" | "late_first_quote" | "observation_gap" | "entry_window_closed";
-const END_REASONS: readonly EndReason[] = ["opening_low_failed", "range_unavailable", "late_first_quote", "observation_gap", "entry_window_closed"];
+export type EndReason = "opening_low_failed" | "range_unavailable" | "late_first_quote" | "observation_gap" | "entry_window_closed" | "resumed_management_only";
+const END_REASONS: readonly EndReason[] = ["opening_low_failed", "range_unavailable", "late_first_quote", "observation_gap", "entry_window_closed", "resumed_management_only"];
 interface Position { contractId: string; originalQuantity: number; remainingQuantity: number; entryStockPrice: number; trimStepsFilled: number }
 interface SymbolState {
   status: Status; range: SetupRange | null; openingRange: OpeningRange | null; endReason: EndReason | null;
@@ -243,8 +243,8 @@ export class OrbOptionsEngine {
       const s = raw.symbols[symbol];
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0)
         throw new Error("Checkpoint contains incomplete transaction");
-      if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null))
-        throw new Error("Invalid saved symbol state");
+      if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
+        (s.status === "watching" && !s.openingRange)) throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
         if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||

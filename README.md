@@ -60,7 +60,8 @@ npm run demo
 The demo uses invented prices for DEMOA, DEMOB and DEMOC. It exercises opening
 range entry, a two-position cap, the 2×/3×/5× option-price targets, and a
 protective stop. It writes a complete synthetic event record and prints its location.
-Option exit prices are not modeled, so P&L is unavailable, not zero. The sample
+It invents option bids for the targets but not for the stop, so P&L is unavailable,
+not zero. The sample
 date is fixed to September 8, 2026; symbols are labels, not fetched market data.
 
 ## Connect a local MCP client
@@ -215,7 +216,8 @@ price increment). User trims come out of the nearest unfilled target and never
 move the stop. Everything still held sells at the bid one minute before the
 close; contracts that cannot be sold then are written off as a total loss.
 Settings: `firstTargetMultiple`, `middleTargetMultiple`, `finalTargetMultiple`
-(each must be higher than the one before), `backstopPercent`, `stopBufferPercent`.
+(each must be higher than the one before), `backstopPercent`, `stopBufferPercent`,
+and `flattenLeadMinutes` (default 1, i.e. 3:59 p.m.; new entries also stop then).
 An unfilled stop, backstop or close exit stays pending through rebounds and
 recovery until a fresh bid fills it.
 
@@ -244,9 +246,10 @@ stay running. **Stdio follows its client's process lifetime.** No launch daemon
 or automatic restart is installed. Ctrl-C stops monitoring and checkpoints;
 a crash preserves the last committed revision. Reauthorize after restart and
 explicitly resume existing positions. Recovery allows no new entries after a
-gap and no expired sessions. The runner attempts to flatten simulated positions
-one minute before close; missing valid quotes leave unresolved positions visible,
-without pretending to sell, exercise or manage them overnight. There is no
+gap. The runner flattens simulated positions one minute before close (a setting);
+contracts with no fresh bid by then are written off at -100%, never given an
+invented price, exercised or held overnight. Resuming a run after its close only
+settles it: contracts it still held are written off the same way. There is no
 automatic date rollover. The exchange calendar covers **2026–2027** (NYSE
 holidays and early closes); anything outside it is refused, not guessed.
 

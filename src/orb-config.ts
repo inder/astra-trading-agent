@@ -4,6 +4,7 @@ export interface StrategySettings {
   entryWindowMinutes?: number; budgetCentsPerPosition?: number; budgetCentsPerDay?: number; minimumContracts?: number;
   maximumContractsPerTrade?: number | null; maximumPositions?: number; maxOptionSpreadFraction?: number; feeReserveCentsPerContract?: number;
   stopBufferFraction?: number; firstTargetMultiple?: number; middleTargetMultiple?: number; finalTargetMultiple?: number; backstopFraction?: number;
+  flattenLeadMinutes?: number;
 }
 export interface StrategySetupInput extends StrategySettings { date: string; symbols: string[]; includePremarketLeadMinutes: 0 | 2 }
 export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig => parseOrbOptionsConfig({
@@ -27,4 +28,5 @@ export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig 
   pollMs: 1000,
   includePremarketLeadMinutes: input.includePremarketLeadMinutes,
   entryWindowMinutes: input.entryWindowMinutes ?? ENTRY_WINDOW_MINUTES.default,
+  flattenLeadMinutes: input.flattenLeadMinutes ?? SETTINGS.flattenLeadMinutes.default,
 });

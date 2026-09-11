@@ -16,8 +16,9 @@ export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<stri
   nextMark: number; committedCents: number; realizedPnlCents: number; complete: boolean; lastQuoteAt: string | null; resumed: boolean;
   protectiveExits: Record<string, PersistentExit> }
 /** Sell-everything exits that keep retrying on later ticks (through rebounds and restarts) until a fresh bid fills them. */
-type PersistentExit = Extract<SaleReason, "protective_stop" | "breakeven_stop" | "broker_backstop" | "session_close">;
-const PERSISTENT_EXITS: readonly string[] = ["protective_stop", "breakeven_stop", "broker_backstop", "session_close"];
+const PERSISTENT_EXITS = ["protective_stop", "breakeven_stop", "broker_backstop", "session_close"] as const satisfies readonly SaleReason[];
+type PersistentExit = typeof PERSISTENT_EXITS[number];
+const isPersistentExit = (reason: unknown): reason is PersistentExit => (PERSISTENT_EXITS as readonly unknown[]).includes(reason);
 export class OrbPaperRuntime implements PaperRuntime {
   #config: OrbOptionsConfig; #market: PaperMarket; #clock: () => number; #engine: OrbOptionsEngine;
   #saved: Omit<OrbPaperCheckpoint, "engine">; #session: { open: number; close: number }; #resumeNotes: string[] = [];
@@ -29,7 +30,7 @@ export class OrbPaperRuntime implements PaperRuntime {
     if (checkpoint) {
       const s = checkpoint as OrbPaperCheckpoint;
       if (!s.holdings || !s.protectiveExits || Object.entries(s.protectiveExits).some(([symbol, reason]) =>
-        !this.#config.symbols.includes(symbol) || !PERSISTENT_EXITS.includes(reason)) ||
+        !this.#config.symbols.includes(symbol) || !isPersistentExit(reason)) ||
         !Number.isSafeInteger(s.committedCents) || s.committedCents < 0 || s.committedCents > this.#config.budgetCentsPerDay ||
         !Number.isSafeInteger(s.realizedPnlCents)) throw new Error("Invalid paper checkpoint");
       this.#engine.restore(s.engine);
@@ -62,7 +63,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         const stock = (await this.#market.quotes([intent.symbol]))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
         if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed");
-        if (this.#clock() >= this.#session.close - 60000) throw new EntrySkip("too_close_to_session_end");
+        if (this.#clock() >= this.#session.close - this.#config.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
         const capCents = Math.min(this.#config.budgetCentsPerPosition, this.#config.budgetCentsPerDay - this.#saved.committedCents);
         const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock(), capCents);
@@ -83,7 +84,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...detail } }];
       }
     }
-    if (PERSISTENT_EXITS.includes(intent.reason)) this.#saved.protectiveExits[intent.symbol] = intent.reason as PersistentExit;
+    if (isPersistentExit(intent.reason)) this.#saved.protectiveExits[intent.symbol] = intent.reason;
     try {
       const quote = fetched ?? (await this.#market.optionQuotes([intent.contractId])).find(q => q.id === intent.contractId);
       if (!this.#validOption(quote)) throw new Error("Stale option bid");
@@ -158,7 +159,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         this.#saved.holdings[p.symbol]!.mark = valid ? quote! : null;
         if (!valid || this.#engine.snapshot().symbols[p.symbol]!.status !== "open") continue;
         const pending = this.#saved.protectiveExits[p.symbol], at = Date.parse(quote!.updatedAt);
-        const intents = pending || now >= close - 60000
+        const intents = pending || now >= close - c.flattenLeadMinutes * 60000
           ? this.#engine.requestPositionSale(p.symbol, pending ?? "session_close", p.quantity, p.quantity, null, at)
           : this.#engine.observeOption(p.symbol, quote!.bid, at);
         for (const intent of intents) events.push(...await this.#handle(intent, quote));

@@ -74,6 +74,8 @@ for offline inspection. Never delete reservations to reset budgets.
 The runner sells everything still held at the fresh option bid one minute
 before regular/early close; no stock quote is needed. Contracts that cannot be
 sold by the close (no fresh bid) are written off at -100% of their premium and
-journaled as `written_off`, never given an invented price. Expired
-sessions cannot resume. A new date needs a new configuration: no automatic
-rollover, exercise or overnight management is implemented.
+journaled as `written_off`, never given an invented price. A run stopped
+while holding contracts (for example, the chat client closed) shows
+`needsSettlement` after the close; `resume_paper_run` then settles it the same
+way, with no market data or new entries. A new date needs a new configuration:
+no automatic rollover, exercise or overnight management is implemented.

@@ -50,8 +50,8 @@ No real-account readiness or trading performance is claimed.
 - Strategy 0.6.0 replaced the stock-gain trims with option-price targets. Paper
   runs configured under an earlier version cannot resume or be reconfigured under
   the same runId; configure a new runId.
-- Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover
-  or recovery after session end.
+- Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover;
+  after session end a stopped run can only be settled (unsold contracts written off).
 - Contracts with no fresh bid by the close are written off at -100%. No invented
   liquidation price, exercise or overnight management.
 - Single owner, one run per strategy/date, no account sharing or multi-tenancy.

@@ -8,7 +8,7 @@ const config: OrbOptionsConfig = {
   stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
   maximumPositions: 2, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopFraction: .5,
   feeReserveCentsPerContract: 100, maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
-  includePremarketLeadMinutes: 0, entryWindowMinutes: 90,
+  includePremarketLeadMinutes: 0, entryWindowMinutes: 90, flattenLeadMinutes: 1,
 };
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 const range = { high: 105, low: 100, startMs: 0, endMs: 120000 };
@@ -125,6 +125,10 @@ test("the exit ladder sells half (rounded up) at 2x, the last contract at 5x and
   assert.throws(() => parseOrbOptionsConfig({ ...config, firstTargetMultiple: 1 }));      // a "target" at a loss
   assert.throws(() => parseOrbOptionsConfig({ ...config, backstopFraction: 1 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, stopBufferFraction: .06 }));
+  assert.equal(parseOrbOptionsConfig({ ...config, stopBufferFraction: 0 }).stopBufferFraction, 0);   // stop exactly at the low
+  assert.throws(() => parseOrbOptionsConfig({ ...config, flattenLeadMinutes: 0 }));   // a flatten at the close cannot fill
+  assert.throws(() => parseOrbOptionsConfig({ ...config, flattenLeadMinutes: 61 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, flattenLeadMinutes: 1.5 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, trimGainFraction: .05 } as OrbOptionsConfig));  // the retired stock-% ladder
 });
 test("a target fires at exactly its multiple of the entry premium, not a cent below, one sale at a time", () => {
@@ -156,6 +160,9 @@ test("after the first target the stop moves to the stock's entry price; before i
   assert.deepEqual(e.observe("CRWV", 104, 130000), [], "below the stock entry, still above the opening-range stop");
   e.observeOption("CRWV", 8, 131000); e.confirmSale("CRWV", 2); assert.equal(stage(e), "breakeven");
   assert.deepEqual(e.observe("CRWV", 106.01, 132000), []);
+  // Founder ruling: breakeven is on the stock; the Robinhood backstop stays at 50% of entry as disaster protection.
+  assert.equal(e.snapshot().symbols.CRWV!.position!.backstopPrice, 2);
+  assert.deepEqual(e.observeOption("CRWV", 4, 132500), [], "the option back at its entry premium is not an exit");
   const exit = sale(e.observe("CRWV", 106, 133000));                       // back to the entry price exactly
   assert.equal(exit.reason, "breakeven_stop"); assert.equal(exit.quantity, 2); e.confirmSale("CRWV", 2);
   assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
@@ -182,6 +189,9 @@ test("the simulated Robinhood backstop sells everything at half the entry premiu
   assert.deepEqual(e.observeOption("CRWV", 2.01, 130000), []);
   const stop = sale(e.observeOption("CRWV", 2, 131000));
   assert.equal(stop.reason, "broker_backstop"); assert.equal(stop.quantity, 4); assert.equal(stop.optionBid, 2);
+  const after = opened(4); after.observeOption("CRWV", 8, 130000); after.confirmSale("CRWV", 2);   // breakeven does not move it
+  assert.deepEqual(after.observeOption("CRWV", 2.01, 131000), []);
+  const late = sale(after.observeOption("CRWV", 2, 132000)); assert.equal(late.reason, "broker_backstop"); assert.equal(late.quantity, 2);
   assert.throws(() => opened(4).confirmEntry("CRWV", id(1), 4, 106, 4, 2));                    // no pending entry
   const bad = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); bad.setRange("CRWV", range); bad.observe("CRWV", 106, 120001);
   assert.throws(() => bad.confirmEntry("CRWV", id(1), 4, 106, 4, 4.01), /entry confirmation/); // backstop above entry
@@ -275,11 +285,14 @@ test("engine state round-trips through a checkpoint, and a tampered checkpoint i
   assert.deepEqual(again.snapshot(), good);
   const bad = (patch: (p: any) => void) => { const t = structuredClone(good) as any; patch(t.symbols.CRWV.position); return () => again.restore(t); };
   assert.throws(bad(p => { p.targetsSold = 0; p.userSold = 2; }), /saved position/);    // breakeven without an engine target
+  assert.throws(bad(p => { p.stage = "initial"; }), /saved position/);                  // an engine target filled but the stop never moved
   assert.throws(bad(p => { p.targetsSold = 1; }), /saved position/);                    // sold counts disagree with the quantity
   assert.throws(bad(p => { p.backstopPrice = 4.05; }), /saved position/);               // backstop above the entry premium
   assert.throws(bad(p => { p.stage = "trailing"; }), /saved position/);
   assert.throws(bad(p => { delete p.entryPremium; }), /saved position/);
   assert.throws(bad(p => { p.userSold = -1; p.targetsSold = 3; }), /saved position/);
+  const badPrice = structuredClone(good) as any; badPrice.symbols.CRWV.lastPrice = -1;
+  assert.throws(() => again.restore(badPrice), /symbol state/);
   assert.deepEqual(again.snapshot(), good, "a refused checkpoint leaves the engine unchanged");
 });
 test("one ticker with an unusable opening range can fail closed without blocking the basket", () => {

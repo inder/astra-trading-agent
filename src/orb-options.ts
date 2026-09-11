@@ -8,7 +8,7 @@ export interface OrbOptionsConfig {
   maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number;
-  includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number;
+  includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
 }
 /** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
 export const ENTRY_WINDOW_MINUTES = { default: 90, min: 5, max: 390 } as const;
@@ -29,6 +29,8 @@ export const SETTINGS = {
   middleTargetMultiple: { default: 3, min: 1.1, max: 50 },
   finalTargetMultiple: { default: 5, min: 1.1, max: 100 },
   backstopFraction: { default: 0.5, min: 0.05, max: 0.95 },
+  // Minutes before the close when everything still held sells and new entries stop (founder default 1 = 3:59 pm ET).
+  flattenLeadMinutes: { default: 1, min: 1, max: 60 },
 } as const;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
@@ -37,7 +39,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs",
-    "includePremarketLeadMinutes", "entryWindowMinutes"];
+    "includePremarketLeadMinutes", "entryWindowMinutes", "flattenLeadMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
     c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) || c.openingRangeMinutes !== 2 ||
@@ -49,7 +51,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     c.budgetCentsPerDay < c.budgetCentsPerPosition || !inRange(c.minimumContracts, SETTINGS.minimumContracts) ||
     !(c.maximumContractsPerTrade === null || (inRange(c.maximumContractsPerTrade, SETTINGS.maximumContractsPerTrade) && c.maximumContractsPerTrade >= c.minimumContracts)) ||
     !inRange(c.maximumPositions, SETTINGS.maximumPositions) || !inRange(c.feeReserveCentsPerContract, SETTINGS.feeReserveCentsPerContract) ||
-    !inRange(c.maxOptionSpreadFraction, SETTINGS.maxOptionSpreadFraction, false) ||
+    !inRange(c.maxOptionSpreadFraction, SETTINGS.maxOptionSpreadFraction, false) || !inRange(c.flattenLeadMinutes, SETTINGS.flattenLeadMinutes) ||
     // The cheapest possible contract is $0.01 (100 cents) plus the fee reserve: a minimum that can never fit trades nothing all day.
     c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
     !Number.isSafeInteger(c.maxQuoteAgeMs) || c.maxQuoteAgeMs < 1000 ||
@@ -328,7 +330,8 @@ export class OrbOptionsEngine {
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0 || s.pendingReason !== null)
         throw new Error("Checkpoint contains incomplete transaction");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
-        (s.status === "watching" && !s.openingRange)) throw new Error("Invalid saved symbol state");
+        (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)))
+        throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
         if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||
@@ -338,7 +341,7 @@ export class OrbOptionsEngine {
           (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0) ||
           !(p.entryPremium > 0) || !(p.backstopPrice > 0 && p.backstopPrice <= p.entryPremium) || !["initial", "breakeven"].includes(p.stage) ||
           !Number.isSafeInteger(p.targetsSold) || p.targetsSold < 0 || !Number.isSafeInteger(p.userSold) || p.userSold < 0 ||
-          (p.stage === "breakeven" && p.targetsSold < 1) ||
+          (p.stage === "breakeven") !== (p.targetsSold > 0) ||
           (s.status === "open" && p.originalQuantity - p.remainingQuantity !== p.targetsSold + p.userSold)) throw new Error("Invalid saved position");
       } else if (s.position) throw new Error("Unexpected saved position");
     }

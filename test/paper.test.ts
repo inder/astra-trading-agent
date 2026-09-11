@@ -115,6 +115,31 @@ test("a triggered protective exit persists through a rebound and restart until a
   assert.equal(f.service.paper.status(setup.runId).view.positions.length, 0);
   assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop"));
 });
+test("a triggered breakeven exit also persists through a rebound and restart", async t => {
+  const f = fixture(t); await entered(f);
+  f.advance(); f.prices.DEMOA = 108; f.setBid(8); await f.service.paper.tick(setup.runId);           // first target: breakeven
+  f.advance(); f.prices.DEMOA = 105.5; f.staleOption(6000); await f.service.paper.tick(setup.runId); // below entry, no fresh bid
+  assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "sale_deferred"));
+  await f.service.paper.stop(setup.runId);
+  f.advance(); f.prices.DEMOA = 108; f.staleOption(0);
+  await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "breakeven_stop" && (e.data as any).quantity === 2));
+});
+test("a saved pending backstop exit resumes and retries; a saved non-exit reason is refused", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  const r = f.service.paper.status(setup.runId);
+  const path = join(f.directory, "paper", setup.runId, String(r.revision).padStart(8, "0") + ".json");
+  const saved = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...saved, checkpoint: { ...saved.checkpoint, protectiveExits: { DEMOA: "profit_target" } } }));
+  f.advance(); await assert.rejects(f.service.paper.start(setup.runId, true), /Invalid paper checkpoint/);
+  writeFileSync(path, JSON.stringify({ ...saved, checkpoint: { ...saved.checkpoint, protectiveExits: { DEMOA: "broker_backstop" } } }));
+  await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop" && (e.data as any).quantity === 4));
+});
 test("automatic scheduling advances a configured run without a connected chat client", async t => {
   const f = fixture(t), auto = new TradingAgentService(f.directory, undefined, undefined, { ...f.options, auto: true });
   auto.paper.configure(setup); await auto.paper.start(setup.runId); f.setTime(open + 120000); f.prices.DEMOA = 106;
@@ -204,6 +229,32 @@ test("contracts that cannot be sold before the close are written off as a total 
     [{ symbol: "DEMOA", contractId: id(1), quantity: 4, realizedPnlCents: -160000, reason: "unsold_at_session_end" }]);
   assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
 });
+test("a run stopped while holding contracts settles after the close: they are written off, once", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  f.setTime(close + 60000);
+  assert.equal(f.service.paper.list()[0]?.needsSettlement, true);
+  await assert.rejects(f.service.paper.start(setup.runId), /expired/, "a fresh start after the close is still refused");
+  const settled = await f.service.paper.start(setup.runId, true);
+  assert.equal(settled.status, "completed"); assert.equal(settled.view.positions.length, 0); assert.equal(settled.view.realizedPnlCents, -160000);
+  assert.deepEqual(settled.events.map(e => e.type).filter(type => type !== "setup_disqualified"), ["settled_after_session", "written_off", "session_ended"]);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
+  assert.equal(f.service.paper.list()[0]?.needsSettlement, false);
+  await assert.rejects(f.service.paper.start(setup.runId, true), /expired/, "settled exactly once");
+});
+test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses new entries from then", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const config = { ...openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0, entryWindowMinutes: 390, flattenLeadMinutes: 10 }),
+    maxObservationGapMs: 8 * 3_600_000 };   // lets the test jump to the afternoon without an observation-gap disqualification
+  const runtime = new OrbPaperRuntime(config, f.market, f.options.clock);
+  f.setTime(open + 120000); await runtime.step();
+  f.advance(); f.prices.DEMOA = 106; await runtime.step();
+  assert.equal(runtime.view().positions.length, 1);
+  f.setTime(close - 600001); assert.deepEqual((await runtime.step()).filter(e => e.type === "paper_sale"), []);
+  f.setTime(close - 600000); f.prices.DEMOB = 106;
+  const events = await runtime.step();
+  assert.deepEqual(events.filter(e => e.type === "entry_skipped").map(e => e.data), [{ symbol: "DEMOB", reason: "too_close_to_session_end" }]);
+  assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOA", "session_close"]]);
+});
 test("corrupt checkpoint cannot resume a fabricated reservation", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
   const r = f.service.paper.status(setup.runId);
@@ -264,13 +315,13 @@ test("chat settings arrive in human units and are pinned to the run in internal 
   const defaults = JSON.parse(((await configure({ runId: "defaults" })).content as any)[0].text).config;
   assert.deepEqual([defaults.budgetCentsPerPosition, defaults.budgetCentsPerDay, defaults.minimumContracts, defaults.maximumContractsPerTrade,
     defaults.maximumPositions, defaults.maxOptionSpreadFraction, defaults.feeReserveCentsPerContract, defaults.entryWindowMinutes], [200000, 400000, 4, null, 2, .2, 100, 90]);
-  assert.deepEqual([defaults.firstTargetMultiple, defaults.middleTargetMultiple, defaults.finalTargetMultiple, defaults.backstopFraction, defaults.stopBufferFraction],
-    [2, 3, 5, .5, .001]);
+  assert.deepEqual([defaults.firstTargetMultiple, defaults.middleTargetMultiple, defaults.finalTargetMultiple, defaults.backstopFraction, defaults.stopBufferFraction,
+    defaults.flattenLeadMinutes], [2, 3, 5, .5, .001, 1]);
   // Exit settings: multiples as multiples, the backstop and stop buffer in percent.
   const exits = JSON.parse(((await configure({ runId: "exits", firstTargetMultiple: 1.5, middleTargetMultiple: 2.5, finalTargetMultiple: 4,
-    backstopPercent: 40, stopBufferPercent: .5 })).content as any)[0].text).config;
-  assert.deepEqual([exits.firstTargetMultiple, exits.middleTargetMultiple, exits.finalTargetMultiple, exits.backstopFraction, exits.stopBufferFraction],
-    [1.5, 2.5, 4, .4, .005]);
+    backstopPercent: 40, stopBufferPercent: .7, flattenLeadMinutes: 5 })).content as any)[0].text).config;
+  assert.deepEqual([exits.firstTargetMultiple, exits.middleTargetMultiple, exits.finalTargetMultiple, exits.backstopFraction, exits.stopBufferFraction,
+    exits.flattenLeadMinutes], [1.5, 2.5, 4, .4, .007, 5]);   // .7% pins exactly 0.007, no float noise
   assert.ok((await configure({ runId: "unordered", firstTargetMultiple: 3, middleTargetMultiple: 3 })).isError, "targets must rise");
   assert.ok((await configure({ runId: "backstop", backstopPercent: 100 })).isError, "a backstop at the entry premium is not a stop");
   assert.ok((await configure({ runId: "fractional", maxPremiumPerTradeDollars: 1000.5 })).isError, "dollars must be whole");

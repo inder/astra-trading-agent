@@ -44,16 +44,15 @@ export const openingRangeStrategy: AgentStrategy = {
         const index = config.symbols.indexOf(intent.symbol);
         const id = `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`;
         const at = new Date(intent.at).toISOString();
-        const selection = selectOrbCall([{
-          id, symbol: intent.symbol, expiration, strike: 101, multiplier: 100,
-          tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: `${expiration}T19:00:00Z`,
-        }], [{ id, bid: 3.9, ask: 4, askSize: 10, updatedAt: at, retrievedAt: at }],
+        const contract = { id, symbol: intent.symbol, expiration, strike: 101, multiplier: 100 as const,
+          tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: `${expiration}T19:00:00Z` };
+        const selection = selectOrbCall([contract], [{ id, bid: 3.9, ask: 4, askSize: 10, updatedAt: at, retrievedAt: at }],
         intent.symbol, expiration, intent.stockPrice, config, intent.at,
         Math.min(config.budgetCentsPerPosition, config.budgetCentsPerDay - committedCents));
         if (!selection) { engine.failEntry(intent.symbol); emit("entry_skipped", { symbol: intent.symbol, reason: "selection_failed" }); return; }
         committedCents += selection.committedCents; premiums.set(intent.symbol, selection.limitPrice);
         engine.confirmEntry(intent.symbol, id, selection.quantity, intent.stockPrice, selection.limitPrice,
-          backstopPrice(selection.limitPrice, { tickBelow: .01, tickAbove: .05, tickCutoff: 3 }, config.backstopFraction));
+          backstopPrice(selection.limitPrice, contract, config.backstopFraction));
         emit("simulated_entry", { symbol: intent.symbol, ...selection, synthetic: true });
       } else {
         engine.confirmSale(intent.symbol, intent.quantity);
@@ -74,7 +73,8 @@ export const openingRangeStrategy: AgentStrategy = {
     for (const [step, multiple] of [config.firstTargetMultiple, config.middleTargetMultiple, config.finalTargetMultiple].entries()) {
       const at = breakout + (step + 1) * 1000;
       if (winner && premiums.has(winner)) {
-        const bid = Math.round(premiums.get(winner)! * multiple * 100) / 100;
+        // Round UP to a cent so a user-set multiple on an odd premium still reaches its target (1.37 x 1.5 = 2.055 -> 2.06).
+        const bid = Math.ceil(premiums.get(winner)! * multiple * 100 - 1e-9) / 100;
         emit("synthetic_option_bid", { symbol: winner, bid, at });
         for (const intent of engine.observeOption(winner, bid, at)) handle(intent);
       }
@@ -84,7 +84,7 @@ export const openingRangeStrategy: AgentStrategy = {
       }
     }
     const summary = { mode: "synthetic_sample", dataset: "synthetic-orb-v1", ordersSubmitted: 0,
-      committedCents, pnl: null, pnlExplanation: "No option exit-price model: P&L is intentionally unavailable.",
+      committedCents, pnl: null, pnlExplanation: "The stop has no simulated option bid, so P&L is intentionally unavailable.",
       snapshot: engine.snapshot(), limitations: ["Invented prices and assumed fills; not real market data.",
         "Exercises the opening-range breakout, sizing, position cap, the option-gain targets and the stop; not broker validation.",
         "The opening-low rule is checked at polled-trade resolution: a dip below the low that reverses between polls can be missed."] };

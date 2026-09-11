@@ -64,6 +64,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const whole = (r: { min: number; max: number }) => z.number().int().min(r.min).max(r.max).optional();
   const multiple = (r: { min: number; max: number }) => z.number().min(r.min).max(r.max).optional();
   const percent = (r: { min: number; max: number }) => z.number().min(r.min * 100).max(r.max * 100).optional();
+  // Percent to fraction without float noise in the pinned config (0.7% -> 0.007, not 0.006999999999999999).
+  const fraction = (p: number | undefined) => p === undefined ? undefined : Math.round(p * 1e6) / 1e8;
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
     inputSchema: z.object({ ...configSchema, runId, date,
       entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
@@ -81,16 +83,15 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       finalTargetMultiple: multiple(SETTINGS.finalTargetMultiple).describe(`Multiple for the last contract; default ${SETTINGS.finalTargetMultiple.default}x.`),
       backstopPercent: percent(SETTINGS.backstopFraction).describe(`Robinhood safety stop as a percent of the entry premium; default ${SETTINGS.backstopFraction.default * 100}.`),
       stopBufferPercent: percent(SETTINGS.stopBufferFraction).describe(`How far below the opening-range low the stock stop sits, in percent; default ${SETTINGS.stopBufferFraction.default * 100}.`),
+      flattenLeadMinutes: whole(SETTINGS.flattenLeadMinutes).describe(`Minutes before the close when everything still held sells and new entries stop; default ${SETTINGS.flattenLeadMinutes.default} (3:59 pm ET).`),
     }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
     ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100,
-      backstopFraction: backstopPercent === undefined ? undefined : backstopPercent / 100,
-      stopBufferFraction: stopBufferPercent === undefined ? undefined : stopBufferPercent / 100 })));
+      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) })));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
-  server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. Does not place real orders.",
+  server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true)));
   server.registerTool("stop_paper_run", { description: "Stop monitoring a PAPER run. Retains open simulated positions and disables their automated exits. This does NOT close them; use a reviewed position close first if desired.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId)));

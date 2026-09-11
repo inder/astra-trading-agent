@@ -49,13 +49,3 @@ export async function loadOrbContracts(source: OrbOptionSource, symbol: string, 
   if (!contracts.length || new Set(contracts.map(x => x.id)).size !== contracts.length) throw new Error("Missing/duplicate option contracts");
   return { expiration, contracts };
 }
-export async function quoteOrbContracts(source: OrbOptionSource, contracts: readonly OrbCallContract[], clock = Date.now): Promise<CallQuote[]> {
-  if (contracts.length > 300) throw new Error("Option quote universe too large");
-  const answer: CallQuote[] = [];
-  for (let i = 0; i < contracts.length; i += 20) {
-    const ids = contracts.slice(i, i + 20).map(x => x.id);
-    const raw = await source.optionQuotes(ids);
-    answer.push(...parseAvailableOrbCallQuotes(raw, ids, new Date(clock()).toISOString()));
-  }
-  return answer;
-}

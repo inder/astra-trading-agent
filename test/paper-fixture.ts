@@ -14,9 +14,10 @@ export const id = (i: number) => `00000000-0000-0000-0000-${String(i).padStart(1
 export const setup = { runId: "paper-one", strategyId: "opening-range-options", date, symbols: ["DEMOA", "DEMOB", "DEMOC"], includePremarket: false };
 export function fixture(t: TestContext, symbols = setup.symbols) {
   const directory = mkdtempSync(join(tmpdir(), "astra-paper-test-"));
-  let now = open - 1000, bid = 3.9, stockAge = 0, optionAge = 0, callsLatencyMs = 0;
+  let now = open - 1000, bid = 3.9, stockAge = 0, optionAge = 0, catalogLatencyMs = 0;
   const unpublished = new Set<string>();   // symbols whose last opening-range bar has not published yet
-  type Read = "quotes" | "bars" | "calls" | "options";
+  type Read = "quotes" | "bars" | "catalog" | "options";
+  const reads = { contracts: 0, optionQuotes: 0 };   // provider calls made, for latency and call-count checks
   const down = new Set<Read>(), fail = (read: Read) => { if (down.has(read)) throw new Error(`test-only ${read} outage`); };
   const prices: Record<string, number> = Object.fromEntries(symbols.map(s => [s, 104]));
   const market: PaperMarket = {
@@ -32,14 +33,12 @@ export function fixture(t: TestContext, symbols = setup.symbols) {
         bars: Array.from({ length: (end - start) / 60000 - (unpublished.has(symbol) ? 1 : 0) }, (_, i) => ({ begins_at: new Date(start + i * 60000).toISOString(),
           open_price: "102", close_price: "104", high_price: "105", low_price: "100", volume: "1000", session: start + i * 60000 < open ? "pre" : "reg" })) })) } };
     },
-    async calls(symbol) {
-      fail("calls"); now += callsLatencyMs;   // a slow catalog read holds up the whole tick
-      const contractId = id(symbols.indexOf(symbol) + 1);
-      return { expiration: "2026-09-11", contracts: [{ id: contractId, symbol, expiration: "2026-09-11", strike: 105, multiplier: 100,
-        tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" }],
-        quotes: [{ id: contractId, bid: 3.9, ask: 4, askSize: 20, updatedAt: new Date(now - optionAge).toISOString(), retrievedAt: new Date(now).toISOString() }] };
+    async contracts(symbol) {
+      fail("catalog"); reads.contracts++; now += catalogLatencyMs;   // a slow catalog read holds up the whole tick
+      return { expiration: "2026-09-11", contracts: [{ id: id(symbols.indexOf(symbol) + 1), symbol, expiration: "2026-09-11", strike: 105, multiplier: 100,
+        tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" }] };
     },
-    async optionQuotes(ids) { fail("options"); return ids.map(id => ({ id, bid, ask: bid + .1, askSize: 20, updatedAt: new Date(now - optionAge).toISOString(), retrievedAt: new Date(now).toISOString() })); },
+    async optionQuotes(ids) { fail("options"); reads.optionQuotes++; return ids.map(id => ({ id, bid, ask: bid + .1, askSize: 20, updatedAt: new Date(now - optionAge).toISOString(), retrievedAt: new Date(now).toISOString() })); },
   };
   const options = { market, clock: () => now, ready: () => true, auto: false };
   const service = new TradingAgentService(directory, undefined, undefined, options);
@@ -47,8 +46,8 @@ export function fixture(t: TestContext, symbols = setup.symbols) {
   return { directory, service, market, options, prices, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
     setBid: (v: number) => { bid = v; }, staleStock: (v: number) => { stockAge = v; }, staleOption: (v: number) => { optionAge = v; },
     /** Make reads fail (all four when none are named) until restore(). */
-    outage: (...reads: Read[]) => { for (const read of reads.length ? reads : ["quotes", "bars", "calls", "options"] as const) down.add(read); },
-    restore: () => { down.clear(); }, slowCalls: (ms: number) => { callsLatencyMs = ms; },
+    outage: (...only: Read[]) => { for (const read of only.length ? only : ["quotes", "bars", "catalog", "options"] as const) down.add(read); },
+    restore: () => { down.clear(); }, slowCatalog: (ms: number) => { catalogLatencyMs = ms; }, reads,
     /** Publish (or hold back) the last opening-range bar for the named symbols, or for all of them. */
     setBarsReady: (ready: boolean, ...only: string[]) => { for (const s of only.length ? only : symbols) ready ? unpublished.delete(s) : unpublished.add(s); } };
 }

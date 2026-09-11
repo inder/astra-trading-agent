@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { VERSION } from "./version.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export function registrationPlan(projectRoot = root, node = process.execPath, data = join(homedir(), ".trading-agent")) {
@@ -17,7 +18,7 @@ export function registrationPlan(projectRoot = root, node = process.execPath, da
     changesApplied: false, lifecycle: "Client-owned process; no background service installed" };
 }
 export async function probeRegisteredServer(command: string, args: string[]) {
-  const client = new Client({ name: "astra-installation-check", version: "0.3.0" });
+  const client = new Client({ name: "astra-installation-check", version: VERSION });
   const transport = new StdioClientTransport({ command, args, env: { PATH: process.env.PATH ?? "" }, stderr: "pipe" });
   try {
     await client.connect(transport, { timeout: 10000 });

@@ -198,11 +198,16 @@ contract fee reserve), at most two stocks per day. Proceeds never replenish the
 budget. Astra buys the strike nearest the stock price where at least four
 contracts fit under the cap, then fills up to the cap at that strike, limited by
 the contracts displayed at the ask, so how far from the money it lands depends on
-the stock's price. Each of these is a setting you can change when configuring a
-run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`, `minimumContracts`,
-`maximumContractsPerTrade`, `maximumPositions`, `maxOptionSpreadPercent`,
-`feeReserveCentsPerContract`, `entryWindowMinutes`, and the exit settings below);
-a run keeps the settings it started with.
+the stock's price. Each stock's option catalog loads before 9:32; at an entry
+Astra quotes the 20 strikes nearest the price and widens 20 at a time only while
+none qualifies (`maxEntryQuoteBatches`, default 3), which finds the same nearest
+qualifying strike as quoting every strike would; the journal lists the strikes it
+quoted. Strikes the exchange adds during the day are not in that morning catalog. Each of these is a setting you can change when
+configuring a run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`,
+`minimumContracts`, `maximumContractsPerTrade`, `maximumPositions`,
+`maxOptionSpreadPercent`, `feeReserveCentsPerContract`, `entryWindowMinutes`,
+`maxEntryQuoteBatches`, and the exit settings below); a run keeps the settings it
+started with.
 The expiry is the first week-ending expiration with at least three trading
 sessions counting the trade day. In a normal week that means Monday–Wednesday
 trades use that week's Friday and Thursday/Friday trades use the following Friday.
@@ -231,8 +236,9 @@ recovery until a fresh bid fills it.
 Simulation assumes fresh ask entry and fresh bid sales, **not executions**. It
 does not model queue position, partial fills, market impact or actual fees. P&L
 excludes fees; stale marks become unavailable. Polled quotes cannot prove no
-unseen intrasecond crossing occurred. A failed market-data read is journaled as
-a `data_gap` (and `data_restored` when it recovers) and polling continues. The run
+unseen intrasecond crossing occurred. A single failed market-data read is only
+counted; two in a row are journaled as a `data_gap` (and `data_restored` when it
+recovers), and polling continues. The run
 halts for inspection only after reads fail for longer than
 `readFailureHaltSeconds` (default 60); while it holds positions whose option
 prices still arrive, an equity-quote outage does not halt it, so the targets, the
@@ -253,7 +259,11 @@ explicitly; there is no shared “selected position” state.
 Paper runs store immutable revisions in `paper/<runId>/`, with events, pinned
 settings/version and checkpoint published together. One process owns a run and
 one run reserves each strategy/date. Do not edit journals or reservations to
-reset budgets. Logs grow during sessions; no automatic deletion policy exists.
+reset budgets. The journal records decisions as they happen (each with the
+observation behind it) plus a heartbeat every `heartbeatSeconds` (default 60)
+with the latest prices, the price range seen, marks and read failures, so a
+session is a few hundred revisions, not one per second. No automatic deletion
+policy exists.
 
 The HTTP timer continues after chat disconnection while its process/computer
 stay running. **Stdio follows its client's process lifetime.** No launch daemon

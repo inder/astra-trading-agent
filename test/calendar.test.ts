@@ -59,7 +59,7 @@ test("an unlisted target expiry reaches the journal as a named policy skip", asy
   await assert.rejects(loadOrbContracts(provider, "DEMOA", "2026-09-08"), (e: unknown) => e instanceof EntrySkip && e.reason === "no_qualifying_expiry");
 
   const f = fixture(t);
-  f.market.calls = async () => { throw new EntrySkip("no_qualifying_expiry"); };
+  f.market.contracts = async () => { throw new EntrySkip("no_qualifying_expiry"); };
   f.service.paper.configure(setup); await f.service.paper.start(setup.runId);
   f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
   f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);
@@ -72,7 +72,7 @@ test("a calendar gap and a data failure reach the journal as different skip reas
     [new Error("broker 503"), { symbol: "DEMOA", reason: "data_unavailable", detail: "broker 503" }],
   ] as const) {
     const f = fixture(t);
-    f.market.calls = async () => { throw thrown; };
+    f.market.contracts = async () => { throw thrown; };
     f.service.paper.configure(setup); await f.service.paper.start(setup.runId);
     f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
     f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);

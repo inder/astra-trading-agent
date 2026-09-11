@@ -5,6 +5,7 @@ export interface StrategySettings {
   maximumContractsPerTrade?: number | null; maximumPositions?: number; maxOptionSpreadFraction?: number; feeReserveCentsPerContract?: number;
   stopBufferFraction?: number; firstTargetMultiple?: number; middleTargetMultiple?: number; finalTargetMultiple?: number; backstopFraction?: number;
   flattenLeadMinutes?: number; pollMs?: number; maxQuoteAgeMs?: number; maxObservationGapMs?: number; rangeDeadlineMs?: number; readFailureHaltMs?: number;
+  maxEntryQuoteBatches?: number; heartbeatMs?: number;
 }
 export interface StrategySetupInput extends StrategySettings { date: string; symbols: string[]; includePremarketLeadMinutes: 0 | 2 }
 export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig => parseOrbOptionsConfig({
@@ -28,6 +29,8 @@ export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig 
   pollMs: input.pollMs ?? SETTINGS.pollMs.default,
   rangeDeadlineMs: input.rangeDeadlineMs ?? SETTINGS.rangeDeadlineMs.default,
   readFailureHaltMs: input.readFailureHaltMs ?? SETTINGS.readFailureHaltMs.default,
+  maxEntryQuoteBatches: input.maxEntryQuoteBatches ?? SETTINGS.maxEntryQuoteBatches.default,
+  heartbeatMs: input.heartbeatMs ?? SETTINGS.heartbeatMs.default,
   includePremarketLeadMinutes: input.includePremarketLeadMinutes,
   entryWindowMinutes: input.entryWindowMinutes ?? ENTRY_WINDOW_MINUTES.default,
   flattenLeadMinutes: input.flattenLeadMinutes ?? SETTINGS.flattenLeadMinutes.default,

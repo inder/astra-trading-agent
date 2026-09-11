@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { sessionTimes } from "../src/daily-history.ts";
 import { OrbOptionsEngine, backstopPrice, preferredWeeklyExpiration, parseOpeningRange, parseOrbOptionsConfig,
-  replayOpeningRange, selectOrbCall, targetSchedule, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
+  replayOpeningRange, selectOrbCall, strikeBatches, targetSchedule, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
 
 const config: OrbOptionsConfig = {
   date: "2026-09-08", symbols: ["CRWV", "SOXL", "MU", "INTC"], openingRangeMinutes: 2,
   stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
   maximumPositions: 2, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopFraction: .5,
   feeReserveCentsPerContract: 100, maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
-  rangeDeadlineMs: 60000, readFailureHaltMs: 60000,
+  rangeDeadlineMs: 60000, readFailureHaltMs: 60000, maxEntryQuoteBatches: 3, heartbeatMs: 60000,
   includePremarketLeadMinutes: 0, entryWindowMinutes: 90, flattenLeadMinutes: 1,
 };
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
@@ -45,6 +45,20 @@ test("risk and sizing are user settings with validated ranges and cross-checks",
   assert.throws(() => parseOrbOptionsConfig({ ...config, readFailureHaltMs: 4999 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 1000.5 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 3000, maxObservationGapMs: 6000, readFailureHaltMs: 5000 }));   // halt before two polls
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 6000, maxObservationGapMs: 12000, maxQuoteAgeMs: 6000, readFailureHaltMs: 12000, heartbeatMs: 5000 }));   // heartbeat under a poll
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryQuoteBatches: 0 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryQuoteBatches: 16 }));
+});
+test("strike batches run nearest-first and never split strikes equally far from the price", () => {
+  const k = (strike: number, n: number) => ({ id: id(n), symbol: "CRWV", expiration: "2026-09-11", strike, multiplier: 100 as const,
+    tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" });
+  const strikes = Array.from({ length: 41 }, (_, i) => k(80 + i, i + 1));   // 80 through 120
+  const batches = strikeBatches(strikes, 100);
+  // 100, then 99/101 … 91/109 is 19 strikes; 90 and 110 are equally far, so both start the next batch rather than split.
+  assert.deepEqual(batches.map(b => b.length), [19, 20, 2]);
+  assert.deepEqual(batches[0]!.map(x => x.strike).sort((a, b) => a - b), Array.from({ length: 19 }, (_, i) => 91 + i));
+  assert.equal(new Set(batches.flat().map(x => x.id)).size, 41);
+  assert.deepEqual(strikeBatches(strikes, 100.4).map(b => b.length), [20, 20, 1], "no ties off the strike grid");
 });
 test("while a range's bars are pending, observations keep the lowest later trade and any gap for when the range arrives", () => {
   const rangeEnd = sessionTimes(config.date).open + 120000, real = { high: 105, low: 100, startMs: rangeEnd - 120000, endMs: rangeEnd };

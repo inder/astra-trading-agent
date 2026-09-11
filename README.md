@@ -246,6 +246,24 @@ backstop and the close-out keep working. An outage of option prices alone never
 halts either: exits wait for a fresh bid (never an invented one), the status shows
 `dataGapSince`, and contracts still unsold at the close are written off.
 
+## Replay a past session
+
+`npm run replay -- <date> --fixtures DIR` runs a past session through Astra's own
+paper service on a simulated clock. Real minute bars, which you keep privately
+(this repository ships none), drive the stock side. Each minute follows open,
+low, high, close, so the replay can understate a winner but never invent an entry
+the minute does not support. Option prices are **modeled**: Black-Scholes at a
+stated volatility (`--iv SYMBOL=0.9`), zero rate, calendar time to expiry, a 4%
+spread, and an assumed strike grid within 30% of the day's open. The output marks every modeled number. The
+folder `DIR/<date>/` needs a `manifest.json` and `bars-minute-regular.json` with
+every regular-session minute for every listed stock; anything missing or partial
+is refused, never skipped. `--lag SECONDS` delays bar publication (the range-retry
+path). `--check` evaluates the article's day, 2026-09-08: which stock must enter
+at its first trade above the opening high, which must lose their opening low
+first, and how the exits must end, each claim labeled when modeled prices decide
+it, plus late-bar, all-day-window and volatility variants. Journals go to
+`DIR/<date>/replay-output` (a new folder per run) unless `--out` says otherwise.
+
 ## Persistence and stopping
 
 Default data directory: `~/.trading-agent`, overridable with

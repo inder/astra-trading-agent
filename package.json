@@ -12,6 +12,7 @@
     "connect": "node src/connect.ts",
     "setup": "node src/setup.ts",
     "install-agent": "node src/install-agent.ts",
+    "replay": "node src/replay.ts",
     "test": "node --test test/*.test.ts",
     "test:e2e": "node --test test/e2e/*.e2e.ts",
     "typecheck": "tsc --noEmit",

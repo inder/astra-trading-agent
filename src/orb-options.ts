@@ -5,7 +5,7 @@ export interface CallQuote { id: string; bid: number; ask: number; askSize: numb
 export interface OrbOptionsConfig {
   date: string; symbols: string[]; openingRangeMinutes: 2; stopBufferFraction: number;
   budgetCentsPerPosition: number; budgetCentsPerDay: number; minimumContracts: number; maximumContractsPerTrade: number | null;
-  maximumPositions: number; trimGainFraction: number; maximumTrimSteps: number;
+  maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number;
   includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number;
@@ -22,19 +22,29 @@ export const SETTINGS = {
   maximumPositions: { default: 2, min: 1, max: 10 },
   maxOptionSpreadFraction: { default: 0.2, min: 0.01, max: 0.5 },
   feeReserveCentsPerContract: { default: 100, min: 0, max: 1000 },
+  // Exits (founder rules): sell ceil(n/2) at the first target, the last contract at the final target, any in between at the
+  // middle; the stock-based stop sits a buffer below the opening-range low; the Robinhood backstop sells at a fraction of entry.
+  stopBufferFraction: { default: 0.001, min: 0, max: 0.05 },
+  firstTargetMultiple: { default: 2, min: 1.1, max: 20 },
+  middleTargetMultiple: { default: 3, min: 1.1, max: 50 },
+  finalTargetMultiple: { default: 5, min: 1.1, max: 100 },
+  backstopFraction: { default: 0.5, min: 0.05, max: 0.95 },
 } as const;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
-    "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "trimGainFraction", "maximumTrimSteps",
+    "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs",
     "includePremarketLeadMinutes", "entryWindowMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
     c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) || c.openingRangeMinutes !== 2 ||
-    c.stopBufferFraction !== .001 || c.trimGainFraction !== .05 || c.maximumTrimSteps !== 4 ||
+    !inRange(c.stopBufferFraction, SETTINGS.stopBufferFraction, false) || !inRange(c.backstopFraction, SETTINGS.backstopFraction, false) ||
+    !inRange(c.firstTargetMultiple, SETTINGS.firstTargetMultiple, false) || !inRange(c.middleTargetMultiple, SETTINGS.middleTargetMultiple, false) ||
+    !inRange(c.finalTargetMultiple, SETTINGS.finalTargetMultiple, false) ||
+    !(c.firstTargetMultiple < c.middleTargetMultiple && c.middleTargetMultiple < c.finalTargetMultiple) ||
     !inRange(c.budgetCentsPerPosition, SETTINGS.budgetCentsPerPosition) || !inRange(c.budgetCentsPerDay, SETTINGS.budgetCentsPerDay) ||
     c.budgetCentsPerDay < c.budgetCentsPerPosition || !inRange(c.minimumContracts, SETTINGS.minimumContracts) ||
     !(c.maximumContractsPerTrade === null || (inRange(c.maximumContractsPerTrade, SETTINGS.maximumContractsPerTrade) && c.maximumContractsPerTrade >= c.minimumContracts)) ||
@@ -120,6 +130,24 @@ export function preferredWeeklyExpiration(listed: readonly string[], date: strin
     if (isWeekEnder(d) && tradingSessionsBetween(date, d) >= MIN_EXPIRY_SESSIONS) return listed.includes(d) ? d : null;
   throw new Error("No week-ending expiry within three weeks");
 }
+/** Round a price in cents up to the contract's valid increment: the small tick below the cutoff, the larger tick at or above it. */
+export function roundUpToTickCents(cents: number, belowCents: number, aboveCents: number, cutoffCents: number): number {
+  let rounded = Math.ceil((cents - 1e-8) / (cents < cutoffCents ? belowCents : aboveCents)) * (cents < cutoffCents ? belowCents : aboveCents);
+  if (rounded >= cutoffCents) rounded = Math.ceil(rounded / aboveCents) * aboveCents;
+  return rounded;
+}
+/** The Robinhood safety stop: backstopFraction of the entry premium, rounded UP to a valid tick (never more than that fraction lost). */
+export function backstopPrice(entryPremium: number, k: Pick<OrbCallContract, "tickBelow" | "tickAbove" | "tickCutoff">, fraction: number): number {
+  const cents = roundUpToTickCents(entryPremium * 100 * fraction, Math.round(k.tickBelow * 100), Math.round(k.tickAbove * 100), Math.round(k.tickCutoff * 100));
+  return Math.min(cents, Math.round(entryPremium * 100)) / 100;
+}
+/** Founder exit ladder: ceil(n/2) contracts at the first target (recovers the premium), the last contract at the final
+ *  target, and any in between at the middle target. Derived from the original quantity, never stored. */
+export function targetSchedule(n: number, c: Pick<OrbOptionsConfig, "firstTargetMultiple" | "middleTargetMultiple" | "finalTargetMultiple">) {
+  const first = Math.ceil(n / 2), last = n >= 2 ? 1 : 0, middle = n - first - last;
+  return [{ multiple: c.firstTargetMultiple, quantity: first }, { multiple: c.middleTargetMultiple, quantity: middle },
+    { multiple: c.finalTargetMultiple, quantity: last }].filter(r => r.quantity > 0);
+}
 /** Founder rule: the strike nearest the stock price (ITM or OTM) where at least minimumContracts fit under the cap, then
  *  fill up to the cap at that strike, bounded by the displayed ask size (and maximumContractsPerTrade if set). capCents is
  *  the caller's min(per-trade cap, per-day cap - already committed), so the runtime and the sample share one budget rule. */
@@ -138,8 +166,7 @@ export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: rea
     const belowTickCents = Math.round(k.tickBelow * 100), aboveTickCents = Math.round(k.tickAbove * 100), cutoffCents = Math.round(k.tickCutoff * 100);
     if (![belowTickCents, aboveTickCents, cutoffCents].every(v => Number.isSafeInteger(v) && v > 0) ||
       Math.abs(k.tickBelow * 100 - belowTickCents) > 1e-7 || Math.abs(k.tickAbove * 100 - aboveTickCents) > 1e-7) continue;
-    let limitCents = Math.ceil((q.ask * 100 - 1e-8) / (q.ask * 100 < cutoffCents ? belowTickCents : aboveTickCents)) * (q.ask * 100 < cutoffCents ? belowTickCents : aboveTickCents);
-    if (limitCents >= cutoffCents) limitCents = Math.ceil(limitCents / aboveTickCents) * aboveTickCents;
+    const limitCents = roundUpToTickCents(q.ask * 100, belowTickCents, aboveTickCents, cutoffCents);
     const unit = limitCents * 100 + c.feeReserveCentsPerContract;
     const quantity = Math.min(q.askSize, Math.floor(capCents / unit), c.maximumContractsPerTrade ?? Number.MAX_SAFE_INTEGER);
     if (quantity < c.minimumContracts) continue;
@@ -156,21 +183,27 @@ type Status = "forming" | "watching" | "disqualified" | "entry_pending" | "open"
 /** Why a symbol stopped watching without entering; surfaced in views and the journal. */
 export type EndReason = "opening_low_failed" | "range_unavailable" | "late_first_quote" | "observation_gap" | "entry_window_closed" | "resumed_management_only";
 const END_REASONS: readonly EndReason[] = ["opening_low_failed", "range_unavailable", "late_first_quote", "observation_gap", "entry_window_closed", "resumed_management_only"];
-interface Position { contractId: string; originalQuantity: number; remainingQuantity: number; entryStockPrice: number; trimStepsFilled: number }
+export type SaleReason = "protective_stop" | "breakeven_stop" | "broker_backstop" | "profit_target" | "user_trim" | "user_close" | "session_close";
+interface Position {
+  contractId: string; originalQuantity: number; remainingQuantity: number; entryStockPrice: number;
+  entryPremium: number; backstopPrice: number; targetsSold: number; userSold: number; stage: "initial" | "breakeven";
+}
 interface SymbolState {
   status: Status; range: SetupRange | null; openingRange: OpeningRange | null; endReason: EndReason | null;
-  lastTradeMs: number | null; lastObservationMs: number | null; position: Position | null; pendingSale: number;
+  lastTradeMs: number | null; lastObservationMs: number | null; lastPrice: number | null;
+  position: Position | null; pendingSale: number; pendingReason: SaleReason | null;
 }
 export type OrbIntent =
   | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; range: SetupRange }
-  | { kind: "sell_to_close"; reason: "protective_stop" | "profit_trim" | "user_trim" | "user_close" | "session_close"; symbol: string; contractId: string; quantity: number; stockPrice: number; at: number };
+  | { kind: "sell_to_close"; reason: SaleReason; symbol: string; contractId: string; quantity: number; stockPrice: number | null; at: number;
+      optionBid?: number; targets?: number[] };
 export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPositions: number }
 export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
   constructor(config: OrbOptionsConfig) {
     this.config = parseOrbOptionsConfig(config);
     this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null,
-      lastTradeMs: null, lastObservationMs: null, position: null, pendingSale: 0 }]));
+      lastTradeMs: null, lastObservationMs: null, lastPrice: null, position: null, pendingSale: 0, pendingReason: null }]));
   }
   setRange(symbol: string, range: OpeningRange): void {
     const s = this.#need(symbol);
@@ -206,7 +239,7 @@ export class OrbOptionsEngine {
     s.lastObservationMs = observedAt;
     if (s.lastTradeMs !== null && at - s.lastTradeMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
     if (s.lastTradeMs !== null && at <= s.lastTradeMs) return [];
-    s.lastTradeMs = at;
+    s.lastTradeMs = at; s.lastPrice = stockPrice;
     if (s.status === "watching" && s.openingRange && at >= s.openingRange.endMs) {
       // The founder's rule: a trade beneath the opening-range low ends the day for this symbol, even if it later rallies.
       // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
@@ -215,27 +248,38 @@ export class OrbOptionsEngine {
       else if (stockPrice > s.openingRange.high) return this.#reserve(symbol, stockPrice, at, { ...structuredClone(s.openingRange), setup: "opening_range" });
     }
     if (s.status !== "open" || !s.position || !s.range || s.pendingSale) return [];
-    const p = s.position, stop = s.range.low * (1 - this.config.stopBufferFraction);
-    if (stockPrice < stop) {
-      s.pendingSale = p.remainingQuantity;
-      return [{ kind: "sell_to_close", reason: "protective_stop", symbol, contractId: p.contractId, quantity: p.remainingQuantity, stockPrice, at }];
-    }
-    const levelsReached = Math.min(this.config.maximumTrimSteps, Math.floor((stockPrice / p.entryStockPrice - 1 + 1e-12) / this.config.trimGainFraction));
-    // One contract per level up to four contracts; larger positions scale proportionally so the fourth level exits fully.
-    const targetSold = Math.min(p.originalQuantity, Math.max(levelsReached, Math.ceil(p.originalQuantity * levelsReached / this.config.maximumTrimSteps)));
-    const alreadySold = p.originalQuantity - p.remainingQuantity;
-    const quantity = targetSold - alreadySold;
-    if (quantity > 0) {
-      s.pendingSale = quantity;
-      return [{ kind: "sell_to_close", reason: "profit_trim", symbol, contractId: p.contractId, quantity, stockPrice, at }];
-    }
+    const p = s.position;
+    // Before the first target: the opening-range stop. After it (founder ruling): the stock back to its entry price.
+    if (p.stage === "breakeven" ? stockPrice <= p.entryStockPrice : stockPrice < s.range.low * (1 - this.config.stopBufferFraction))
+      return this.#sellAll(symbol, p.stage === "breakeven" ? "breakeven_stop" : "protective_stop", stockPrice, at);
     return [];
   }
-  confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number): void {
+  /** Option-price exits from a fresh bid: the simulated Robinhood backstop, then every newly reached target in one sale. */
+  observeOption(symbol: string, bid: number, at: number): OrbIntent[] {
+    const s = this.#need(symbol), p = s.position;
+    if (!(bid > 0) || !Number.isFinite(bid) || !Number.isFinite(at)) throw new Error("Invalid option bid");
+    if (s.status !== "open" || !p || s.pendingSale) return [];
+    if (bid <= p.backstopPrice + 1e-9) return this.#sellAll(symbol, "broker_backstop", s.lastPrice, at, bid);
+    const consumed = p.targetsSold + p.userSold; let end = 0, sellTo = consumed; const targets: number[] = [];
+    for (const rung of targetSchedule(p.originalQuantity, this.config)) {
+      end += rung.quantity;
+      if (end <= consumed) continue;
+      if (bid * 100 + 1e-6 < rung.multiple * p.entryPremium * 100) break;
+      sellTo = end; targets.push(rung.multiple);
+    }
+    const quantity = sellTo - consumed;
+    if (quantity <= 0) return [];
+    s.pendingSale = quantity; s.pendingReason = "profit_target";
+    return [{ kind: "sell_to_close", reason: "profit_target", symbol, contractId: p.contractId, quantity, stockPrice: s.lastPrice, at, optionBid: bid, targets }];
+  }
+  confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number, entryPremium: number, backstop: number): void {
     const s = this.#need(symbol);
     if (s.status !== "entry_pending" || !/^[a-f0-9-]{36}$/.test(contractId) || !Number.isInteger(quantity) || quantity < this.config.minimumContracts ||
-      (this.config.maximumContractsPerTrade !== null && quantity > this.config.maximumContractsPerTrade) || !(entryStockPrice > 0)) throw new Error("Invalid entry confirmation");
-    s.position = { contractId, originalQuantity: quantity, remainingQuantity: quantity, entryStockPrice, trimStepsFilled: 0 }; s.status = "open";
+      (this.config.maximumContractsPerTrade !== null && quantity > this.config.maximumContractsPerTrade) || !(entryStockPrice > 0) ||
+      !(entryPremium > 0 && Number.isFinite(entryPremium)) || !(backstop > 0 && backstop <= entryPremium)) throw new Error("Invalid entry confirmation");
+    s.position = { contractId, originalQuantity: quantity, remainingQuantity: quantity, entryStockPrice, entryPremium, backstopPrice: backstop,
+      targetsSold: 0, userSold: 0, stage: "initial" };
+    s.status = "open";
   }
   failEntry(symbol: string): void {
     const s = this.#need(symbol); if (s.status !== "entry_pending") throw new Error("No pending entry");
@@ -244,18 +288,34 @@ export class OrbOptionsEngine {
   confirmSale(symbol: string, quantity: number): void {
     const s = this.#need(symbol), p = s.position;
     if (s.status !== "open" || !p || quantity !== s.pendingSale || quantity > p.remainingQuantity) throw new Error("Invalid sale confirmation");
-    p.remainingQuantity -= quantity; p.trimStepsFilled += quantity; s.pendingSale = 0;
+    if (s.pendingReason === "profit_target") {
+      // Any engine target fill means the option reached at least the first target, so the stop moves to breakeven;
+      // a user trim does not (the user may trim a loser).
+      p.stage = "breakeven"; p.targetsSold += quantity;
+    } else if (s.pendingReason === "user_trim") p.userSold += quantity;
+    p.remainingQuantity -= quantity; s.pendingSale = 0; s.pendingReason = null;
     if (!p.remainingQuantity) s.status = "closed";
   }
-  failSale(symbol: string): void { const s = this.#need(symbol); if (!s.pendingSale) throw new Error("No pending sale"); s.pendingSale = 0; }
-  requestPositionSale(symbol: string, reason: "user_trim" | "user_close" | "protective_stop" | "session_close", quantity: number, expectedRemainingQuantity: number,
-    stockPrice: number, at: number): OrbIntent[] {
+  failSale(symbol: string): void { const s = this.#need(symbol); if (!s.pendingSale) throw new Error("No pending sale"); s.pendingSale = 0; s.pendingReason = null; }
+  /** Money lost: contracts still unsold at the close end the day as a total loss of their remaining premium. */
+  writeOff(symbol: string): number {
+    const s = this.#need(symbol), p = s.position;
+    if (s.status !== "open" || !p) return 0;
+    const quantity = p.remainingQuantity; p.remainingQuantity = 0; s.pendingSale = 0; s.pendingReason = null; s.status = "closed";
+    return quantity;
+  }
+  requestPositionSale(symbol: string, reason: Exclude<SaleReason, "profit_target">, quantity: number, expectedRemainingQuantity: number,
+    stockPrice: number | null, at: number): OrbIntent[] {
     const s = this.#need(symbol), p = s.position;
     if (s.status !== "open" || !p || s.pendingSale || !Number.isSafeInteger(quantity) || quantity <= 0 ||
       !Number.isSafeInteger(expectedRemainingQuantity) || expectedRemainingQuantity !== p.remainingQuantity || quantity > p.remainingQuantity ||
-      (reason !== "user_trim" && quantity !== p.remainingQuantity) || !(stockPrice > 0) || !Number.isFinite(at)) return [];
-    s.pendingSale = quantity;
-    return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity, stockPrice, at }];
+      (reason !== "user_trim" && quantity !== p.remainingQuantity) || !(stockPrice === null || stockPrice > 0) || !Number.isFinite(at)) return [];
+    s.pendingSale = quantity; s.pendingReason = reason;
+    return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity, stockPrice: stockPrice ?? s.lastPrice, at }];
+  }
+  #sellAll(symbol: string, reason: SaleReason, stockPrice: number | null, at: number, optionBid?: number): OrbIntent[] {
+    const s = this.#need(symbol), p = s.position!; s.pendingSale = p.remainingQuantity; s.pendingReason = reason;
+    return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity: p.remainingQuantity, stockPrice, at, ...(optionBid ? { optionBid } : {}) }];
   }
   snapshot(): OrbSnapshot { return { symbols: Object.fromEntries([...this.#state].map(([k, v]) => [k, structuredClone(v)])), reservedPositions: this.#reserved }; }
   restore(raw: OrbSnapshot): void {
@@ -265,7 +325,7 @@ export class OrbOptionsEngine {
     let reserved = 0;
     for (const symbol of this.config.symbols) {
       const s = raw.symbols[symbol];
-      if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0)
+      if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0 || s.pendingReason !== null)
         throw new Error("Checkpoint contains incomplete transaction");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
         (s.status === "watching" && !s.openingRange)) throw new Error("Invalid saved symbol state");
@@ -275,7 +335,11 @@ export class OrbOptionsEngine {
           !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isSafeInteger(p.originalQuantity) || p.originalQuantity < this.config.minimumContracts ||
           (this.config.maximumContractsPerTrade !== null && p.originalQuantity > this.config.maximumContractsPerTrade) ||
           !Number.isInteger(p.remainingQuantity) || p.remainingQuantity < 0 || p.remainingQuantity > p.originalQuantity ||
-          (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0)) throw new Error("Invalid saved position");
+          (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0) ||
+          !(p.entryPremium > 0) || !(p.backstopPrice > 0 && p.backstopPrice <= p.entryPremium) || !["initial", "breakeven"].includes(p.stage) ||
+          !Number.isSafeInteger(p.targetsSold) || p.targetsSold < 0 || !Number.isSafeInteger(p.userSold) || p.userSold < 0 ||
+          (p.stage === "breakeven" && p.targetsSold < 1) ||
+          (s.status === "open" && p.originalQuantity - p.remainingQuantity !== p.targetsSold + p.userSold)) throw new Error("Invalid saved position");
       } else if (s.position) throw new Error("Unexpected saved position");
     }
     if (reserved !== raw.reservedPositions) throw new Error("Invalid saved risk reservations");

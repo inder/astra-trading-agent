@@ -71,7 +71,9 @@ positions, with no new entries after a gap. An active owner lock prevents two
 processes managing the same run. Ambiguous ownership/corrupt state fails closed
 for offline inspection. Never delete reservations to reset budgets.
 
-The runner attempts simulated liquidation one minute before regular/early close.
-Without valid quotes, unresolved positions stay visible at session end. Expired
+The runner sells everything still held at the fresh option bid one minute
+before regular/early close; no stock quote is needed. Contracts that cannot be
+sold by the close (no fresh bid) are written off at -100% of their premium and
+journaled as `written_off`, never given an invented price. Expired
 sessions cannot resume. A new date needs a new configuration: no automatic
 rollover, exercise or overnight management is implemented.

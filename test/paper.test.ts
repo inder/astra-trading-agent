@@ -45,24 +45,48 @@ test("another paper strategy plugs into the same controller without transport-sp
   assert.equal(service.paper.status(setup.runId).events[0]?.type, "plugin_completed");
   await service.close();
 });
-test("full paper lifecycle enforces two names, budgets, option P&L, trims and stop", async t => {
+test("full paper lifecycle enforces two names, budgets, option targets, breakeven and the stop", async t => {
   const f = fixture(t); await entered(f);
   f.advance(); f.prices.DEMOB = 106; f.prices.DEMOC = 106;
   await f.service.paper.tick(setup.runId);
   let status = f.service.paper.status(setup.runId);
   assert.equal(status.view.positions.length, 2); assert.equal(status.view.committedCents, 320800);
-  f.advance(); f.prices.DEMOA = 106 * 1.05; f.prices.DEMOB = 99; f.setBid(5);
+  assert.deepEqual(status.view.positions.map(p => [p.stage, p.backstop, p.stop]), [["initial", 2, 99.9], ["initial", 2, 99.9]]);
+  f.advance(); f.prices.DEMOB = 99; f.setBid(3);                 // DEMOB trades through its opening-range stop
+  await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOA = 108; f.setBid(8);                // DEMOA's option doubles: half its contracts sell
   await f.service.paper.tick(setup.runId);
   status = f.service.paper.status(setup.runId);
-  assert.equal(status.view.positions.length, 1); assert.equal(status.view.positions[0]?.quantity, 3);
-  assert.equal(status.view.realizedPnlCents, 50000); // five contracts, $100 each in this invented quote fixture
-  assert.equal(status.view.unrealizedPnlCents, 30000);
-  assert.equal(status.view.committedCents, 320800); // sales never release entry budget
-  assert.equal(f.service.paper.daily(date).realizedPnlCents, 50000);
-  const events = f.service.paper.events(setup.runId).flatMap(p => p.events);
-  assert.equal(events.filter(e => e.type === "paper_entry").length, 2);
-  assert.ok(events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop"));
+  assert.equal(status.view.positions.length, 1); assert.equal(status.view.positions[0]?.quantity, 2);
+  assert.equal(status.view.positions[0]?.stage, "breakeven"); assert.equal(status.view.positions[0]?.stop, 106);
+  assert.equal(status.view.realizedPnlCents, 40000);             // DEMOB 4 × ($3 − $4) + DEMOA 2 × ($8 − $4), fees excluded
+  assert.equal(status.view.unrealizedPnlCents, 80000);
+  assert.equal(status.view.committedCents, 320800);              // sales never release entry budget
+  f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);   // back to the entry price
+  status = f.service.paper.status(setup.runId);
+  assert.equal(status.view.positions.length, 0); assert.equal(status.view.realizedPnlCents, 120000);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, 120000);
+  const events = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events);
+  assert.deepEqual(events.filter(e => e.type === "paper_entry").map(e => (e.data as any).backstopPrice), [2, 2]);
+  assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => { const d = e.data as any; return [d.symbol, d.reason, d.quantity, d.targets ?? null]; }),
+    [["DEMOB", "protective_stop", 4, null], ["DEMOA", "profit_target", 2, [2]], ["DEMOA", "breakeven_stop", 2, null]]);
   assert.equal(status.ordersSubmitted, 0);
+});
+test("the simulated Robinhood backstop sells everything once the bid halves, with no stock move needed", async t => {
+  const f = fixture(t); await entered(f);
+  f.advance(); f.setBid(2.01); await f.service.paper.tick(setup.runId);
+  assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
+  f.advance(); f.setBid(2); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0); assert.equal(s.view.realizedPnlCents, -80000);   // 4 × ($2 − $4)
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop"));
+});
+test("the final-minute flatten needs only a fresh option bid, not a fresh stock quote", async t => {
+  const f = fixture(t); await entered(f); f.staleStock(6000); f.setTime(close - 60000);
+  await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "session_close"));
 });
 test("stale option prices skip entry and cannot fabricate exit fills or current P&L", async t => {
   const f = fixture(t); await entered(f);
@@ -159,19 +183,26 @@ test("provider outage halts without losing the last committed paper position", a
   assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
   assert.equal(f.service.paper.status(setup.runId).attached, false);
 });
-test("session-close simulation flattens only with valid quotes, otherwise reports unresolved positions", async t => {
+test("session-close simulation flattens at the fresh bid one minute before the close", async t => {
   const f = fixture(t); await entered(f); f.setTime(close - 60000);
   await f.service.paper.tick(setup.runId);
   assert.equal(f.service.paper.status(setup.runId).view.positions.length, 0);
   f.setTime(close); await f.service.paper.tick(setup.runId);
-  assert.equal(f.service.paper.status(setup.runId).status, "completed");
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "completed"); assert.equal(s.view.realizedPnlCents, -4000);   // 4 × ($3.90 − $4.00)
+  assert.deepEqual(s.events.find(e => e.type === "session_ended")?.data, { writtenOff: 0, noAutomaticCarryOrExercise: true });
   await assert.rejects(f.service.paper.start(setup.runId, true), /expired/);
 });
-test("unfilled session-close exits remain visible rather than being marked closed", async t => {
+test("contracts that cannot be sold before the close are written off as a total loss", async t => {
   const f = fixture(t); await entered(f); f.staleOption(6000); f.setTime(close - 60000);
-  await f.service.paper.tick(setup.runId); f.setTime(close); await f.service.paper.tick(setup.runId);
+  await f.service.paper.tick(setup.runId);
+  assert.equal(f.service.paper.status(setup.runId).view.positions.length, 1, "no fill is invented from a stale bid");
+  f.setTime(close); await f.service.paper.tick(setup.runId);
   const s = f.service.paper.status(setup.runId);
-  assert.equal(s.status, "completed"); assert.equal(s.view.positions.length, 1); assert.equal(s.view.unrealizedPnlCents, null);
+  assert.equal(s.status, "completed"); assert.equal(s.view.positions.length, 0); assert.equal(s.view.realizedPnlCents, -160000);
+  assert.deepEqual(s.events.filter(e => e.type === "written_off").map(e => e.data),
+    [{ symbol: "DEMOA", contractId: id(1), quantity: 4, realizedPnlCents: -160000, reason: "unsold_at_session_end" }]);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
 });
 test("corrupt checkpoint cannot resume a fabricated reservation", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
@@ -233,6 +264,15 @@ test("chat settings arrive in human units and are pinned to the run in internal 
   const defaults = JSON.parse(((await configure({ runId: "defaults" })).content as any)[0].text).config;
   assert.deepEqual([defaults.budgetCentsPerPosition, defaults.budgetCentsPerDay, defaults.minimumContracts, defaults.maximumContractsPerTrade,
     defaults.maximumPositions, defaults.maxOptionSpreadFraction, defaults.feeReserveCentsPerContract, defaults.entryWindowMinutes], [200000, 400000, 4, null, 2, .2, 100, 90]);
+  assert.deepEqual([defaults.firstTargetMultiple, defaults.middleTargetMultiple, defaults.finalTargetMultiple, defaults.backstopFraction, defaults.stopBufferFraction],
+    [2, 3, 5, .5, .001]);
+  // Exit settings: multiples as multiples, the backstop and stop buffer in percent.
+  const exits = JSON.parse(((await configure({ runId: "exits", firstTargetMultiple: 1.5, middleTargetMultiple: 2.5, finalTargetMultiple: 4,
+    backstopPercent: 40, stopBufferPercent: .5 })).content as any)[0].text).config;
+  assert.deepEqual([exits.firstTargetMultiple, exits.middleTargetMultiple, exits.finalTargetMultiple, exits.backstopFraction, exits.stopBufferFraction],
+    [1.5, 2.5, 4, .4, .005]);
+  assert.ok((await configure({ runId: "unordered", firstTargetMultiple: 3, middleTargetMultiple: 3 })).isError, "targets must rise");
+  assert.ok((await configure({ runId: "backstop", backstopPercent: 100 })).isError, "a backstop at the entry premium is not a stop");
   assert.ok((await configure({ runId: "fractional", maxPremiumPerTradeDollars: 1000.5 })).isError, "dollars must be whole");
   assert.ok((await configure({ runId: "inverted", maxPremiumPerTradeDollars: 3000, maxPremiumPerDayDollars: 2000 })).isError, "day cap below trade cap");
 });

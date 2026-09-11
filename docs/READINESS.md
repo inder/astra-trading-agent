@@ -19,11 +19,12 @@ and journal inspection. SDK OAuth discovery, registration, PKCE, callback securi
 and tool checks use mocked provider responses. Continuous market-data and
 simulated entry, marking, trim and exit tests also use invented data.
 
-Checks cover both entry setups, optional premarket history, whole-contract sizing,
-fee reserves and two-name/session limits, duplicate ownership, no budget recycling,
-stale/future/foreign data, deferred protective exits surviving rebounds/restarts,
-provider failure, revisions, recovery, session/early-close handling, and unresolved
-exits remaining visible at close. A timer test verifies progress without a chat
+Checks cover the opening-range setup, optional premarket history, whole-contract
+sizing, fee reserves and two-name/session limits, duplicate ownership, no budget
+recycling, stale/future/foreign data, the 2×/3×/5× option targets, breakeven, the
+simulated 50% backstop, deferred exits surviving rebounds/restarts, provider
+failure, revisions, recovery, session/early-close handling, and write-off of
+contracts that cannot be sold before the close. A timer test verifies progress without a chat
 client driving each tick. CI repeats typecheck and tests on Node 24 and 26.
 
 ## Attended acceptance gate
@@ -46,12 +47,13 @@ No real-account readiness or trading performance is claimed.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio
   follows its client. No launch daemon, cloud hosting or public client OAuth.
-- Strategy 0.3.0 changed expiry selection. Paper runs configured under 0.2.0
-  cannot resume or be reconfigured under the same runId; configure a new runId.
+- Strategy 0.6.0 replaced the stock-gain trims with option-price targets. Paper
+  runs configured under an earlier version cannot resume or be reconfigured under
+  the same runId; configure a new runId.
 - Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover
   or recovery after session end.
-- Missing exit quotes leave unresolved paper positions visible. No invented
-  liquidation, exercise or overnight management.
+- Contracts with no fresh bid by the close are written off at -100%. No invented
+  liquidation price, exercise or overnight management.
 - Single owner, one run per strategy/date, no account sharing or multi-tenancy.
 - Journals grow during runs; no automatic retention/deletion. Keep data private.
 - License selection is pending. Public source alone is not an open-source

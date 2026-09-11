@@ -23,14 +23,14 @@ test("disconnected startup and preview are honest and write nothing", t => {
   assert.throws(() => service.preview(request.strategyId, ["DEMOA", "DEMOA"], false));
   assert.throws(() => service.preview(request.strategyId, ["../../private"], false));
 });
-test("sample uses actual engine sizing, position cap, four trims and protective stop", t => {
+test("sample uses actual engine sizing, position cap, the 2x/3x/5x option targets and the protective stop", t => {
   const { service } = fixture(t); const run = service.runSample(request);
   assert.equal(run.mode, "synthetic_sample"); assert.equal(run.summary.ordersSubmitted, 0);
   assert.equal(run.summary.pnl, null); assert.equal(run.summary.committedCents, 320800);
   assert.equal(run.events.filter(e => e.type === "simulated_entry").length, 2);
   const sales = run.events.filter(e => e.type === "simulated_sale").map(e => e.data as any);
-  assert.equal(sales.filter(e => e.reason === "profit_trim").length, 4);
-  assert.ok(sales.some(e => e.reason === "protective_stop" && e.quantity === 4));
+  assert.deepEqual(sales.map(e => [e.symbol, e.reason, e.quantity, e.fillPrice]),
+    [["DEMOA", "profit_target", 2, 8], ["DEMOB", "protective_stop", 4, null], ["DEMOA", "profit_target", 1, 12], ["DEMOA", "profit_target", 1, 20]]);
   assert.ok(run.events.some(e => e.type === "entry_skipped" && (e.data as any).symbol === "DEMOC"));
   assert.deepEqual(run.events.map(e => e.sequence), run.events.map((_, i) => i + 1));
 });

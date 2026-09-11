@@ -58,8 +58,8 @@ npm run demo
 ```
 
 The demo uses invented prices for DEMOA, DEMOB and DEMOC. It exercises opening
-range entry, a two-position cap, four whole-contract trims, and a protective
-stop. It writes a complete synthetic event record and prints its location.
+range entry, a two-position cap, the 2×/3×/5× option-price targets, and a
+protective stop. It writes a complete synthetic event record and prints its location.
 Option exit prices are not modeled, so P&L is unavailable, not zero. The sample
 date is fixed to September 8, 2026; symbols are labels, not fetched market data.
 
@@ -194,8 +194,8 @@ the contracts displayed at the ask, so how far from the money it lands depends o
 the stock's price. Each of these is a setting you can change when configuring a
 run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`, `minimumContracts`,
 `maximumContractsPerTrade`, `maximumPositions`, `maxOptionSpreadPercent`,
-`feeReserveCentsPerContract`, `entryWindowMinutes`); a run keeps the settings it
-started with.
+`feeReserveCentsPerContract`, `entryWindowMinutes`, and the exit settings below);
+a run keeps the settings it started with.
 The expiry is the first week-ending expiration with at least three trading
 sessions counting the trade day. In a normal week that means Monday–Wednesday
 trades use that week's Friday and Thursday/Friday trades use the following Friday.
@@ -204,11 +204,20 @@ Thursday, and a Wednesday before a holiday Thursday or Friday rolls to the next
 week. If that expiration is not listed, the stock is skipped for the day rather
 than traded in a later expiry.
 
-The stock's range low minus 0.1% is the protective threshold. A breach below it
-requests all remaining calls be sold. An unfilled protective exit stays pending
-through rebounds and recovery. The profit ladder sells whole contracts at stock
-gains of 5%, 10%, 15%, and 20% from entry, not option-price gains. User trims count
-toward contracts already sold; they do not add extra later-rung sales.
+Exits follow the option's bid, measured against the entry premium: half the
+contracts (rounded up) sell at 2×, which recovers the premium; the last contract
+sells at 5×; any in between sell at 3×. A bid that jumps past several targets
+sells them together. Before the first target, a stock trade below the range low
+minus 0.1% sells everything. After it, the stop moves to breakeven: the stock
+back at its entry price sells the rest. A simulated Robinhood safety stop sells
+everything if the bid falls to 50% of the entry premium (rounded up to a valid
+price increment). User trims come out of the nearest unfilled target and never
+move the stop. Everything still held sells at the bid one minute before the
+close; contracts that cannot be sold then are written off as a total loss.
+Settings: `firstTargetMultiple`, `middleTargetMultiple`, `finalTargetMultiple`
+(each must be higher than the one before), `backstopPercent`, `stopBufferPercent`.
+An unfilled stop, backstop or close exit stays pending through rebounds and
+recovery until a fresh bid fills it.
 
 Simulation assumes fresh ask entry and fresh bid sales, **not executions**. It
 does not model queue position, partial fills, market impact or actual fees. P&L

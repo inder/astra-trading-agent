@@ -1,17 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OrbOptionsEngine, preferredWeeklyExpiration, parseOpeningRange, parseOrbOptionsConfig,
-  replayOpeningRange, selectOrbCall, type OrbOptionsConfig } from "../src/orb-options.ts";
+import { OrbOptionsEngine, backstopPrice, preferredWeeklyExpiration, parseOpeningRange, parseOrbOptionsConfig,
+  replayOpeningRange, selectOrbCall, targetSchedule, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
 
 const config: OrbOptionsConfig = {
   date: "2026-09-08", symbols: ["CRWV", "SOXL", "MU", "INTC"], openingRangeMinutes: 2,
   stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
-  maximumPositions: 2, trimGainFraction: .05, maximumTrimSteps: 4, feeReserveCentsPerContract: 100,
-  maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
+  maximumPositions: 2, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopFraction: .5,
+  feeReserveCentsPerContract: 100, maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
   includePremarketLeadMinutes: 0, entryWindowMinutes: 90,
 };
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 const range = { high: 105, low: 100, startMs: 0, endMs: 120000 };
+/** An open CRWV position: stock entry at 106 (range 100–105), option entry at $4.00, backstop $2.00. */
+const opened = (quantity: number, extra: Partial<OrbOptionsConfig> = {}) => {
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000, ...extra }); e.setRange("CRWV", range);
+  assert.equal(e.observe("CRWV", 106, 120001)[0]?.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), quantity, 106, 4, 2);
+  return e;
+};
+const sale = (intents: OrbIntent[]) => {
+  assert.equal(intents.length, 1); const x = intents[0]; assert.ok(x?.kind === "sell_to_close"); return x;
+};
+const stage = (e: OrbOptionsEngine) => e.snapshot().symbols.CRWV!.position!.stage;
 
 test("risk and sizing are user settings with validated ranges and cross-checks", () => {
   assert.equal(parseOrbOptionsConfig(config).budgetCentsPerPosition, 200000);
@@ -104,15 +114,101 @@ test("on the article's day the distance from the money follows the stock price",
   const muOtm = mu.contract.strike / 1041 - 1;
   assert.ok(muOtm > .03 && muOtm < .08 && mu.quantity >= 4 && mu.committedCents <= 200000, `MU strike ${mu.contract.strike}`);
 });
-test("larger positions trim proportionally so the fourth level exits fully", () => {
-  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000 }); e.setRange("CRWV", range);
-  assert.equal(e.observe("CRWV", 106, 120001)[0]?.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), 8, 100);
-  const sold: number[] = [];
-  for (const [i, price] of [105, 110, 115, 120].entries()) {
-    const intent = e.observe("CRWV", price, 130000 + i * 1000)[0];
-    assert.ok(intent?.kind === "sell_to_close"); sold.push(intent.quantity); e.confirmSale("CRWV", intent.quantity);
-  }
-  assert.deepEqual(sold, [2, 2, 2, 2]); assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
+test("the exit ladder sells half (rounded up) at 2x, the last contract at 5x and any between at 3x", () => {
+  const rungs = (n: number) => targetSchedule(n, config).map(r => `${r.quantity}@${r.multiple}`).join(" ");
+  assert.equal(rungs(1), "1@2"); assert.equal(rungs(2), "1@2 1@5"); assert.equal(rungs(3), "2@2 1@5");
+  assert.equal(rungs(4), "2@2 1@3 1@5"); assert.equal(rungs(5), "3@2 1@3 1@5"); assert.equal(rungs(7), "4@2 2@3 1@5");
+  for (let n = 1; n <= 60; n++) assert.equal(targetSchedule(n, config).reduce((sum, r) => sum + r.quantity, 0), n);
+  assert.equal(parseOrbOptionsConfig({ ...config, firstTargetMultiple: 1.5, middleTargetMultiple: 2.5, finalTargetMultiple: 4 }).middleTargetMultiple, 2.5);
+  assert.throws(() => parseOrbOptionsConfig({ ...config, middleTargetMultiple: 2 }));     // targets must strictly rise
+  assert.throws(() => parseOrbOptionsConfig({ ...config, finalTargetMultiple: 2.5 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, firstTargetMultiple: 1 }));      // a "target" at a loss
+  assert.throws(() => parseOrbOptionsConfig({ ...config, backstopFraction: 1 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, stopBufferFraction: .06 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, trimGainFraction: .05 } as OrbOptionsConfig));  // the retired stock-% ladder
+});
+test("a target fires at exactly its multiple of the entry premium, not a cent below, one sale at a time", () => {
+  const e = opened(4);
+  assert.deepEqual(e.observeOption("CRWV", 7.99, 130000), []);
+  const first = sale(e.observeOption("CRWV", 8, 131000));
+  assert.equal(first.reason, "profit_target"); assert.equal(first.quantity, 2); assert.deepEqual(first.targets, [2]); assert.equal(first.optionBid, 8);
+  assert.deepEqual(e.observeOption("CRWV", 13, 131500), [], "nothing new while a sale is pending");
+  e.confirmSale("CRWV", 2);
+  assert.deepEqual(e.observeOption("CRWV", 11.99, 132000), []);
+  const middle = sale(e.observeOption("CRWV", 12, 133000)); assert.equal(middle.quantity, 1); assert.deepEqual(middle.targets, [3]); e.confirmSale("CRWV", 1);
+  assert.deepEqual(e.observeOption("CRWV", 19.99, 134000), []);
+  const last = sale(e.observeOption("CRWV", 20, 135000)); assert.equal(last.quantity, 1); assert.deepEqual(last.targets, [5]); e.confirmSale("CRWV", 1);
+  assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
+  // Cents-shaped premiums: $1.37 doubles at $2.74, not $2.73.
+  const odd = new OrbOptionsEngine({ ...config, symbols: ["CRWV"], maxObservationGapMs: 3_600_000 }); odd.setRange("CRWV", range);
+  odd.observe("CRWV", 106, 120001); odd.confirmEntry("CRWV", id(1), 4, 106, 1.37, .69);
+  assert.deepEqual(odd.observeOption("CRWV", 2.73, 130000), []); assert.equal(sale(odd.observeOption("CRWV", 2.74, 131000)).quantity, 2);
+});
+test("a bid that jumps past several targets sells them all in one order", () => {
+  const e = opened(4), jump = sale(e.observeOption("CRWV", 14, 130000));   // 3.5x: the first and middle targets at once
+  assert.equal(jump.quantity, 3); assert.deepEqual(jump.targets, [2, 3]); e.confirmSale("CRWV", 3);
+  assert.equal(stage(e), "breakeven"); assert.equal(e.snapshot().symbols.CRWV!.position!.remainingQuantity, 1);
+  const all = sale(opened(7).observeOption("CRWV", 25, 130000));             // 6.25x on seven contracts: every rung
+  assert.equal(all.quantity, 7); assert.deepEqual(all.targets, [2, 3, 5]);
+});
+test("after the first target the stop moves to the stock's entry price; before it the opening-range stop holds", () => {
+  const e = opened(4);
+  assert.deepEqual(e.observe("CRWV", 104, 130000), [], "below the stock entry, still above the opening-range stop");
+  e.observeOption("CRWV", 8, 131000); e.confirmSale("CRWV", 2); assert.equal(stage(e), "breakeven");
+  assert.deepEqual(e.observe("CRWV", 106.01, 132000), []);
+  const exit = sale(e.observe("CRWV", 106, 133000));                       // back to the entry price exactly
+  assert.equal(exit.reason, "breakeven_stop"); assert.equal(exit.quantity, 2); e.confirmSale("CRWV", 2);
+  assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
+  // Before the first target: the opening-range low less the buffer (a setting).
+  const initial = opened(4);
+  assert.deepEqual(initial.observe("CRWV", 99.91, 130000), []);
+  assert.equal(sale(initial.observe("CRWV", 99.89, 131000)).reason, "protective_stop");
+  const wide = opened(4, { stopBufferFraction: .01 });                     // stop at $99.00
+  assert.deepEqual(wide.observe("CRWV", 99.5, 130000), []);
+  assert.equal(sale(wide.observe("CRWV", 98.99, 131000)).reason, "protective_stop");
+});
+test("the simulated Robinhood backstop sells everything at half the entry premium, rounded up to a valid tick", () => {
+  const penny = { tickBelow: .01, tickAbove: .05, tickCutoff: 3 };
+  assert.equal(backstopPrice(4, penny, .5), 2);
+  assert.equal(backstopPrice(1.37, penny, .5), .69);      // $0.685 rounds up: never more than half lost
+  assert.equal(backstopPrice(5.98, penny, .5), 2.99);
+  assert.equal(backstopPrice(5.99, penny, .5), 3);        // $2.995 → $3.00, itself a valid nickel
+  assert.equal(backstopPrice(6.02, penny, .5), 3.05);     // above the $3 cutoff only nickels are valid
+  assert.equal(backstopPrice(6.34, penny, .5), 3.2);
+  assert.equal(backstopPrice(1.37, { tickBelow: .05, tickAbove: .05, tickCutoff: 3 }, .5), .7);
+  assert.equal(backstopPrice(4, penny, .3), 1.2);
+  assert.equal(backstopPrice(.05, { tickBelow: .05, tickAbove: .05, tickCutoff: 3 }, .95), .05, "never above the entry premium");
+  const e = opened(4);
+  assert.deepEqual(e.observeOption("CRWV", 2.01, 130000), []);
+  const stop = sale(e.observeOption("CRWV", 2, 131000));
+  assert.equal(stop.reason, "broker_backstop"); assert.equal(stop.quantity, 4); assert.equal(stop.optionBid, 2);
+  assert.throws(() => opened(4).confirmEntry("CRWV", id(1), 4, 106, 4, 2));                    // no pending entry
+  const bad = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); bad.setRange("CRWV", range); bad.observe("CRWV", 106, 120001);
+  assert.throws(() => bad.confirmEntry("CRWV", id(1), 4, 106, 4, 4.01), /entry confirmation/); // backstop above entry
+  assert.throws(() => bad.confirmEntry("CRWV", id(1), 4, 106, 0, 0), /entry confirmation/);
+});
+test("user trims shrink the lowest unfilled target and never move the stop; a later engine target does", () => {
+  const e = opened(4);
+  const trim = sale(e.requestPositionSale("CRWV", "user_trim", 1, 4, 104, 130000)); assert.equal(trim.reason, "user_trim"); e.confirmSale("CRWV", 1);
+  assert.equal(stage(e), "initial");
+  assert.equal(sale(e.observeOption("CRWV", 8, 131000)).quantity, 1, "only the rest of the first target"); e.confirmSale("CRWV", 1);
+  assert.equal(stage(e), "breakeven");
+  // The user trimmed the whole first target: the engine's first fill is the middle one, and it still moves the stop.
+  const early = opened(4); early.requestPositionSale("CRWV", "user_trim", 2, 4, 104, 130000); early.confirmSale("CRWV", 2);
+  assert.deepEqual(early.observeOption("CRWV", 11.99, 131000), []);
+  const mid = sale(early.observeOption("CRWV", 12, 132000)); assert.equal(mid.quantity, 1); assert.deepEqual(mid.targets, [3]); early.confirmSale("CRWV", 1);
+  assert.equal(stage(early), "breakeven");
+  assert.deepEqual(opened(4).requestPositionSale("CRWV", "user_close", 3, 4, 104, 130000), [], "a close must sell every remaining contract");
+});
+test("contracts unsold at the close are written off, and nothing can sell them afterwards", () => {
+  const e = opened(4); e.observeOption("CRWV", 8, 130000); e.confirmSale("CRWV", 2);
+  assert.equal(e.writeOff("CRWV"), 2); assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
+  assert.equal(e.writeOff("CRWV"), 0);
+  assert.deepEqual(e.observeOption("CRWV", 20, 131000), []);
+  assert.deepEqual(e.observe("CRWV", 99, 132000), []);
+  assert.deepEqual(e.requestPositionSale("CRWV", "user_close", 2, 2, 110, 133000), []);
+  const restored = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); restored.restore(e.snapshot());
+  assert.equal(restored.snapshot().symbols.CRWV!.status, "closed");
 });
 test("a trade beneath the opening-range low ends the day for that symbol; first two breakouts take both slots", () => {
   const e = new OrbOptionsEngine(config); for (const s of config.symbols) e.setRange(s, range);
@@ -144,7 +240,7 @@ test("new entries stop at the configurable window; open positions keep being man
   const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], entryWindowMinutes: 60, maxObservationGapMs: 3_600_000 });
   e.setRange("CRWV", range); e.setRange("MU", range);
   assert.equal(e.observe("CRWV", 106, 59 * 60000)[0]?.kind, "enter_calls");
-  e.confirmEntry("CRWV", id(1), 4, 106);
+  e.confirmEntry("CRWV", id(1), 4, 106, 4, 2);
   assert.deepEqual(e.observe("MU", 106, 60 * 60000), [], "a breakout at the window edge does not enter");
   assert.equal(e.snapshot().symbols.MU!.endReason, "entry_window_closed");
   const exit = e.observe("CRWV", 99.8, 61 * 60000)[0];
@@ -173,33 +269,35 @@ test("engine state round-trips through a checkpoint, and a tampered checkpoint i
   assert.throws(tamper(t => { t.symbols.CRWV.endReason = "opening_low_failed"; }), /symbol state/); // watching with a reason
   assert.throws(tamper(t => { t.symbols.MU.endReason = "made_up"; }), /symbol state/);
   assert.throws(tamper(t => { t.symbols.CRWV.openingRange = null; }), /symbol state/);          // watching without a range
+  // An open position after its first target: the exit-ladder fields round-trip and are validated.
+  const open = opened(4); open.observeOption("CRWV", 8, 130000); open.confirmSale("CRWV", 2);
+  const good = open.snapshot(), again = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); again.restore(good);
+  assert.deepEqual(again.snapshot(), good);
+  const bad = (patch: (p: any) => void) => { const t = structuredClone(good) as any; patch(t.symbols.CRWV.position); return () => again.restore(t); };
+  assert.throws(bad(p => { p.targetsSold = 0; p.userSold = 2; }), /saved position/);    // breakeven without an engine target
+  assert.throws(bad(p => { p.targetsSold = 1; }), /saved position/);                    // sold counts disagree with the quantity
+  assert.throws(bad(p => { p.backstopPrice = 4.05; }), /saved position/);               // backstop above the entry premium
+  assert.throws(bad(p => { p.stage = "trailing"; }), /saved position/);
+  assert.throws(bad(p => { delete p.entryPremium; }), /saved position/);
+  assert.throws(bad(p => { p.userSold = -1; p.targetsSold = 3; }), /saved position/);
+  assert.deepEqual(again.snapshot(), good, "a refused checkpoint leaves the engine unchanged");
 });
 test("one ticker with an unusable opening range can fail closed without blocking the basket", () => {
   const e = new OrbOptionsEngine({ ...config, symbols: ["INTC", "CRWV"] }); e.failRange("INTC"); e.setRange("CRWV", range);
   assert.equal(e.snapshot().symbols.INTC!.status, "disqualified"); assert.equal(e.snapshot().symbols.INTC!.endReason, "range_unavailable");
   assert.equal(e.observe("CRWV", 106, 120001)[0]?.kind, "enter_calls");
 });
-test("profit trims use stock gains and whole contracts for quantities two, three, and four", () => {
-  for (const quantity of [2, 3, 4]) {
-    const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); e.setRange("CRWV", range);
-    e.observe("CRWV", 106, 120001); e.confirmEntry("CRWV", id(1), quantity, 106);
-    for (let step = 1; step <= quantity; step++) {
-      const intent = e.observe("CRWV", 106 * (1 + .05 * step), 120001 + step) [0];
-      assert.equal(intent?.kind, "sell_to_close"); assert.equal(intent?.reason, "profit_trim"); assert.equal(intent?.quantity, 1);
-      e.confirmSale("CRWV", 1);
-    }
-    assert.equal(e.snapshot().symbols.CRWV!.status, "closed");
-  }
+test("a stock rise alone never sells: targets follow the option bid", () => {
+  const e = opened(4);
+  assert.deepEqual([130000, 131000, 132000].flatMap((at, i) => e.observe("CRWV", 106 * (1 + .1 * (i + 1)), at)), []);
 });
-test("jumping multiple stock thresholds batches trims; protective stop sells all remaining", () => {
-  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); e.setRange("CRWV", range);
-  e.observe("CRWV", 106, 120001); e.confirmEntry("CRWV", id(1), 4, 106);
-  const trim = e.observe("CRWV", 118, 120002)[0]!; assert.equal(trim.kind, "sell_to_close"); assert.equal(trim.reason, "profit_trim"); assert.equal(trim.quantity, 2); e.confirmSale("CRWV", 2);
-  const stop = e.observe("CRWV", 99.89, 120003)[0]!; assert.equal(stop.kind, "sell_to_close"); assert.equal(stop.reason, "protective_stop"); assert.equal(stop.quantity, 2);
+test("a protective stop after a user trim sells all the remaining contracts", () => {
+  const e = opened(4); e.requestPositionSale("CRWV", "user_trim", 1, 4, 104, 130000); e.confirmSale("CRWV", 1);
+  const stop = sale(e.observe("CRWV", 99.89, 131000)); assert.equal(stop.reason, "protective_stop"); assert.equal(stop.quantity, 3);
 });
 test("confirmed user trims and closes remain within the open whole-contract position", () => {
   const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); e.setRange("CRWV", range); const entry = e.observe("CRWV", 106, 120001)[0]!;
-  assert.equal(entry.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), 4, 106);
+  assert.equal(entry.kind, "enter_calls"); e.confirmEntry("CRWV", id(1), 4, 106, 4, 2);
   const trim = e.requestPositionSale("CRWV", "user_trim", 1, 4, 107, 130000)[0]!;
   assert.equal(trim.kind, "sell_to_close"); assert.equal(trim.quantity, 1); assert.equal(trim.reason, "user_trim"); e.confirmSale("CRWV", 1);
   assert.deepEqual(e.requestPositionSale("CRWV", "user_close", 3, 4, 107, 131000), []);

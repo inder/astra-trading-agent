@@ -62,6 +62,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   // Human units at the chat edge (whole dollars, whole numbers); parseOrbOptionsConfig re-validates in internal units.
   const dollars = (r: { min: number; max: number }) => z.number().int().min(r.min / 100).max(r.max / 100).optional();
   const whole = (r: { min: number; max: number }) => z.number().int().min(r.min).max(r.max).optional();
+  const multiple = (r: { min: number; max: number }) => z.number().min(r.min).max(r.max).optional();
+  const percent = (r: { min: number; max: number }) => z.number().min(r.min * 100).max(r.max * 100).optional();
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
     inputSchema: z.object({ ...configSchema, runId, date,
       entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
@@ -74,11 +76,18 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       maxOptionSpreadPercent: z.number().min(SETTINGS.maxOptionSpreadFraction.min * 100).max(SETTINGS.maxOptionSpreadFraction.max * 100).optional()
         .describe(`Widest bid-ask spread accepted, as a percent of the midpoint; default ${SETTINGS.maxOptionSpreadFraction.default * 100}.`),
       feeReserveCentsPerContract: whole(SETTINGS.feeReserveCentsPerContract).describe(`Cents reserved per contract for fees inside the cap; default ${SETTINGS.feeReserveCentsPerContract.default}.`),
+      firstTargetMultiple: multiple(SETTINGS.firstTargetMultiple).describe(`Option bid as a multiple of entry at which half the contracts (rounded up) sell; default ${SETTINGS.firstTargetMultiple.default}x.`),
+      middleTargetMultiple: multiple(SETTINGS.middleTargetMultiple).describe(`Multiple for contracts between the first half and the last one; default ${SETTINGS.middleTargetMultiple.default}x.`),
+      finalTargetMultiple: multiple(SETTINGS.finalTargetMultiple).describe(`Multiple for the last contract; default ${SETTINGS.finalTargetMultiple.default}x.`),
+      backstopPercent: percent(SETTINGS.backstopFraction).describe(`Robinhood safety stop as a percent of the entry premium; default ${SETTINGS.backstopFraction.default * 100}.`),
+      stopBufferPercent: percent(SETTINGS.stopBufferFraction).describe(`How far below the opening-range low the stock stop sits, in percent; default ${SETTINGS.stopBufferFraction.default * 100}.`),
     }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
-    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
+    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100 })));
+      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100,
+      backstopFraction: backstopPercent === undefined ? undefined : backstopPercent / 100,
+      stopBufferFraction: stopBufferPercent === undefined ? undefined : stopBufferPercent / 100 })));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. Does not place real orders.",

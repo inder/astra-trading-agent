@@ -10,7 +10,8 @@ export function parseAvailableOrbCallQuotes(raw: unknown, ids: readonly string[]
   const rows = (raw as any)?.data?.results;
   if (!Array.isArray(rows)) throw new Error("Missing option quote batch");
   const result: CallQuote[] = rows.map((r: any) => ({ id: r?.quote?.instrument_id, bid: Number(r?.quote?.bid_price),
-    ask: Number(r?.quote?.ask_price), askSize: r?.quote?.ask_size, updatedAt: r?.quote?.updated_at, retrievedAt }));
+    // Robinhood may send sizes as strings; an uncoerced "20" would fail every integer check and block every entry.
+    ask: Number(r?.quote?.ask_price), askSize: Number(r?.quote?.ask_size), updatedAt: r?.quote?.updated_at, retrievedAt }));
   if (new Set(result.map(x => x.id)).size !== result.length || result.some(x => !ids.includes(x.id)))
     throw new Error("Duplicate or foreign option quote");
   return result;

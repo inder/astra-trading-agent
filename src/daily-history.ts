@@ -22,6 +22,14 @@ export function isTradingDay(date: string): boolean {
   return calendarCovers(date) && weekday(date) !== 0 && weekday(date) !== 6 && !HOLIDAYS.has(date);
 }
 export function isEarlyClose(date: string): boolean { return isTradingDay(date) && EARLY_CLOSES.has(date); }
+/** Regular-session open and close (epoch ms) for a covered trading day, 9:30 ET to 4:00 ET (1:00 on early closes). */
+export function sessionTimes(date: string) {
+  if (!isTradingDay(date)) throw new Error("Unsupported market session");
+  const noon = Date.parse(date + "T12:00:00Z");
+  const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hourCycle: "h23" }).format(noon));
+  const open = Date.parse(date + "T00:00:00Z") + (9.5 + 12 - hour) * 3600000;
+  return { open, close: open + (isEarlyClose(date) ? 3.5 : 6.5) * 3600000 };
+}
 // Weekends need no calendar; an uncovered weekday throws rather than being treated as a holiday.
 function tradingDayKnown(date: string): boolean {
   if (!parse(date)) throw new Error("Invalid calendar date");

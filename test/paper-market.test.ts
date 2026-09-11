@@ -21,6 +21,11 @@ test("option catalog selects Friday and accepts only standard tradable calls", a
   provider.datedCallInstruments = async () => ({ data: { instruments: [{ ...instrument, type: "put" }] } });
   await assert.rejects(loadOrbContracts(provider, "DEMOA", "2026-09-08"), /Missing/);
 });
+test("option quote sizes sent as strings are coerced, so they can pass the integer size checks", () => {
+  const at = "2026-09-08T15:00:00.000Z", id = "00000000-0000-0000-0000-000000000001";
+  const [quote] = parseAvailableOrbCallQuotes({ data: { results: [{ quote: { instrument_id: id, bid_price: "1.00", ask_price: "1.05", ask_size: "20", updated_at: at } }] } }, [id], at);
+  assert.equal(quote!.askSize, 20);
+});
 test("option pagination, duplicate identities and unexpected quotes fail closed", async () => {
   const { provider } = source();
   provider.datedCallInstruments = async () => ({ data: { instruments: [], next: "https://example.invalid/page?cursor=repeat" } });

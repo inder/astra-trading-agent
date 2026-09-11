@@ -66,6 +66,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const percent = (r: { min: number; max: number }) => z.number().min(r.min * 100).max(r.max * 100).optional();
   // Percent to fraction without float noise in the pinned config (0.7% -> 0.007, not 0.006999999999999999).
   const fraction = (p: number | undefined) => p === undefined ? undefined : Math.round(p * 1e6) / 1e8;
+  const seconds = (r: { min: number; max: number }) => z.number().min(r.min / 1000).max(r.max / 1000).optional();
+  const ms = (s: number | undefined) => s === undefined ? undefined : Math.round(s * 1000);
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
     inputSchema: z.object({ ...configSchema, runId, date,
       entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
@@ -84,8 +86,16 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       backstopPercent: percent(SETTINGS.backstopFraction).describe(`Robinhood safety stop as a percent of the entry premium; default ${SETTINGS.backstopFraction.default * 100}.`),
       stopBufferPercent: percent(SETTINGS.stopBufferFraction).describe(`How far below the opening-range low the stock stop sits, in percent; default ${SETTINGS.stopBufferFraction.default * 100}.`),
       flattenLeadMinutes: whole(SETTINGS.flattenLeadMinutes).describe(`Minutes before the close when everything still held sells and new entries stop; default ${SETTINGS.flattenLeadMinutes.default} (3:59 pm ET).`),
+      pollSeconds: seconds(SETTINGS.pollMs).describe(`Seconds between market-data polls; default ${SETTINGS.pollMs.default / 1000}.`),
+      maxQuoteAgeSeconds: seconds(SETTINGS.maxQuoteAgeMs).describe(`Oldest a stock or option quote may be when fetched and still be acted on; default ${SETTINGS.maxQuoteAgeMs.default / 1000}; at least one poll.`),
+      maxObservationGapSeconds: seconds(SETTINGS.maxObservationGapMs).describe(`Longest gap between observations before a watched stock is dropped for the day, so an unseen price path is never assumed; default ${SETTINGS.maxObservationGapMs.default / 1000}; at least two polls.`),
+      rangeDeadlineSeconds: seconds(SETTINGS.rangeDeadlineMs).describe(`How long after 9:32 ET to keep retrying the opening-range bars before skipping a stock; default ${SETTINGS.rangeDeadlineMs.default / 1000}.`),
+      readFailureHaltSeconds: seconds(SETTINGS.readFailureHaltMs).describe(`How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default ${SETTINGS.readFailureHaltMs.default / 1000}.`),
     }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
-    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
+    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent,
+      pollSeconds, maxQuoteAgeSeconds, maxObservationGapSeconds, rangeDeadlineSeconds, readFailureHaltSeconds, ...a }) => guarded(() => service.paper.configure({ ...a,
+      pollMs: ms(pollSeconds), maxQuoteAgeMs: ms(maxQuoteAgeSeconds), maxObservationGapMs: ms(maxObservationGapSeconds),
+      rangeDeadlineMs: ms(rangeDeadlineSeconds), readFailureHaltMs: ms(readFailureHaltSeconds),
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
       maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) })));

@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import type { AgentStrategy } from "./agent-strategies.ts";
 import type { PaperMarket } from "./paper-market.ts";
-import type { PaperRuntime, PaperControl, PaperEvent } from "./paper-runtime.ts";
+import { StepError, type PaperRuntime, type PaperControl, type PaperEvent } from "./paper-runtime.ts";
 import { sessionTimes } from "./orb-paper-runtime.ts";
 import type { StrategySettings } from "./orb-config.ts";
 
@@ -62,9 +62,11 @@ export class PaperController {
     return r;
   }
   status(id: string) { const record = this.get(id);
+    // A detached run's marks go stale on the run's own quote-age setting (5 s for strategies without one).
+    const setting = (record.config as { maxQuoteAgeMs?: unknown } | null)?.maxQuoteAgeMs, staleMs = typeof setting === "number" ? setting : 5000;
     if (!this.#active.has(id) && record.view.positions.some(p => {
       const age = p.markAt ? this.#clock() - Date.parse(p.markAt) : NaN;
-      return !Number.isFinite(age) || age < 0 || age > 5000;
+      return !Number.isFinite(age) || age < 0 || age > staleMs;
     })) {
       record.view = { ...record.view, unrealizedPnlCents: null, positions: record.view.positions.map(p => ({ ...p, markBid: null, markAt: null })) };
     }
@@ -142,7 +144,7 @@ export class PaperController {
   }
   #schedule(id: string) {
     if (!this.#auto) return; const active = this.#active.get(id); if (!active) return;
-    active.timer = setTimeout(() => { void this.tick(id).catch(() => {}); }, 1000);
+    active.timer = setTimeout(() => { void this.tick(id).catch(() => {}); }, active.runtime.pollMs ?? 1000);
   }
   tick(id: string) { return this.#serial(async () => {
     const active = this.#active.get(id); if (!active) throw new Error("Run is not attached");
@@ -155,9 +157,14 @@ export class PaperController {
       }
       if (view.complete) this.#release(id); else this.#schedule(id);
       return this.status(id);
-    } catch {
-      const next: PaperRecord = { ...active.record, revision: active.record.revision + 1, status: "error", at: new Date(this.#clock()).toISOString(),
-        events: [{ type: "run_halted", data: { reason: "data_or_storage_failure", noOrdersSubmitted: true } }] };
+    } catch (error) {
+      // Keep what the failed step already did: the runtime's own state (consistent at every await) and the events it produced,
+      // so an entry confirmed before the failure is neither lost nor re-bought with recycled budget on resume.
+      let kept = { checkpoint: active.record.checkpoint, view: active.record.view };
+      try { kept = { checkpoint: active.runtime.checkpoint(), view: active.runtime.view() }; } catch { /* the last good record stands */ }
+      const next: PaperRecord = { ...active.record, ...kept, revision: active.record.revision + 1, status: "error", at: new Date(this.#clock()).toISOString(),
+        events: [...(error instanceof StepError ? error.events : []), { type: "run_halted", data: { reason: "data_or_storage_failure",
+          detail: String((error as Error)?.message ?? error).slice(0, 200), noOrdersSubmitted: true } }] };
       try { this.#persist(next); } finally { this.#release(id); }
       throw new Error("Paper run halted; inspect status before explicit recovery");
     }

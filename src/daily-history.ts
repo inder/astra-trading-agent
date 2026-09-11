@@ -7,7 +7,7 @@ const HOLIDAYS = new Set([
   "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
 ]);
 const EARLY_CLOSES = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]); // 1:00 p.m. ET
-export class CalendarCoverageError extends Error {}
+export class CalendarCoverageError extends Error { name = "CalendarCoverageError"; }
 
 const parse = (date: string) => {
   const d = new Date(date + "T00:00:00Z");

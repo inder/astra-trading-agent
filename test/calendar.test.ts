@@ -66,3 +66,17 @@ test("an unlisted target expiry reaches the journal as a named policy skip", asy
   const skips = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "entry_skipped");
   assert.deepEqual(skips.map(e => e.data), [{ symbol: "DEMOA", reason: "no_qualifying_expiry" }]);
 });
+test("a calendar gap and a data failure reach the journal as different skip reasons", async t => {
+  for (const [thrown, expected] of [
+    [new CalendarCoverageError("Exchange calendar does not cover 2028"), { symbol: "DEMOA", reason: "calendar_not_covered" }],
+    [new Error("broker 503"), { symbol: "DEMOA", reason: "data_unavailable", detail: "broker 503" }],
+  ] as const) {
+    const f = fixture(t);
+    f.market.calls = async () => { throw thrown; };
+    f.service.paper.configure(setup); await f.service.paper.start(setup.runId);
+    f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
+    f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);
+    const skips = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "entry_skipped");
+    assert.deepEqual(skips.map(e => e.data), [expected]);
+  }
+});

@@ -1,4 +1,5 @@
 import { OrbOptionsEngine, preferredWeeklyExpiration, selectOrbCall, type OrbIntent, type OrbOptionsConfig } from "./orb-options.ts";
+import { addDays, isWeekEnder } from "./daily-history.ts";
 import { openingRangeConfig, type StrategySetupInput } from "./orb-config.ts";
 import type { PaperFactory } from "./paper-runtime.ts";
 import { OrbPaperRuntime } from "./orb-paper-runtime.ts";
@@ -33,8 +34,9 @@ export const openingRangeStrategy: AgentStrategy = {
       engine.setRange(symbol, range); emit("opening_range", { symbol, ...range });
     }
     let committedCents = 0;
-    // The sample's invented chain lists this Friday and next; the live expiry rule picks among them.
-    const expiration = preferredWeeklyExpiration(["2026-09-11", "2026-09-18"], config.date);
+    // The sample's invented chain lists every week-ending day for three weeks; the live expiry rule picks among them.
+    const listing = Array.from({ length: 21 }, (_, i) => addDays(config.date, i)).filter(isWeekEnder);
+    const expiration = preferredWeeklyExpiration(listing, config.date);
     if (!expiration) throw new Error("Sample chain has no qualifying expiry");
     const handle = (intent: OrbIntent) => {
       emit("strategy_intent", intent);

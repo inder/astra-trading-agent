@@ -68,7 +68,8 @@ export class OrbPaperRuntime implements PaperRuntime {
       } catch (error) {
         // Rule decisions and calendar gaps are named, so a review can tell a policy skip from a data problem.
         const reason = error instanceof EntrySkip ? error.reason : error instanceof CalendarCoverageError ? "calendar_not_covered" : "data_unavailable";
-        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason } }];
+        const detail = reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
+        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...detail } }];
       }
     }
     if (intent.reason === "protective_stop" || intent.reason === "session_close") this.#saved.protectiveExits[intent.symbol] = intent.reason;

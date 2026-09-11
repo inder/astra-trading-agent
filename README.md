@@ -181,11 +181,13 @@ The first strategy supports strict opening-range and separate drive-then-balance
 setups, with optional final-two-minute premarket range inclusion. It allows two
 to four calls per entry, at most two tickers/session, $2,000 including a $1 per
 contract fee reserve per ticker, $4,000 total. Proceeds never replenish the budget.
-The expiry is the first week-ending expiration at least three trading sessions
-out, counting the trade day: Monday–Wednesday trades use that week's Friday,
-Thursday and Friday trades use the following Friday, and holiday weeks count real
-sessions (a Thursday expiry when Friday is a holiday). If that expiration is not
-listed, the stock is skipped for the day rather than traded in a later expiry.
+The expiry is the first week-ending expiration with at least three trading
+sessions counting the trade day. In a normal week that means Monday–Wednesday
+trades use that week's Friday and Thursday/Friday trades use the following Friday.
+Holidays count as non-sessions: when Friday is a holiday the week ends on
+Thursday, and a Wednesday before a holiday Thursday or Friday rolls to the next
+week. If that expiration is not listed, the stock is skipped for the day rather
+than traded in a later expiry.
 Selection prefers four contracts, then three, then two; within that quantity,
 nearer strikes and tighter spreads win.
 

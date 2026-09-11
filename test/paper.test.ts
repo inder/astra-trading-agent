@@ -1,56 +1,15 @@
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { TradingAgentService } from "../src/agent-service.ts";
 import { createAgentMcpServer } from "../src/agent-mcp.ts";
 import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
-import type { PaperMarket } from "../src/paper-market.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
-
-const date = "2026-09-08", { open, close } = sessionTimes(date);
-const id = (i: number) => `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`;
-const setup = { runId: "paper-one", strategyId: "opening-range-options", date, symbols: ["DEMOA", "DEMOB", "DEMOC"], includePremarket: false };
-function fixture(t: TestContext, symbols = setup.symbols) {
-  const directory = mkdtempSync(join(tmpdir(), "astra-paper-test-"));
-  let now = open - 1000, bid = 3.9, stockAge = 0, optionAge = 0, fail = false;
-  const prices: Record<string, number> = Object.fromEntries(symbols.map(s => [s, 104]));
-  const market: PaperMarket = {
-    async quotes(requested) {
-      if (fail) throw new Error("test-only outage");
-      return requested.map(symbol => ({ symbol, price: prices[symbol]!, tradeAt: new Date(now - stockAge).toISOString(), retrievedAt: new Date(now).toISOString(),
-        ageMs: stockAge, fresh: stockAge <= 5000, regularSession: true, state: "active", bid: null, ask: null }));
-    },
-    async bars(requested, start, end, extended) {
-      return { data: { results: requested.map(symbol => ({ symbol, interval: "minute", bounds: extended ? "extended" : "regular",
-        bars: Array.from({ length: (end - start) / 60000 }, (_, i) => ({ begins_at: new Date(start + i * 60000).toISOString(),
-          open_price: "102", close_price: "104", high_price: "105", low_price: "100", volume: "1000", session: start + i * 60000 < open ? "pre" : "reg" })) })) } };
-    },
-    async calls(symbol) {
-      const contractId = id(symbols.indexOf(symbol) + 1);
-      return { expiration: "2026-09-11", contracts: [{ id: contractId, symbol, expiration: "2026-09-11", strike: 105, multiplier: 100,
-        tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" }],
-        quotes: [{ id: contractId, bid: 3.9, ask: 4, askSize: 20, updatedAt: new Date(now - optionAge).toISOString(), retrievedAt: new Date(now).toISOString() }] };
-    },
-    async optionQuotes(ids) { return ids.map(id => ({ id, bid, ask: bid + .1, askSize: 20, updatedAt: new Date(now - optionAge).toISOString(), retrievedAt: new Date(now).toISOString() })); },
-  };
-  const options = { market, clock: () => now, ready: () => true, auto: false };
-  const service = new TradingAgentService(directory, undefined, undefined, options);
-  t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { directory, service, market, options, prices, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
-    setBid: (v: number) => { bid = v; }, staleStock: (v: number) => { stockAge = v; }, staleOption: (v: number) => { optionAge = v; },
-    outage: () => { fail = true; } };
-}
-async function entered(f: ReturnType<typeof fixture>, symbols = setup.symbols) {
-  f.service.paper.configure({ ...setup, symbols }); await f.service.paper.start(setup.runId);
-  f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
-  f.advance(); f.prices[symbols[0]!] = 106; await f.service.paper.tick(setup.runId);
-  assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
-}
+import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
 test("session calendar handles DST, holidays and early closes", () => {
   assert.equal(new Date(open).toISOString(), "2026-09-08T13:30:00.000Z");
@@ -231,6 +190,18 @@ test("review requires separate browser approval, rejects forgery and duplicates,
   const staleForm = await browserReview(stale.reviewUrl); await fetch(stale.reviewUrl, { method: "POST", ...staleForm });
   assert.equal(f.service.reviews.status(stale.reviewId).status, "rejected");
   assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 3);
+});
+test("review page uses Referrer-Policy same-origin so real browsers send the origin the POST check requires", async t => {
+  // Under no-referrer, browsers send `Origin: null` on the form POST and a human can never approve.
+  // The real-browser proof is test/e2e/review-approval.e2e.ts; this guards the header in `npm run check`.
+  const f = fixture(t); await entered(f);
+  const review = await f.service.reviews.propose(setup.runId, "DEMOA", "close");
+  const page = await fetch(review.reviewUrl);
+  assert.equal(page.headers.get("referrer-policy"), "same-origin");
+  assert.match(review.instruction, /Do not open, fetch or submit it yourself/);
+  await fetch(review.reviewUrl, { method: "POST", ...await browserReview(review.reviewUrl) });
+  const again = await fetch(review.reviewUrl, { method: "POST" });
+  assert.equal(again.status, 410); assert.equal(await again.text(), "Review already executed.");
 });
 test("MCP client configures, starts, asks P&L, reviews a close, and reads the audit trail", async t => {
   const f = fixture(t), server = createAgentMcpServer(f.service), client = new Client({ name: "paper-e2e", version: "1" });

@@ -19,24 +19,30 @@ export class PaperReviews {
     this.#starting = (async () => {
       const server = createServer(async (req, res) => {
         const port = (server.address() as AddressInfo).port, origin = `http://127.0.0.1:${port}`;
-        res.setHeader("Cache-Control", "no-store"); res.setHeader("Referrer-Policy", "no-referrer");
+        // same-origin, not no-referrer: under no-referrer browsers send `Origin: null` on the form POST,
+        // which the exact-origin check below rejects, so a human could never approve. The page has no
+        // outbound links (CSP default-src 'none'), so the secret path is never sent to another origin.
+        res.setHeader("Cache-Control", "no-store"); res.setHeader("Referrer-Policy", "same-origin");
         res.setHeader("X-Frame-Options", "DENY"); res.setHeader("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'");
-        if (req.headers.host !== `127.0.0.1:${port}`) { res.writeHead(403).end(); return; }
+        const refuse = (status: number, reason: string) => { res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" }).end(reason); };
+        if (req.headers.host !== `127.0.0.1:${port}`) { refuse(403, "Wrong host. Open the review link exactly as given."); return; }
         const url = new URL(req.url ?? "/", origin), id = url.pathname.slice(1), review = this.#reviews.get(id);
-        if (!review || review.expiresAt < Date.now() || review.status !== "pending") { res.writeHead(410).end("Review expired or already used"); return; }
+        if (!review) { refuse(410, "Review not found or expired."); return; }
+        if (review.status !== "pending") { refuse(410, `Review already ${review.status}.`); return; }
+        if (review.expiresAt < Date.now()) { refuse(410, "Review expired. Ask your agent for a new one."); return; }
         if (req.method === "GET") {
-          if (req.headers.origin && req.headers.origin !== origin) { res.writeHead(403).end(); return; }
+          if (req.headers.origin && req.headers.origin !== origin) { refuse(403, "Cross-origin request rejected."); return; }
           res.setHeader("Content-Type", "text/html; charset=utf-8");
           res.setHeader("Set-Cookie", `astra_review=${review.cookie}; HttpOnly; SameSite=Strict; Path=/${id}; Max-Age=120`);
           res.end(`<!doctype html><title>Review paper position change</title><h1>Astra Trading Agent for Robinhood</h1><h2>Paper simulation only</h2><p>Run: ${escape(review.runId)}</p><p>${escape(review.command.action)} ${review.command.quantity} call contract(s) on ${escape(review.command.symbol)}. Current quantity must still be ${review.command.expectedQuantity}.</p><p>This does not place a brokerage order. A fresh quote and unchanged position are required. Closing this page cancels nothing and approves nothing.</p><form method="post"><input type="hidden" name="csrf" value="${review.csrf}"><button name="decision" value="approve">Approve simulated sale</button><button name="decision" value="reject">Reject</button></form>`); return;
         }
-        if (req.method !== "POST" || req.headers.origin !== origin || !req.headers["content-type"]?.startsWith("application/x-www-form-urlencoded")) { res.writeHead(403).end(); return; }
+        if (req.method !== "POST" || req.headers.origin !== origin || !req.headers["content-type"]?.startsWith("application/x-www-form-urlencoded")) { refuse(403, "Cross-origin or malformed request rejected."); return; }
         let body = "";
         try { for await (const chunk of req) { body += chunk; if (body.length > 4096) throw new Error("Oversized review"); } }
         catch { res.writeHead(413).end(); return; }
         const form = new URLSearchParams(body);
         const cookie = req.headers.cookie?.split("; ").find(c => c.startsWith("astra_review="))?.slice(13) ?? "";
-        if (!equal(cookie, review.cookie) || !equal(form.get("csrf") ?? "", review.csrf) || review.expiresAt < Date.now() || review.status !== "pending") { res.writeHead(403).end(); return; }
+        if (!equal(cookie, review.cookie) || !equal(form.get("csrf") ?? "", review.csrf) || review.expiresAt < Date.now() || review.status !== "pending") { refuse(403, "Review token mismatch, expired or already used."); return; }
         if (form.get("decision") !== "approve") { review.status = "rejected"; res.end("Rejected. No position changed."); return; }
         review.status = "executing";
         try { const result = await this.#paper.execute(review.runId, review.command); review.result = result; review.status = result.executed ? "executed" : "rejected"; }
@@ -62,7 +68,7 @@ export class PaperReviews {
       expiresAt: Date.now() + 120000, status: "pending", cookie: secret(), csrf: secret() };
     this.#reviews.set(id, review);
     return { reviewId: id, reviewUrl: `http://127.0.0.1:${(this.#server!.address() as AddressInfo).port}/${id}`,
-      command: review.command, expiresAt: review.expiresAt, executed: false, mode: "paper", instruction: "Review and approve in your local browser. No MCP tool can approve this request." };
+      command: review.command, expiresAt: review.expiresAt, executed: false, mode: "paper", instruction: "Give this URL to the user to open in a desktop browser on this machine. Do not open, fetch or submit it yourself; only the user approves." };
   }
   status(id: string) { const r = this.#reviews.get(id); if (!r) throw new Error("Unknown review"); return { reviewId: id, status: r.status === "pending" && r.expiresAt < Date.now() ? "expired" : r.status, result: r.result }; }
   async close() { this.#reviews.clear(); const server = this.#server; this.#server = undefined; this.#starting = undefined;

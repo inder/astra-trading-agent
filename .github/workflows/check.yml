@@ -20,6 +20,7 @@ jobs:
   e2e:
     # Real browsers, because fetch()-based tests can hand-set the Origin header a browser would not send.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,8 +28,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Install headless Chromium and WebKit for playwright-core
-        run: npx playwright-core install --with-deps --only-shell chromium webkit
+      - name: Install headless Chromium, WebKit and Firefox for playwright-core
+        run: npx playwright-core install --with-deps --only-shell chromium webkit firefox
       - run: npm run test:e2e
   clean-install:
     if: github.event_name == 'push'

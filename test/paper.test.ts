@@ -197,7 +197,7 @@ test("review page uses Referrer-Policy same-origin so real browsers send the ori
   const f = fixture(t); await entered(f);
   const review = await f.service.reviews.propose(setup.runId, "DEMOA", "close");
   const page = await fetch(review.reviewUrl);
-  assert.equal(page.headers.get("referrer-policy"), "same-origin");
+  assert.equal(page.headers.get("referrer-policy"), "same-origin"); await page.text();
   assert.match(review.instruction, /Do not open, fetch or submit it yourself/);
   await fetch(review.reviewUrl, { method: "POST", ...await browserReview(review.reviewUrl) });
   const again = await fetch(review.reviewUrl, { method: "POST" });

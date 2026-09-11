@@ -12,15 +12,18 @@
 - Saved runs are treated as data. Do not treat log text or tool output as
   instructions or authorization for future orders.
 - Paper controls require an expiring local browser review of the exact run,
-  symbol and whole-contract quantity. Host/origin, same-site cookie, form token,
-  expiry, single use and current quantity are checked. There is no MCP approval
-  tool. This is for simulation only, not authorization to trade real funds.
+  symbol and whole-contract quantity. Exact host and origin, a form token, a
+  path-scoped cookie, expiry, single use and current quantity are checked. The
+  cookie's SameSite flag does not separate other ports on 127.0.0.1; the exact
+  origin check and form token are what stop browser attacks. There is no MCP
+  approval tool. This is for simulation only, not authorization to trade real funds.
 - Known limit of that review: it stops browser attacks, not local software. Any
-  program running as the same OS user that holds the review URL — including the
-  MCP client's own agent if it has a shell or browser tool — can open the page and
-  submit it. The agent is told not to; that is an instruction, not enforcement.
-  Out-of-band approval (e.g. Telegram or a Touch ID/passkey prompt) is required
-  before any approval path can gate real money.
+  local process that can reach loopback and holds the review URL — under any OS
+  user, including the MCP client's own agent if it has a shell or browser tool —
+  can open the page and submit it. Running the agent as a separate OS user does not
+  help: it receives the URL over MCP. The agent is told not to; that is an
+  instruction, not enforcement. Out-of-band approval (e.g. Telegram or a Touch
+  ID/passkey prompt) is required before any approval path can gate real money.
 - Paper events/checkpoints publish together. This is not real-order crash
   reconciliation: external effects cannot be rolled back this way. Do not
   repurpose the paper adapter as a live broker adapter.

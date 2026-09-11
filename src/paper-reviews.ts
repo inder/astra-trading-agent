@@ -43,11 +43,12 @@ export class PaperReviews {
         const form = new URLSearchParams(body);
         const cookie = req.headers.cookie?.split("; ").find(c => c.startsWith("astra_review="))?.slice(13) ?? "";
         if (!equal(cookie, review.cookie) || !equal(form.get("csrf") ?? "", review.csrf) || review.expiresAt < Date.now() || review.status !== "pending") { refuse(403, "Review token mismatch, expired or already used."); return; }
-        if (form.get("decision") !== "approve") { review.status = "rejected"; res.end("Rejected. No position changed."); return; }
+        const reply = (text: string) => { res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end(text); };
+        if (form.get("decision") !== "approve") { review.status = "rejected"; reply("Rejected. No position changed."); return; }
         review.status = "executing";
         try { const result = await this.#paper.execute(review.runId, review.command); review.result = result; review.status = result.executed ? "executed" : "rejected"; }
         catch { review.status = "rejected"; review.result = { reason: "position_changed_or_data_unavailable" }; }
-        res.end(`Paper request ${review.status}. Return to your agent for status.`);
+        reply(`Paper request ${review.status}. Return to your agent for status.`);
       });
       this.#server = server;
       server.requestTimeout = 10000; server.headersTimeout = 10000;

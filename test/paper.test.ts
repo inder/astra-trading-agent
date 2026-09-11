@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -9,6 +10,7 @@ import { createAgentMcpServer } from "../src/agent-mcp.ts";
 import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
+import type { PaperMarket } from "../src/paper-market.ts";
 import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
 test("session calendar handles DST, holidays and early closes", () => {
@@ -45,24 +47,48 @@ test("another paper strategy plugs into the same controller without transport-sp
   assert.equal(service.paper.status(setup.runId).events[0]?.type, "plugin_completed");
   await service.close();
 });
-test("full paper lifecycle enforces two names, budgets, option P&L, trims and stop", async t => {
+test("full paper lifecycle enforces two names, budgets, option targets, breakeven and the stop", async t => {
   const f = fixture(t); await entered(f);
   f.advance(); f.prices.DEMOB = 106; f.prices.DEMOC = 106;
   await f.service.paper.tick(setup.runId);
   let status = f.service.paper.status(setup.runId);
   assert.equal(status.view.positions.length, 2); assert.equal(status.view.committedCents, 320800);
-  f.advance(); f.prices.DEMOA = 106 * 1.05; f.prices.DEMOB = 99; f.setBid(5);
+  assert.deepEqual(status.view.positions.map(p => [p.stage, p.backstop, p.stop]), [["initial", 2, 99.9], ["initial", 2, 99.9]]);
+  f.advance(); f.prices.DEMOB = 99; f.setBid(3);                 // DEMOB trades through its opening-range stop
+  await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOA = 108; f.setBid(8);                // DEMOA's option doubles: half its contracts sell
   await f.service.paper.tick(setup.runId);
   status = f.service.paper.status(setup.runId);
-  assert.equal(status.view.positions.length, 1); assert.equal(status.view.positions[0]?.quantity, 3);
-  assert.equal(status.view.realizedPnlCents, 50000); // five contracts, $100 each in this invented quote fixture
-  assert.equal(status.view.unrealizedPnlCents, 30000);
-  assert.equal(status.view.committedCents, 320800); // sales never release entry budget
-  assert.equal(f.service.paper.daily(date).realizedPnlCents, 50000);
-  const events = f.service.paper.events(setup.runId).flatMap(p => p.events);
-  assert.equal(events.filter(e => e.type === "paper_entry").length, 2);
-  assert.ok(events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop"));
+  assert.equal(status.view.positions.length, 1); assert.equal(status.view.positions[0]?.quantity, 2);
+  assert.equal(status.view.positions[0]?.stage, "breakeven"); assert.equal(status.view.positions[0]?.stop, 106);
+  assert.equal(status.view.realizedPnlCents, 40000);             // DEMOB 4 × ($3 − $4) + DEMOA 2 × ($8 − $4), fees excluded
+  assert.equal(status.view.unrealizedPnlCents, 80000);
+  assert.equal(status.view.committedCents, 320800);              // sales never release entry budget
+  f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);   // back to the entry price
+  status = f.service.paper.status(setup.runId);
+  assert.equal(status.view.positions.length, 0); assert.equal(status.view.realizedPnlCents, 120000);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, 120000);
+  const events = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events);
+  assert.deepEqual(events.filter(e => e.type === "paper_entry").map(e => (e.data as any).backstopPrice), [2, 2]);
+  assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => { const d = e.data as any; return [d.symbol, d.reason, d.quantity, d.targets ?? null]; }),
+    [["DEMOB", "protective_stop", 4, null], ["DEMOA", "profit_target", 2, [2]], ["DEMOA", "breakeven_stop", 2, null]]);
   assert.equal(status.ordersSubmitted, 0);
+});
+test("the simulated Robinhood backstop sells everything once the bid halves, with no stock move needed", async t => {
+  const f = fixture(t); await entered(f);
+  f.advance(); f.setBid(2.01); await f.service.paper.tick(setup.runId);
+  assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
+  f.advance(); f.setBid(2); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0); assert.equal(s.view.realizedPnlCents, -80000);   // 4 × ($2 − $4)
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop"));
+});
+test("the final-minute flatten needs only a fresh option bid, not a fresh stock quote", async t => {
+  const f = fixture(t); await entered(f); f.staleStock(6000); f.setTime(close - 60000);
+  await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "session_close"));
 });
 test("stale option prices skip entry and cannot fabricate exit fills or current P&L", async t => {
   const f = fixture(t); await entered(f);
@@ -90,6 +116,31 @@ test("a triggered protective exit persists through a rebound and restart until a
   await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
   assert.equal(f.service.paper.status(setup.runId).view.positions.length, 0);
   assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop"));
+});
+test("a triggered breakeven exit also persists through a rebound and restart", async t => {
+  const f = fixture(t); await entered(f);
+  f.advance(); f.prices.DEMOA = 108; f.setBid(8); await f.service.paper.tick(setup.runId);           // first target: breakeven
+  f.advance(); f.prices.DEMOA = 105.5; f.staleOption(6000); await f.service.paper.tick(setup.runId); // below entry, no fresh bid
+  assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "sale_deferred"));
+  await f.service.paper.stop(setup.runId);
+  f.advance(); f.prices.DEMOA = 108; f.staleOption(0);
+  await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "breakeven_stop" && (e.data as any).quantity === 2));
+});
+test("a saved pending backstop exit resumes and retries; a saved non-exit reason is refused", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  const r = f.service.paper.status(setup.runId);
+  const path = join(f.directory, "paper", setup.runId, String(r.revision).padStart(8, "0") + ".json");
+  const saved = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...saved, checkpoint: { ...saved.checkpoint, protectiveExits: { DEMOA: "profit_target" } } }));
+  f.advance(); await assert.rejects(f.service.paper.start(setup.runId, true), /Invalid paper checkpoint/);
+  writeFileSync(path, JSON.stringify({ ...saved, checkpoint: { ...saved.checkpoint, protectiveExits: { DEMOA: "broker_backstop" } } }));
+  await f.service.paper.start(setup.runId, true); await f.service.paper.tick(setup.runId);
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.view.positions.length, 0);
+  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop" && (e.data as any).quantity === 4));
 });
 test("automatic scheduling advances a configured run without a connected chat client", async t => {
   const f = fixture(t), auto = new TradingAgentService(f.directory, undefined, undefined, { ...f.options, auto: true });
@@ -159,19 +210,79 @@ test("provider outage halts without losing the last committed paper position", a
   assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
   assert.equal(f.service.paper.status(setup.runId).attached, false);
 });
-test("session-close simulation flattens only with valid quotes, otherwise reports unresolved positions", async t => {
+test("session-close simulation flattens at the fresh bid one minute before the close", async t => {
   const f = fixture(t); await entered(f); f.setTime(close - 60000);
   await f.service.paper.tick(setup.runId);
   assert.equal(f.service.paper.status(setup.runId).view.positions.length, 0);
   f.setTime(close); await f.service.paper.tick(setup.runId);
-  assert.equal(f.service.paper.status(setup.runId).status, "completed");
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "completed"); assert.equal(s.view.realizedPnlCents, -4000);   // 4 × ($3.90 − $4.00)
+  assert.deepEqual(s.events.find(e => e.type === "session_ended")?.data, { writtenOff: 0, noAutomaticCarryOrExercise: true });
   await assert.rejects(f.service.paper.start(setup.runId, true), /expired/);
 });
-test("unfilled session-close exits remain visible rather than being marked closed", async t => {
+test("contracts that cannot be sold before the close are written off as a total loss", async t => {
   const f = fixture(t); await entered(f); f.staleOption(6000); f.setTime(close - 60000);
-  await f.service.paper.tick(setup.runId); f.setTime(close); await f.service.paper.tick(setup.runId);
+  await f.service.paper.tick(setup.runId);
+  assert.equal(f.service.paper.status(setup.runId).view.positions.length, 1, "no fill is invented from a stale bid");
+  f.setTime(close); await f.service.paper.tick(setup.runId);
   const s = f.service.paper.status(setup.runId);
-  assert.equal(s.status, "completed"); assert.equal(s.view.positions.length, 1); assert.equal(s.view.unrealizedPnlCents, null);
+  assert.equal(s.status, "completed"); assert.equal(s.view.positions.length, 0); assert.equal(s.view.realizedPnlCents, -160000);
+  assert.deepEqual(s.events.filter(e => e.type === "written_off").map(e => e.data),
+    [{ symbol: "DEMOA", contractId: id(1), quantity: 4, realizedPnlCents: -160000, reason: "unsold_at_session_end" }]);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
+});
+test("a run stopped while holding contracts settles after the close: they are written off, once", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  f.setTime(close + 60000);
+  assert.equal(f.service.paper.list()[0]?.needsSettlement, true);
+  await assert.rejects(f.service.paper.start(setup.runId), /expired/, "a fresh start after the close is still refused");
+  const settled = await f.service.paper.start(setup.runId, true);
+  assert.equal(settled.status, "completed"); assert.equal(settled.view.positions.length, 0); assert.equal(settled.view.realizedPnlCents, -160000);
+  // Symbols still watching when the run stopped end on the entry window, not a "resumed" management claim.
+  assert.deepEqual(settled.events.map(e => e.type === "setup_disqualified" ? `${(e.data as any).symbol}:${(e.data as any).reason}` : e.type),
+    ["settled_after_session", "DEMOB:entry_window_closed", "DEMOC:entry_window_closed", "written_off", "session_ended"]);
+  assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
+  assert.equal(f.service.paper.list()[0]?.needsSettlement, false);
+  await assert.rejects(f.service.paper.start(setup.runId, true), /expired/, "settled exactly once");
+});
+test("settlement needs no market data or authorization: a halted run settles while every read fails", async t => {
+  const f = fixture(t); await entered(f); f.outage(); f.advance();
+  await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
+  f.setTime(close + 60000);
+  const fail = async (): Promise<never> => { throw new Error("test-only: no market data after the close"); };
+  const dead: PaperMarket = { quotes: fail, bars: fail, calls: fail, optionQuotes: fail };
+  const offline = new TradingAgentService(f.directory, undefined, undefined, { ...f.options, ready: () => false, market: dead });
+  try {
+    const settled = await offline.paper.start(setup.runId, true);
+    assert.equal(settled.status, "completed"); assert.equal(settled.view.realizedPnlCents, -160000);
+    assert.deepEqual(settled.events[0], { type: "settled_after_session", data: { previousStatus: "error" } });
+  } finally { await offline.close(); }
+});
+test("a crashed run left running with a dead owner process settles after the close, and says settlement not resume", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  const r = f.service.paper.status(setup.runId), dir = join(f.directory, "paper", setup.runId);
+  const path = join(dir, String(r.revision).padStart(8, "0") + ".json");
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), status: "running" }));           // what a crash leaves
+  writeFileSync(join(dir, "owner.json"), JSON.stringify({ pid: spawnSync(process.execPath, ["-e", ""]).pid }));   // an exited process
+  f.setTime(close + 60000);
+  const listed = f.service.paper.list()[0]!;
+  assert.deepEqual([listed.needsResume, listed.needsSettlement], [false, true]);
+  const settled = await f.service.paper.start(setup.runId, true);
+  assert.equal(settled.status, "completed"); assert.deepEqual(settled.events[0]?.data, { previousStatus: "running" });
+});
+test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses new entries from then", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  const config = { ...openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0, entryWindowMinutes: 390, flattenLeadMinutes: 10 }),
+    maxObservationGapMs: 8 * 3_600_000 };   // lets the test jump to the afternoon without an observation-gap disqualification
+  const runtime = new OrbPaperRuntime(config, f.market, f.options.clock);
+  f.setTime(open + 120000); await runtime.step();
+  f.advance(); f.prices.DEMOA = 106; await runtime.step();
+  assert.equal(runtime.view().positions.length, 1);
+  f.setTime(close - 600001); assert.deepEqual((await runtime.step()).filter(e => e.type === "paper_sale"), []);
+  f.setTime(close - 600000); f.prices.DEMOB = 106;
+  const events = await runtime.step();
+  assert.deepEqual(events.filter(e => e.type === "entry_skipped").map(e => e.data), [{ symbol: "DEMOB", reason: "too_close_to_session_end" }]);
+  assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOA", "session_close"]]);
 });
 test("corrupt checkpoint cannot resume a fabricated reservation", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
@@ -233,6 +344,15 @@ test("chat settings arrive in human units and are pinned to the run in internal 
   const defaults = JSON.parse(((await configure({ runId: "defaults" })).content as any)[0].text).config;
   assert.deepEqual([defaults.budgetCentsPerPosition, defaults.budgetCentsPerDay, defaults.minimumContracts, defaults.maximumContractsPerTrade,
     defaults.maximumPositions, defaults.maxOptionSpreadFraction, defaults.feeReserveCentsPerContract, defaults.entryWindowMinutes], [200000, 400000, 4, null, 2, .2, 100, 90]);
+  assert.deepEqual([defaults.firstTargetMultiple, defaults.middleTargetMultiple, defaults.finalTargetMultiple, defaults.backstopFraction, defaults.stopBufferFraction,
+    defaults.flattenLeadMinutes], [2, 3, 5, .5, .001, 1]);
+  // Exit settings: multiples as multiples, the backstop and stop buffer in percent.
+  const exits = JSON.parse(((await configure({ runId: "exits", firstTargetMultiple: 1.5, middleTargetMultiple: 2.5, finalTargetMultiple: 4,
+    backstopPercent: 40, stopBufferPercent: .7, flattenLeadMinutes: 5 })).content as any)[0].text).config;
+  assert.deepEqual([exits.firstTargetMultiple, exits.middleTargetMultiple, exits.finalTargetMultiple, exits.backstopFraction, exits.stopBufferFraction,
+    exits.flattenLeadMinutes], [1.5, 2.5, 4, .4, .007, 5]);   // .7% pins exactly 0.007, no float noise
+  assert.ok((await configure({ runId: "unordered", firstTargetMultiple: 3, middleTargetMultiple: 3 })).isError, "targets must rise");
+  assert.ok((await configure({ runId: "backstop", backstopPercent: 100 })).isError, "a backstop at the entry premium is not a stop");
   assert.ok((await configure({ runId: "fractional", maxPremiumPerTradeDollars: 1000.5 })).isError, "dollars must be whole");
   assert.ok((await configure({ runId: "inverted", maxPremiumPerTradeDollars: 3000, maxPremiumPerDayDollars: 2000 })).isError, "day cap below trade cap");
 });

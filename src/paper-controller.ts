@@ -69,10 +69,15 @@ export class PaperController {
       record.view = { ...record.view, unrealizedPnlCents: null, positions: record.view.positions.map(p => ({ ...p, markBid: null, markAt: null })) };
     }
     return { ...record, attached: this.#active.has(id),
-    needsResume: record.status === "running" && !this.#active.has(id), pnlEstimateOnly: true, feesExcluded: true }; }
+    needsResume: record.status === "running" && !this.#active.has(id) && !this.#ended(record),
+    needsSettlement: !this.#active.has(id) && record.status !== "completed" && record.view.positions.length > 0 && this.#ended(record),
+    pnlEstimateOnly: true, feesExcluded: true }; }
+  /** The run's session has closed. A date the calendar no longer covers reads as not ended rather than breaking listings. */
+  #ended(record: PaperRecord) { try { return this.#clock() >= sessionTimes(record.date).close; } catch { return false; } }
   list() {
     try { return readdirSync(this.#root).filter(validId).filter(id => id !== "reservations").map(id => {
-      const r = this.status(id); return { runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsResume: r.needsResume, positions: r.view.positions.length };
+      const r = this.status(id); return { runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsResume: r.needsResume,
+        needsSettlement: r.needsSettlement, positions: r.view.positions.length };
     }); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw e; }
   }
   events(id: string, after = -1, limit = 20) {
@@ -99,12 +104,14 @@ export class PaperController {
     } finally { rmdirSync(guard); }
   }
   #release(id: string) { const active = this.#active.get(id); if (active?.timer) clearTimeout(active.timer); this.#active.delete(id); unlinkSync(join(this.#dir(id), "owner.json")); }
-  start(id: string, resume = false) { return this.#serial(() => {
+  start(id: string, resume = false) { return this.#serial(async () => {
     if (this.#closing) throw new Error("Server is shutting down");
     if (this.#active.has(id)) return this.status(id);
-    if (!this.#ready()) throw new Error("Authorize required paper market-data tools first");
     const record = this.get(id), strategy = this.#strategy(record.strategyId), session = sessionTimes(record.date);
     if (strategy.version !== record.version) throw new Error("Strategy version changed; cannot resume");
+    // Nothing trades after the close. A run stopped while holding contracts settles (no market data needed) instead of lingering.
+    if (resume && this.#clock() >= session.close && record.status !== "completed" && record.view.positions.length) return this.#settle(record, strategy);
+    if (!this.#ready()) throw new Error("Authorize required paper market-data tools first");
     if (this.#clock() >= session.close) throw new Error("Session expired; no automatic rollover");
     if (!resume && record.status !== "configured") throw new Error("Existing run requires explicit resume");
     if (!resume && this.#clock() >= session.open + 120000) throw new Error("Start before the first two-minute candle completes");
@@ -121,6 +128,18 @@ export class PaperController {
       this.#persist(next); this.#active.set(id, { runtime, record: next }); this.#schedule(id); return this.status(id);
     } catch (e) { unlinkSync(join(this.#dir(id), "owner.json")); throw e; }
   }); }
+  /** The strategy's own close step settles a detached run after its session: unsold contracts are written off. No market data. */
+  async #settle(record: PaperRecord, strategy: AgentStrategy) {
+    this.#acquire(record);
+    try {
+      const runtime = strategy.paperFactory!(record.config, this.#market, this.#clock, record.checkpoint);
+      const events = await runtime.step(), view = runtime.view();
+      if (!view.complete) throw new Error("Paper run could not be settled");
+      this.#persist({ ...record, status: "completed", revision: record.revision + 1, at: new Date(this.#clock()).toISOString(),
+        checkpoint: runtime.checkpoint(), view, events: [{ type: "settled_after_session", data: { previousStatus: record.status } }, ...events] });
+    } finally { unlinkSync(join(this.#dir(record.runId), "owner.json")); }
+    return this.status(record.runId);
+  }
   #schedule(id: string) {
     if (!this.#auto) return; const active = this.#active.get(id); if (!active) return;
     active.timer = setTimeout(() => { void this.tick(id).catch(() => {}); }, 1000);

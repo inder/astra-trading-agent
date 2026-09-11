@@ -1,4 +1,8 @@
-# Astra Trading Agent for Robinhood
+# <img src="docs/assets/astra-mark.svg" width="40" height="40" alt="Astra terminal-green tantō icon"> Astra Trading Agent for Robinhood
+
+Astra (अस्त्र) means “weapon” in Hindi. This one comes with risk controls.
+
+*Fighting the markets on your side. Cape not included.*
 
 A self-hosted MCP server with a versioned library of deterministic trading
 strategies. Your MCP-compatible chat application provides the conversational

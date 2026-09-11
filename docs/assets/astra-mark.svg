@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Astra</title>
+  <desc id="desc">A Japanese tanto-inspired dagger with a clipped point, terminal-green cutting edge, restrained guard, and diamond-wrapped graphite grip.</desc>
+  <rect x="1" y="1" width="62" height="62" rx="16" fill="#10171C" stroke="#00FF88" stroke-opacity=".25"/>
+  <g transform="rotate(40 32 32)">
+    <path d="M38 6 37 37H28V17Z" fill="#194B39"/>
+    <path d="M38 6 33 19 33 37H37Z" fill="#00FF88"/>
+    <path d="M38 6 37 37" stroke="#BDFFE0" stroke-width="1"/>
+    <path d="M28 17 38 6" stroke="#56FFB0" stroke-width="1"/>
+    <rect x="27" y="35" width="11" height="4" rx=".8" fill="#859B9D"/>
+    <rect x="23" y="39" width="19" height="3" rx="1" fill="#D3DEDD"/>
+    <path d="M29 42H36V54L34 57H31L29 54Z" fill="#25343B" stroke="#72878C" stroke-width="1"/>
+    <path d="m32.5 44 2 2-2 2-2-2Zm0 6 2 2-2 2-2-2Z" fill="#00FF88"/>
+  </g>
+</svg>

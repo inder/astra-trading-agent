@@ -46,7 +46,9 @@ No real-account readiness or trading performance is claimed.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio
   follows its client. No launch daemon, cloud hosting or public client OAuth.
-- Calendar supports 2026 with known holidays/early closes. No automatic rollover
+- Strategy 0.3.0 changed expiry selection. Paper runs configured under 0.2.0
+  cannot resume or be reconfigured under the same runId; configure a new runId.
+- Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover
   or recovery after session end.
 - Missing exit quotes leave unresolved paper positions visible. No invented
   liquidation, exercise or overnight management.

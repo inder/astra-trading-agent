@@ -15,7 +15,10 @@ test("session calendar handles DST, holidays and early closes", () => {
   assert.equal(new Date(open).toISOString(), "2026-09-08T13:30:00.000Z");
   assert.equal(new Date(sessionTimes("2026-01-06").open).toISOString(), "2026-01-06T14:30:00.000Z");
   assert.equal(new Date(sessionTimes("2026-11-27").close).toISOString(), "2026-11-27T18:00:00.000Z");
-  assert.throws(() => sessionTimes("2026-12-25")); assert.throws(() => sessionTimes("2027-01-05"));
+  assert.throws(() => sessionTimes("2026-12-25")); assert.throws(() => sessionTimes("2028-01-05"));
+  assert.equal(new Date(sessionTimes("2027-01-05").open).toISOString(), "2027-01-05T14:30:00.000Z");
+  assert.equal(new Date(sessionTimes("2027-11-26").close).toISOString(), "2027-11-26T18:00:00.000Z");
+  assert.throws(() => sessionTimes("2027-11-25")); assert.throws(() => sessionTimes("2027-12-24"));
 });
 test("paper configuration is disconnected, immutable and retries are idempotent", async t => {
   const f = fixture(t), disconnected = new TradingAgentService(f.directory);

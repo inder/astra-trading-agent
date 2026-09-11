@@ -15,7 +15,7 @@ Quotes alone do not establish option/history availability or market-hours freshn
 
 ## Configure and start
 
-Choose a future/current supported 2026 trading session. This example date is
+Choose a future/current supported 2026–2027 trading session. This example date is
 illustrative, not automatically today. Update the date and unique run name.
 Ask to configure the equivalent of this `configure_paper_strategy` input:
 

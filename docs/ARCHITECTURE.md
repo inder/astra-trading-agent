@@ -30,7 +30,7 @@ Runtime adapters do not own credentials, transports, scheduling, approval or
 file paths. The common controller owns lifecycle boundaries. The current setup
 schema is equity-session-oriented (date, symbols, optional premarket). Strategies
 needing other parameters require a versioned schema extension, not an executable
-payload. The calendar is NY equity sessions in 2026; other markets need explicit
+payload. The calendar is NY equity sessions in 2026–2027; other markets need explicit
 support and tests. No uploads, generated code or shell commands are exposed.
 
 Each strategy must test inputs, entry/exit invariants, budgets, recovery, stale

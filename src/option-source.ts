@@ -1,4 +1,4 @@
-import { nearestPreferredExpiration, type OrbCallContract } from "./orb-options.ts";
+import { EntrySkip, preferredWeeklyExpiration, type OrbCallContract } from "./orb-options.ts";
 import type { CallQuote } from "./orb-options.ts";
 
 export interface OrbOptionSource {
@@ -23,8 +23,8 @@ export async function loadOrbContracts(source: OrbOptionSource, symbol: string, 
     Number(x.trade_value_multiplier) === 100 && (x.cash_component == null || Number(x.cash_component) === 0) && Array.isArray(x.expiration_dates) &&
     Array.isArray(x.underlying_instruments) && x.underlying_instruments.length === 1 && x.underlying_instruments.every((u: any) =>
       u && typeof u.instrument === "string" && u.instrument.length && (u.symbol === "" || u.symbol === symbol)));
-  const expiration = nearestPreferredExpiration(chains.flatMap((x: any) => x.expiration_dates), date);
-  if (!expiration) throw new Error("No active expiration");
+  const expiration = preferredWeeklyExpiration(chains.flatMap((x: any) => x.expiration_dates), date);
+  if (!expiration) throw new EntrySkip("no_qualifying_expiry");
   const contracts: OrbCallContract[] = [];
   for (const chain of chains.filter((x: any) => x.expiration_dates.includes(expiration))) {
     let cursor: string | undefined; const seen = new Set<string>();

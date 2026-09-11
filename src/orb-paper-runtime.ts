@@ -1,6 +1,6 @@
-import { OrbOptionsEngine, parseOrbOptionsConfig, parseOpeningRange, replayOpeningBalance, selectOrbCall,
+import { EntrySkip, OrbOptionsEngine, parseOrbOptionsConfig, parseOpeningRange, replayOpeningBalance, selectOrbCall,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract } from "./orb-options.ts";
-import { isTradingDay } from "./daily-history.ts";
+import { CalendarCoverageError, isEarlyClose, isTradingDay } from "./daily-history.ts";
 import type { PaperMarket } from "./paper-market.ts";
 import type { PaperRuntime, PaperEvent, PaperPosition, PaperControl } from "./paper-runtime.ts";
 
@@ -9,7 +9,7 @@ export function sessionTimes(date: string) {
   const noon = Date.parse(date + "T12:00:00Z");
   const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hourCycle: "h23" }).format(noon));
   const open = Date.parse(date + "T00:00:00Z") + (9.5 + 12 - hour) * 3600000;
-  return { open, close: open + (["2026-11-27", "2026-12-24"].includes(date) ? 3.5 : 6.5) * 3600000 };
+  return { open, close: open + (isEarlyClose(date) ? 3.5 : 6.5) * 3600000 };
 }
 type Holding = { contract: OrbCallContract; entryPrice: number; mark: CallQuote | null };
 export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<string, Holding>; loaded: boolean; nextBalance: number;
@@ -53,9 +53,11 @@ export class OrbPaperRuntime implements PaperRuntime {
       try {
         const catalog = await this.#market.calls(intent.symbol, this.#config.date);
         const stock = (await this.#market.quotes([intent.symbol]))[0];
-        if (stock?.symbol !== intent.symbol || !this.#fresh(stock) || stock!.price! <= intent.range.high || this.#clock() >= this.#session.close - 60000) throw new Error("Breakout unavailable");
+        if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
+        if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed");
+        if (this.#clock() >= this.#session.close - 60000) throw new EntrySkip("too_close_to_session_end");
         const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock());
-        if (!selected || this.#saved.committedCents + selected.committedCents > 400000) throw new Error("No affordable eligible call");
+        if (!selected || this.#saved.committedCents + selected.committedCents > 400000) throw new EntrySkip("no_affordable_eligible_call");
         this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!);
         this.#saved.holdings[intent.symbol] = { contract: selected.contract, entryPrice: selected.limitPrice, mark: null };
         this.#saved.committedCents += selected.committedCents;
@@ -63,7 +65,12 @@ export class OrbPaperRuntime implements PaperRuntime {
           { type: "paper_entry", data: { symbol: intent.symbol, setup: intent.setup, stockPrice: stock!.price,
           strike: selected.contract.strike, expiration: selected.contract.expiration, quantity: selected.quantity,
           assumedFill: selected.limitPrice, committedCents: selected.committedCents, fillGuaranteed: false } }];
-      } catch { this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason: "stale_or_unavailable_data_or_budget" } }]; }
+      } catch (error) {
+        // Rule decisions and calendar gaps are named, so a review can tell a policy skip from a data problem.
+        const reason = error instanceof EntrySkip ? error.reason : error instanceof CalendarCoverageError ? "calendar_not_covered" : "data_unavailable";
+        const detail = reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
+        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...detail } }];
+      }
     }
     if (intent.reason === "protective_stop" || intent.reason === "session_close") this.#saved.protectiveExits[intent.symbol] = intent.reason;
     try {

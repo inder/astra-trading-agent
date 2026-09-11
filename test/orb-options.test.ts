@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OrbOptionsEngine, nearestPreferredExpiration, parseOpeningRange, parseOrbOptionsConfig, replayOpeningBalance,
+import { OrbOptionsEngine, preferredWeeklyExpiration, parseOpeningRange, parseOrbOptionsConfig, replayOpeningBalance,
   replayOpeningRange, replayOrbSetups, selectOrbCall, type OrbOptionsConfig } from "../src/orb-options.ts";
 
 const config: OrbOptionsConfig = {
@@ -78,9 +78,9 @@ test("optional final premarket candle expands only the strict opening range", ()
   assert.deepEqual(parseOpeningRange({ data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "extended", bars }] } }, "CRWV", 0, 2, 2),
     { high: 107, low: 98, startMs: -120000, endMs: 120000 });
 });
-test("nearest Friday is preferred over nearer non-Friday expiry", () => {
-  assert.equal(nearestPreferredExpiration(["2026-09-09", "2026-09-11", "2026-09-18"], "2026-09-08"), "2026-09-11");
-  assert.equal(nearestPreferredExpiration(["2026-09-09", "2026-09-10"], "2026-09-08"), "2026-09-09");
+test("weekly expiry ignores nearer daily expiries and never falls back to a non-target date", () => {
+  assert.equal(preferredWeeklyExpiration(["2026-09-09", "2026-09-11", "2026-09-18"], "2026-09-08"), "2026-09-11");
+  assert.equal(preferredWeeklyExpiration(["2026-09-09", "2026-09-10"], "2026-09-08"), null);
 });
 test("selector prefers four then three then two and never exceeds all-in budget", () => {
   const now = Date.parse("2026-09-08T15:00:00Z"), retrieved = new Date(now).toISOString();

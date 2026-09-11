@@ -183,9 +183,19 @@ trade above the high buys; a trade below the low first ends the day for that sto
 even if it later rallies. New entries stop after a configurable window
 (`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
 positions are managed all day. Prices are polled about once a second, so a dip
-below the low that reverses between polls can be missed. It allows two
-to four calls per entry, at most two tickers/session, $2,000 including a $1 per
-contract fee reserve per ticker, $4,000 total. Proceeds never replenish the budget.
+below the low that reverses between polls can be missed.
+
+Premium is treated as money that can be lost entirely, so the caps are the risk
+control: by default $2,000 per trade and $4,000 per day (including a $1 per
+contract fee reserve), at most two stocks per day. Proceeds never replenish the
+budget. Astra buys the strike nearest the stock price where at least four
+contracts fit under the cap, then fills up to the cap at that strike, limited by
+the contracts displayed at the ask, so how far from the money it lands depends on
+the stock's price. Each of these is a setting you can change when configuring a
+run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`, `minimumContracts`,
+`maximumContractsPerTrade`, `maximumPositions`, `maxOptionSpreadPercent`,
+`feeReservePerContractCents`, `entryWindowMinutes`); a run keeps the settings it
+started with.
 The expiry is the first week-ending expiration with at least three trading
 sessions counting the trade day. In a normal week that means Monday–Wednesday
 trades use that week's Friday and Thursday/Friday trades use the following Friday.
@@ -193,8 +203,6 @@ Holidays count as non-sessions: when Friday is a holiday the week ends on
 Thursday, and a Wednesday before a holiday Thursday or Friday rolls to the next
 week. If that expiration is not listed, the stock is skipped for the day rather
 than traded in a later expiry.
-Selection prefers four contracts, then three, then two; within that quantity,
-nearer strikes and tighter spreads win.
 
 The stock's range low minus 0.1% is the protective threshold. A breach below it
 requests all remaining calls be sold. An unfilled protective exit stays pending

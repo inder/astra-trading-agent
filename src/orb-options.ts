@@ -4,7 +4,7 @@ export interface CallQuote { id: string; bid: number; ask: number; askSize: numb
 
 export interface OrbOptionsConfig {
   date: string; symbols: string[]; openingRangeMinutes: 2; stopBufferFraction: number;
-  budgetCentsPerPosition: number; minimumContracts: number; preferredContracts: number;
+  budgetCentsPerPosition: number; budgetCentsPerDay: number; minimumContracts: number; maximumContractsPerTrade: number | null;
   maximumPositions: number; trimGainFraction: number; maximumTrimSteps: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number;
@@ -12,19 +12,37 @@ export interface OrbOptionsConfig {
 }
 /** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
 export const ENTRY_WINDOW_MINUTES = { default: 90, min: 5, max: 390 } as const;
+/** User settings: founder defaults and validated ranges, shared by the MCP schema and config parsing. Premium is treated
+ *  as money lost, so the caps are the risk control. maximumContractsPerTrade null = bounded only by the displayed ask size. */
+export const SETTINGS = {
+  budgetCentsPerPosition: { default: 200_000, min: 10_000, max: 5_000_000 },
+  budgetCentsPerDay: { default: 400_000, min: 10_000, max: 10_000_000 },
+  minimumContracts: { default: 4, min: 1, max: 100 },
+  maximumContractsPerTrade: { default: null, min: 1, max: 1_000_000 },
+  maximumPositions: { default: 2, min: 1, max: 10 },
+  maxOptionSpreadFraction: { default: 0.2, min: 0.01, max: 0.5 },
+  feeReserveCentsPerContract: { default: 100, min: 0, max: 1000 },
+} as const;
+const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
+  typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
-    "minimumContracts", "preferredContracts", "maximumPositions", "trimGainFraction", "maximumTrimSteps",
+    "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "trimGainFraction", "maximumTrimSteps",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs",
     "includePremarketLeadMinutes", "entryWindowMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
     c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) || c.openingRangeMinutes !== 2 ||
-    c.stopBufferFraction !== .001 || c.budgetCentsPerPosition !== 200000 || c.minimumContracts !== 2 ||
-    c.preferredContracts !== 4 || c.maximumPositions !== 2 || c.trimGainFraction !== .05 || c.maximumTrimSteps !== 4 ||
-    !Number.isSafeInteger(c.feeReserveCentsPerContract) || c.feeReserveCentsPerContract < 1 || c.feeReserveCentsPerContract > 1000 ||
-    !(c.maxOptionSpreadFraction > 0 && c.maxOptionSpreadFraction <= .2) || !Number.isSafeInteger(c.maxQuoteAgeMs) || c.maxQuoteAgeMs < 1000 ||
+    c.stopBufferFraction !== .001 || c.trimGainFraction !== .05 || c.maximumTrimSteps !== 4 ||
+    !inRange(c.budgetCentsPerPosition, SETTINGS.budgetCentsPerPosition) || !inRange(c.budgetCentsPerDay, SETTINGS.budgetCentsPerDay) ||
+    c.budgetCentsPerDay < c.budgetCentsPerPosition || !inRange(c.minimumContracts, SETTINGS.minimumContracts) ||
+    !(c.maximumContractsPerTrade === null || (inRange(c.maximumContractsPerTrade, SETTINGS.maximumContractsPerTrade) && c.maximumContractsPerTrade >= c.minimumContracts)) ||
+    !inRange(c.maximumPositions, SETTINGS.maximumPositions) || !inRange(c.feeReserveCentsPerContract, SETTINGS.feeReserveCentsPerContract) ||
+    !inRange(c.maxOptionSpreadFraction, SETTINGS.maxOptionSpreadFraction, false) ||
+    // The cheapest possible contract is $0.01 (100 cents) plus the fee reserve: a minimum that can never fit trades nothing all day.
+    c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
+    !Number.isSafeInteger(c.maxQuoteAgeMs) || c.maxQuoteAgeMs < 1000 ||
     !Number.isSafeInteger(c.maxObservationGapMs) || c.maxObservationGapMs < 1000 || !Number.isSafeInteger(c.pollMs) || c.pollMs < 250 || c.pollMs > 30000 ||
     ![0, 2].includes(c.includePremarketLeadMinutes) ||
     !Number.isSafeInteger(c.entryWindowMinutes) || c.entryWindowMinutes < ENTRY_WINDOW_MINUTES.min || c.entryWindowMinutes > ENTRY_WINDOW_MINUTES.max)
@@ -102,9 +120,12 @@ export function preferredWeeklyExpiration(listed: readonly string[], date: strin
     if (isWeekEnder(d) && tradingSessionsBetween(date, d) >= MIN_EXPIRY_SESSIONS) return listed.includes(d) ? d : null;
   throw new Error("No week-ending expiry within three weeks");
 }
+/** Founder rule: the strike nearest the stock price (ITM or OTM) where at least minimumContracts fit under the cap, then
+ *  fill up to the cap at that strike, bounded by the displayed ask size (and maximumContractsPerTrade if set). capCents is
+ *  the caller's min(per-trade cap, per-day cap - already committed), so the runtime and the sample share one budget rule. */
 export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: readonly CallQuote[], symbol: string,
-  expiration: string, stockPrice: number, c: OrbOptionsConfig, now: number): OrbCallSelection | null {
-  if (!(stockPrice > 0) || new Set(contracts.map(x => x.id)).size !== contracts.length) return null;
+  expiration: string, stockPrice: number, c: OrbOptionsConfig, now: number, capCents = c.budgetCentsPerPosition): OrbCallSelection | null {
+  if (!(stockPrice > 0) || !Number.isSafeInteger(capCents) || capCents <= 0 || new Set(contracts.map(x => x.id)).size !== contracts.length) return null;
   const choices: OrbCallSelection[] = [];
   for (const k of contracts) {
     if (k.symbol !== symbol || k.expiration !== expiration || k.multiplier !== 100 || !(k.strike > 0) ||
@@ -120,13 +141,13 @@ export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: rea
     let limitCents = Math.ceil((q.ask * 100 - 1e-8) / (q.ask * 100 < cutoffCents ? belowTickCents : aboveTickCents)) * (q.ask * 100 < cutoffCents ? belowTickCents : aboveTickCents);
     if (limitCents >= cutoffCents) limitCents = Math.ceil(limitCents / aboveTickCents) * aboveTickCents;
     const unit = limitCents * 100 + c.feeReserveCentsPerContract;
-    const affordable = Math.min(c.preferredContracts, q.askSize, Math.floor(c.budgetCentsPerPosition / unit));
-    if (affordable < c.minimumContracts) continue;
-    choices.push({ contract: k, quantity: affordable, limitPrice: limitCents / 100, premiumCents: limitCents * 100 * affordable,
-      feeReserveCents: c.feeReserveCentsPerContract * affordable, committedCents: unit * affordable, relativeSpread, quoteUpdatedAt: q.updatedAt });
+    const quantity = Math.min(q.askSize, Math.floor(capCents / unit), c.maximumContractsPerTrade ?? Number.MAX_SAFE_INTEGER);
+    if (quantity < c.minimumContracts) continue;
+    choices.push({ contract: k, quantity, limitPrice: limitCents / 100, premiumCents: limitCents * 100 * quantity,
+      feeReserveCents: c.feeReserveCentsPerContract * quantity, committedCents: unit * quantity, relativeSpread, quoteUpdatedAt: q.updatedAt });
   }
-  // Prefer four, then three, then two contracts; within that, nearest-to-money, tighter spread, then stable ID.
-  choices.sort((a, b) => b.quantity - a.quantity || Math.abs(a.contract.strike - stockPrice) - Math.abs(b.contract.strike - stockPrice) ||
+  // Nearest to the money first; equidistant strikes fall back to the tighter spread, then the stable id.
+  choices.sort((a, b) => Math.abs(a.contract.strike - stockPrice) - Math.abs(b.contract.strike - stockPrice) ||
     a.relativeSpread - b.relativeSpread || a.contract.id.localeCompare(b.contract.id));
   return choices[0] ?? null;
 }
@@ -200,7 +221,9 @@ export class OrbOptionsEngine {
       return [{ kind: "sell_to_close", reason: "protective_stop", symbol, contractId: p.contractId, quantity: p.remainingQuantity, stockPrice, at }];
     }
     const levelsReached = Math.min(this.config.maximumTrimSteps, Math.floor((stockPrice / p.entryStockPrice - 1 + 1e-12) / this.config.trimGainFraction));
-    const targetSold = Math.min(p.originalQuantity, levelsReached); const alreadySold = p.originalQuantity - p.remainingQuantity;
+    // One contract per level up to four contracts; larger positions scale proportionally so the fourth level exits fully.
+    const targetSold = Math.min(p.originalQuantity, Math.max(levelsReached, Math.ceil(p.originalQuantity * levelsReached / this.config.maximumTrimSteps)));
+    const alreadySold = p.originalQuantity - p.remainingQuantity;
     const quantity = targetSold - alreadySold;
     if (quantity > 0) {
       s.pendingSale = quantity;
@@ -210,7 +233,8 @@ export class OrbOptionsEngine {
   }
   confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number): void {
     const s = this.#need(symbol);
-    if (s.status !== "entry_pending" || !/^[a-f0-9-]{36}$/.test(contractId) || !Number.isInteger(quantity) || quantity < this.config.minimumContracts || quantity > this.config.preferredContracts || !(entryStockPrice > 0)) throw new Error("Invalid entry confirmation");
+    if (s.status !== "entry_pending" || !/^[a-f0-9-]{36}$/.test(contractId) || !Number.isInteger(quantity) || quantity < this.config.minimumContracts ||
+      (this.config.maximumContractsPerTrade !== null && quantity > this.config.maximumContractsPerTrade) || !(entryStockPrice > 0)) throw new Error("Invalid entry confirmation");
     s.position = { contractId, originalQuantity: quantity, remainingQuantity: quantity, entryStockPrice, trimStepsFilled: 0 }; s.status = "open";
   }
   failEntry(symbol: string): void {
@@ -248,7 +272,7 @@ export class OrbOptionsEngine {
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
         if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||
-          !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isInteger(p.originalQuantity) || p.originalQuantity < 2 || p.originalQuantity > 4 ||
+          !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isSafeInteger(p.originalQuantity) || p.originalQuantity < 1 ||
           !Number.isInteger(p.remainingQuantity) || p.remainingQuantity < 0 || p.remainingQuantity > p.originalQuantity ||
           (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0)) throw new Error("Invalid saved position");
       } else if (s.position) throw new Error("Unexpected saved position");

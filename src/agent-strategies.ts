@@ -17,7 +17,7 @@ export interface AgentStrategy {
 // Transport-independent plug-in contract: no chat, filesystem, credentials or broker.
 
 export const openingRangeStrategy: AgentStrategy = {
-  id: "opening-range-options", version: "0.4.0", name: "Opening-range call options",
+  id: "opening-range-options", version: "0.5.0", name: "Opening-range call options",
   description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a trade below its low first ends the day for that stock.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
   paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
@@ -48,7 +48,8 @@ export const openingRangeStrategy: AgentStrategy = {
           id, symbol: intent.symbol, expiration, strike: 101, multiplier: 100,
           tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: `${expiration}T19:00:00Z`,
         }], [{ id, bid: 3.9, ask: 4, askSize: 10, updatedAt: at, retrievedAt: at }],
-        intent.symbol, expiration, intent.stockPrice, config, intent.at);
+        intent.symbol, expiration, intent.stockPrice, config, intent.at,
+        Math.min(config.budgetCentsPerPosition, config.budgetCentsPerDay - committedCents));
         if (!selection) { engine.failEntry(intent.symbol); emit("entry_skipped", { symbol: intent.symbol, reason: "selection_failed" }); return; }
         committedCents += selection.committedCents;
         engine.confirmEntry(intent.symbol, id, selection.quantity, intent.stockPrice);

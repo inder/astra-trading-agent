@@ -27,7 +27,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       const s = checkpoint as OrbPaperCheckpoint;
       if (!s.holdings || !s.protectiveExits || Object.entries(s.protectiveExits).some(([symbol, reason]) =>
         !this.#config.symbols.includes(symbol) || !["protective_stop", "session_close"].includes(reason)) ||
-        !Number.isSafeInteger(s.committedCents) || s.committedCents < 0 || s.committedCents > 400000 ||
+        !Number.isSafeInteger(s.committedCents) || s.committedCents < 0 || s.committedCents > this.#config.budgetCentsPerDay ||
         !Number.isSafeInteger(s.realizedPnlCents)) throw new Error("Invalid paper checkpoint");
       this.#engine.restore(s.engine);
       for (const [symbol, state] of Object.entries(s.engine.symbols)) if (state.position) {
@@ -59,8 +59,10 @@ export class OrbPaperRuntime implements PaperRuntime {
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
         if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed");
         if (this.#clock() >= this.#session.close - 60000) throw new EntrySkip("too_close_to_session_end");
-        const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock());
-        if (!selected || this.#saved.committedCents + selected.committedCents > 400000) throw new EntrySkip("no_affordable_eligible_call");
+        // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
+        const capCents = Math.min(this.#config.budgetCentsPerPosition, this.#config.budgetCentsPerDay - this.#saved.committedCents);
+        const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock(), capCents);
+        if (!selected || this.#saved.committedCents + selected.committedCents > this.#config.budgetCentsPerDay) throw new EntrySkip("no_affordable_eligible_call");
         this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!);
         this.#saved.holdings[intent.symbol] = { contract: selected.contract, entryPrice: selected.limitPrice, mark: null };
         this.#saved.committedCents += selected.committedCents;

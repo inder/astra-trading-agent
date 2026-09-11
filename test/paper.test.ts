@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -9,6 +10,7 @@ import { createAgentMcpServer } from "../src/agent-mcp.ts";
 import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
+import type { PaperMarket } from "../src/paper-market.ts";
 import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
 test("session calendar handles DST, holidays and early closes", () => {
@@ -236,10 +238,37 @@ test("a run stopped while holding contracts settles after the close: they are wr
   await assert.rejects(f.service.paper.start(setup.runId), /expired/, "a fresh start after the close is still refused");
   const settled = await f.service.paper.start(setup.runId, true);
   assert.equal(settled.status, "completed"); assert.equal(settled.view.positions.length, 0); assert.equal(settled.view.realizedPnlCents, -160000);
-  assert.deepEqual(settled.events.map(e => e.type).filter(type => type !== "setup_disqualified"), ["settled_after_session", "written_off", "session_ended"]);
+  // Symbols still watching when the run stopped end on the entry window, not a "resumed" management claim.
+  assert.deepEqual(settled.events.map(e => e.type === "setup_disqualified" ? `${(e.data as any).symbol}:${(e.data as any).reason}` : e.type),
+    ["settled_after_session", "DEMOB:entry_window_closed", "DEMOC:entry_window_closed", "written_off", "session_ended"]);
   assert.equal(f.service.paper.daily(date).realizedPnlCents, -160000);
   assert.equal(f.service.paper.list()[0]?.needsSettlement, false);
   await assert.rejects(f.service.paper.start(setup.runId, true), /expired/, "settled exactly once");
+});
+test("settlement needs no market data or authorization: a halted run settles while every read fails", async t => {
+  const f = fixture(t); await entered(f); f.outage(); f.advance();
+  await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
+  f.setTime(close + 60000);
+  const fail = async (): Promise<never> => { throw new Error("test-only: no market data after the close"); };
+  const dead: PaperMarket = { quotes: fail, bars: fail, calls: fail, optionQuotes: fail };
+  const offline = new TradingAgentService(f.directory, undefined, undefined, { ...f.options, ready: () => false, market: dead });
+  try {
+    const settled = await offline.paper.start(setup.runId, true);
+    assert.equal(settled.status, "completed"); assert.equal(settled.view.realizedPnlCents, -160000);
+    assert.deepEqual(settled.events[0], { type: "settled_after_session", data: { previousStatus: "error" } });
+  } finally { await offline.close(); }
+});
+test("a crashed run left running with a dead owner process settles after the close, and says settlement not resume", async t => {
+  const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);
+  const r = f.service.paper.status(setup.runId), dir = join(f.directory, "paper", setup.runId);
+  const path = join(dir, String(r.revision).padStart(8, "0") + ".json");
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), status: "running" }));           // what a crash leaves
+  writeFileSync(join(dir, "owner.json"), JSON.stringify({ pid: spawnSync(process.execPath, ["-e", ""]).pid }));   // an exited process
+  f.setTime(close + 60000);
+  const listed = f.service.paper.list()[0]!;
+  assert.deepEqual([listed.needsResume, listed.needsSettlement], [false, true]);
+  const settled = await f.service.paper.start(setup.runId, true);
+  assert.equal(settled.status, "completed"); assert.deepEqual(settled.events[0]?.data, { previousStatus: "running" });
 });
 test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses new entries from then", async t => {
   const f = fixture(t, ["DEMOA", "DEMOB"]);

@@ -44,7 +44,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       for (const h of Object.values(this.#saved.holdings)) h.mark = null;
       // Recovery manages prior positions only, so symbols still watching are done for the day, and say so.
       for (const [symbol, state] of Object.entries(this.#engine.snapshot().symbols))
-        if (state.status === "watching") { this.#engine.disqualify(symbol, "resumed_management_only"); this.#resumeNotes.push(symbol); }
+        if (state.status === "watching" && clock() < this.#session.close) { this.#engine.disqualify(symbol, "resumed_management_only"); this.#resumeNotes.push(symbol); }
     }
   }
   checkpoint(): OrbPaperCheckpoint { return { ...structuredClone(this.#saved), engine: this.#engine.snapshot() }; }
@@ -59,11 +59,11 @@ export class OrbPaperRuntime implements PaperRuntime {
   async #handle(intent: OrbIntent, fetched?: CallQuote): Promise<PaperEvent[]> {
     if (intent.kind === "enter_calls") {
       try {
+        if (this.#clock() >= this.#session.close - this.#config.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
         const catalog = await this.#market.calls(intent.symbol, this.#config.date);
         const stock = (await this.#market.quotes([intent.symbol]))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
         if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed");
-        if (this.#clock() >= this.#session.close - this.#config.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
         const capCents = Math.min(this.#config.budgetCentsPerPosition, this.#config.budgetCentsPerDay - this.#saved.committedCents);
         const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock(), capCents);
@@ -102,6 +102,7 @@ export class OrbPaperRuntime implements PaperRuntime {
     if (this.#saved.complete || now < open + 120000) return events;
     for (const symbol of this.#resumeNotes.splice(0)) events.push({ type: "setup_disqualified", data: { symbol, reason: "resumed_management_only" } });
     if (now >= close) {
+      for (const symbol of this.#engine.closeEntryWindow(now)) events.push({ type: "setup_disqualified", data: { symbol, reason: "entry_window_closed" } });
       // Money lost: contracts still unsold at the close are written off at -100% of their remaining premium.
       for (const p of this.view().positions) {
         const quantity = this.#engine.writeOff(p.symbol); if (!quantity) continue;

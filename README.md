@@ -213,8 +213,9 @@ minus 0.1% sells everything. After it, the stop moves to breakeven: the stock
 back at its entry price sells the rest. A simulated Robinhood safety stop sells
 everything if the bid falls to 50% of the entry premium (rounded up to a valid
 price increment). User trims come out of the nearest unfilled target and never
-move the stop. Everything still held sells at the bid one minute before the
-close; contracts that cannot be sold then are written off as a total loss.
+move the stop. Everything still held sells at the bid `flattenLeadMinutes`
+before the close (default 1 minute); contracts that cannot be sold then are
+written off as a total loss.
 Settings: `firstTargetMultiple`, `middleTargetMultiple`, `finalTargetMultiple`
 (each must be higher than the one before), `backstopPercent`, `stopBufferPercent`,
 and `flattenLeadMinutes` (default 1, i.e. 3:59 p.m.; new entries also stop then).

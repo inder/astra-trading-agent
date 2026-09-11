@@ -69,9 +69,11 @@ export class PaperController {
       record.view = { ...record.view, unrealizedPnlCents: null, positions: record.view.positions.map(p => ({ ...p, markBid: null, markAt: null })) };
     }
     return { ...record, attached: this.#active.has(id),
-    needsResume: record.status === "running" && !this.#active.has(id),
-    needsSettlement: !this.#active.has(id) && record.status !== "completed" && record.view.positions.length > 0 && this.#clock() >= sessionTimes(record.date).close,
+    needsResume: record.status === "running" && !this.#active.has(id) && !this.#ended(record),
+    needsSettlement: !this.#active.has(id) && record.status !== "completed" && record.view.positions.length > 0 && this.#ended(record),
     pnlEstimateOnly: true, feesExcluded: true }; }
+  /** The run's session has closed. A date the calendar no longer covers reads as not ended rather than breaking listings. */
+  #ended(record: PaperRecord) { try { return this.#clock() >= sessionTimes(record.date).close; } catch { return false; } }
   list() {
     try { return readdirSync(this.#root).filter(validId).filter(id => id !== "reservations").map(id => {
       const r = this.status(id); return { runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsResume: r.needsResume,

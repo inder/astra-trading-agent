@@ -286,10 +286,10 @@ test("catalogs load before 9:32, one per tick, so an entry quotes one batch and 
   const entry = await runtime.step();
   assert.equal((entry.find(e => e.type === "option_selection")!.data as any).batches, 1);
   assert.equal(f.reads.contracts, 3, "no catalog read at the entry");
-  // Inside the fence before 9:32 nothing is prefetched; the catalog then loads at the entry instead.
+  // With no time left before 9:32 beyond one poll nothing is prefetched; the catalog then loads at the entry instead.
   const late = fixture(t, ["DEMOA"]);
   const lateRun = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), late.market, late.options.clock);
-  late.setTime(open + 111000); await lateRun.step(); assert.equal(late.reads.contracts, 0);
+  late.setTime(open + 119000); await lateRun.step(); assert.equal(late.reads.contracts, 0);
   late.setTime(open + 120000); await lateRun.step(); late.advance(); late.prices.DEMOA = 106;
   late.slowCatalog(6000); const lazy = await lateRun.step();
   assert.deepEqual([late.reads.contracts, lateRun.view().positions.length], [1, 1]);
@@ -305,6 +305,19 @@ test("a slow catalog prefetch never delays the first observation after 9:32", as
   assert.equal(f.reads.contracts, 2, "the third load would have run past the fence");
   f.slowCatalog(0); f.setTime(open + 120000); journal.push(...await runtime.step());
   assert.deepEqual(journal.filter(e => e.type === "setup_disqualified"), [], "every stock observed in time");
+});
+test("a first catalog load that would run past 9:32 is abandoned at the deadline, and its late answer is still kept", async t => {
+  const f = fixture(t, ["DEMOA"]); const contracts = f.market.contracts;
+  f.market.contracts = async (symbol, day) => { await new Promise(r => setTimeout(r, 300)); return contracts(symbol, day); };   // 300 ms of real latency
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.setTime(open + 119000 - 50);                                     // 50 ms left before the range end minus one poll
+  const started = Date.now(); await runtime.step();
+  assert.ok(Date.now() - started < 250, `the step waited ${Date.now() - started} ms instead of giving up at the deadline`);
+  await new Promise(r => setTimeout(r, 350));                        // the abandoned load finishes afterwards
+  f.setTime(open + 120000); const first = await runtime.step();
+  assert.deepEqual(first.filter(e => e.type === "setup_disqualified"), [], "the first observation after 9:32 was on time");
+  f.advance(); f.prices.DEMOA = 106; await runtime.step();
+  assert.deepEqual([f.reads.contracts, runtime.view().positions.length], [1, 1], "the late catalog was kept: no second load at the entry");
 });
 test("prefetch failures retry and close at 9:32; a no-expiry catalog is a decision, journaled once and reused at the entry", async t => {
   const f = fixture(t, ["DEMOA", "DEMOB"]); const contracts = f.market.contracts; let failing = true, demob = 0;
@@ -361,6 +374,29 @@ test("a stop that cannot fill during an option outage is journaled once, and eac
   assert.ok(pages.length - before <= 3, `${pages.length - before} revisions over 30 ticks`);
   f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
   assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop" && (e.data as any).quantity === 4));
+});
+test("a stop firing while a different exit is already pending is journaled once, and the pending exit still executes", async t => {
+  const f = fixture(t, ["DEMOA"]); await entered(f, ["DEMOA"]); await f.service.paper.stop(setup.runId);
+  const r = f.service.paper.status(setup.runId), path = join(f.directory, "paper", setup.runId, String(r.revision).padStart(8, "0") + ".json");
+  const saved = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...saved, checkpoint: { ...saved.checkpoint, protectiveExits: { DEMOA: "broker_backstop" } } }));
+  f.staleOption(6000); f.prices.DEMOA = 99; f.advance(); await f.service.paper.start(setup.runId, true);
+  for (let s = 0; s < 5; s++) { f.advance(); await f.service.paper.tick(setup.runId); }
+  const triggers = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "exit_triggered");
+  assert.deepEqual(triggers.map(e => [(e.data as any).exit, (e.data as any).alreadyPending]), [["protective_stop", "broker_backstop"]]);
+  f.staleOption(0); f.advance(); await f.service.paper.tick(setup.runId);
+  assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop"));
+});
+test("a failed read during an entry counts in the heartbeat like any other", async t => {
+  const f = fixture(t, ["DEMOA"]); const quotes = f.market.quotes; let reads = 0;
+  f.market.quotes = async s => { reads++; if (reads === 3) throw new Error("test-only 503"); return quotes(s); };
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0, heartbeatMs: 5000 }), f.market, f.options.clock);
+  f.setTime(open + 120000); await runtime.step();
+  f.advance(); f.prices.DEMOA = 106;
+  const entry = await runtime.step();
+  assert.deepEqual(entry.filter(e => e.type === "entry_skipped").map(e => [(e.data as any).reason, (e.data as any).detail]), [["data_unavailable", "test-only 503"]]);
+  f.advance(5000); const later = await runtime.step();
+  assert.equal((later.find(e => e.type === "heartbeat")!.data as any).readFailures.quotes, 1);
 });
 test("a breakout with every position slot taken, or one that reverses before the entry quote, is a skip with its evidence", async t => {
   const f = fixture(t); await entered(f);

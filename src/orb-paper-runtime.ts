@@ -16,9 +16,6 @@ const isPersistentExit = (reason: unknown): reason is PersistentExit => (PERSIST
 type Source = "quotes" | "bars" | "options" | "catalog";
 /** A stock's catalog, or the rule decision that it has nothing to trade today (a decision, never an outage). */
 type Catalog = OptionCatalog | { skip: string };
-/** An invariant fence, not a strategy number: a catalog prefetch must finish before the first observation after the range
- *  ends, or the late-first-quote rule would cost every stock its day. Never shorter than the slowest load seen. */
-const PREFETCH_FENCE_MS = 10_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 export class OrbPaperRuntime implements PaperRuntime {
   #config: OrbOptionsConfig; #market: PaperMarket; #clock: () => number; #engine: OrbOptionsEngine;
@@ -29,9 +26,10 @@ export class OrbPaperRuntime implements PaperRuntime {
   #journaledGaps = new Set<Source>();
   #failures: Partial<Record<Source, number>> = {};
   /** Session catalogs, prefetched before 9:32. Memory only: a restarted run manages positions and never enters. */
-  #catalogs = new Map<string, Catalog>(); #slowestCatalogMs = 0; #prefetches = 0;
-  /** Sell-everything exits whose "no fresh bid" is already journaled: an outage adds one event, not one per tick. */
-  #deferred = new Set<string>();
+  #catalogs = new Map<string, Catalog>(); #slowestCatalogMs = 0; #prefetches = 0; #prefetchOver = false;
+  /** Journaled once per outage or per trigger, keyed "symbol:exit": the "no fresh bid" deferral of a sell-everything exit,
+   *  and a stop firing while a different exit is already pending. Each re-fires every tick until the position sells. */
+  #deferred = new Set<string>(); #triggered = new Set<string>();
   /** Since the last heartbeat: each stock's observed price range and count, and its latest quote. */
   #seen = new Map<string, { low: number; high: number; observations: number }>();
   #latest = new Map<string, { price: number | null; tradeAt: string | null; fresh: boolean }>();
@@ -90,9 +88,9 @@ export class OrbPaperRuntime implements PaperRuntime {
         if (this.#clock() >= this.#session.close - c.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
         // Catalog first (prefetched before 9:32, else loaded now), then the fresh stock quote, then the nearest strikes' quotes.
         let catalog = this.#catalogs.get(intent.symbol);
-        if (!catalog) { catalog = await this.#loadCatalog(intent.symbol); this.#catalogs.set(intent.symbol, catalog); }
+        if (!catalog) { catalog = await this.#counted("catalog", () => this.#loadCatalog(intent.symbol)); this.#catalogs.set(intent.symbol, catalog); }
         if ("skip" in catalog) throw new EntrySkip(catalog.skip);
-        const stock = (await this.#market.quotes([intent.symbol]))[0];
+        const stock = (await this.#counted("quotes", () => this.#market.quotes([intent.symbol])))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
         if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed", { price: stock!.price, tradeAt: stock!.tradeAt });
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
@@ -101,7 +99,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         const plan = strikeBatches(catalog.contracts, stock!.price!);
         let selected: OrbCallSelection | null = null;
         for (const batch of plan.slice(0, c.maxEntryQuoteBatches)) {
-          batches++; quotes = [...quotes, ...await this.#market.optionQuotes(batch.map(k => k.id))];
+          batches++; quotes = [...quotes, ...await this.#counted("options", () => this.#market.optionQuotes(batch.map(k => k.id)))];
           selected = selectOrbCall(catalog.contracts, quotes, intent.symbol, catalog.expiration, stock!.price!, c, this.#clock(), capCents);
           if (selected) break;
         }
@@ -126,21 +124,27 @@ export class OrbPaperRuntime implements PaperRuntime {
       }
     }
     // A stock-triggered sell-everything exit is executed by this tick's option batch: one quote request per tick however many
-    // stops fire. The stop re-fires every tick until it fills; only the first trigger is journaled, with its observation.
+    // stops fire. The stop re-fires every tick until it fills, so each trigger is journaled once, with its observation. The
+    // first pending exit is the one executed; a different one firing meanwhile is journaled as such.
     if (!fetched && isPersistentExit(intent.reason)) {
       this.#engine.failSale(intent.symbol);
-      if (this.#saved.protectiveExits[intent.symbol]) return [];
+      const pending = this.#saved.protectiveExits[intent.symbol], trigger = { symbol: intent.symbol, exit: intent.reason, stockPrice: intent.stockPrice, tradeAt: iso(intent.at) };
+      if (pending === intent.reason) return [];
+      if (pending) {
+        const key = `${intent.symbol}:${intent.reason}`; if (this.#triggered.has(key)) return [];
+        this.#triggered.add(key); return [{ type: "exit_triggered", data: { ...trigger, alreadyPending: pending } }];
+      }
       this.#saved.protectiveExits[intent.symbol] = intent.reason;
-      return [{ type: "exit_triggered", data: { symbol: intent.symbol, exit: intent.reason, stockPrice: intent.stockPrice, tradeAt: iso(intent.at) } }];
+      return [{ type: "exit_triggered", data: trigger }];
     }
     if (isPersistentExit(intent.reason)) this.#saved.protectiveExits[intent.symbol] = intent.reason;
     try {
-      const quote = fetched ?? (await this.#market.optionQuotes([intent.contractId])).find(q => q.id === intent.contractId);
+      const quote = fetched ?? (await this.#counted("options", () => this.#market.optionQuotes([intent.contractId]))).find(q => q.id === intent.contractId);
       if (!this.#validOption(quote)) throw new Error("Stale option bid");
       const h = this.#saved.holdings[intent.symbol]!;
       const pnlCents = Math.round((quote.bid - h.entryPrice) * 10000 * intent.quantity);
       this.#engine.confirmSale(intent.symbol, intent.quantity); h.mark = quote; this.#saved.realizedPnlCents += pnlCents;
-      for (const key of [...this.#deferred]) if (key.startsWith(intent.symbol + ":")) this.#deferred.delete(key);
+      this.#forget(intent.symbol);
       if (this.#engine.snapshot().symbols[intent.symbol]!.status === "closed") delete this.#saved.protectiveExits[intent.symbol];
       return [{ type: "paper_sale", data: { symbol: intent.symbol, quantity: intent.quantity, reason: intent.reason,
         stockPrice: intent.stockPrice, triggeredAt: iso(intent.at), quote, assumedFill: quote.bid, realizedPnlCents: pnlCents,
@@ -148,8 +152,16 @@ export class OrbPaperRuntime implements PaperRuntime {
     } catch {
       this.#engine.failSale(intent.symbol);
       return isPersistentExit(intent.reason) ? this.#deferOnce(intent.symbol, intent.reason, intent.stockPrice, intent.at)
-        : [{ type: "sale_deferred", data: { symbol: intent.symbol, reason: "fresh_option_bid_unavailable", exit: intent.reason } }];
+        : [{ type: "sale_deferred", data: { symbol: intent.symbol, reason: "fresh_option_bid_unavailable", exit: intent.reason, stockPrice: intent.stockPrice, at: iso(intent.at) } }];
     }
+  }
+  /** A read outside the tick's own (an entry's quotes and catalog, a user sale's bid): its failure still counts in the heartbeat. */
+  async #counted<T>(source: Source, read: () => Promise<T>): Promise<T> {
+    try { return await read(); } catch (error) { this.#failures[source] = (this.#failures[source] ?? 0) + 1; throw error; }
+  }
+  /** A position that sold or was written off no longer has deferrals or triggers to journal. */
+  #forget(symbol: string): void {
+    for (const set of [this.#deferred, this.#triggered]) for (const key of [...set]) if (key.startsWith(symbol + ":")) set.delete(key);
   }
   /** "No fresh bid" for a due sell-everything exit is journaled once per outage; the exit keeps retrying every tick. */
   #deferOnce(symbol: string, exit: string, stockPrice: number | null, at: number): PaperEvent[] {
@@ -169,7 +181,7 @@ export class OrbPaperRuntime implements PaperRuntime {
     const now = this.#clock(), { close } = this.#session, c = this.#config, rangeEnd = this.#engine.rangeEndMs;
     if (this.#saved.complete) return;
     if (now < rangeEnd) { if (!this.#saved.resumed) await this.#prefetch(now, rangeEnd, events); return; }
-    this.#endGap("catalog", now, events, "prefetch_window_closed");
+    if (!this.#prefetchOver) { this.#prefetchOver = true; this.#endGap("catalog", now, events, "prefetch_window_closed"); }
     for (const symbol of this.#resumeNotes.splice(0)) events.push({ type: "setup_disqualified", data: { symbol, reason: "resumed_management_only" } });
     if (now >= close) {
       for (const symbol of this.#engine.closeEntryWindow(now)) events.push({ type: "setup_disqualified", data: { symbol, reason: "entry_window_closed" } });
@@ -177,6 +189,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       for (const p of this.view().positions) {
         const quantity = this.#engine.writeOff(p.symbol); if (!quantity) continue;
         const lossCents = -Math.round(p.entryPrice * 10000 * quantity); this.#saved.realizedPnlCents += lossCents; delete this.#saved.protectiveExits[p.symbol];
+        this.#forget(p.symbol);
         events.push({ type: "written_off", data: { symbol: p.symbol, contractId: p.contractId, quantity, realizedPnlCents: lossCents, reason: "unsold_at_session_end" } });
       }
       this.#saved.complete = true;
@@ -252,17 +265,30 @@ export class OrbPaperRuntime implements PaperRuntime {
     if (outFor("quotes") > c.readFailureHaltMs && (!holding || outFor("options") > c.readFailureHaltMs))
       throw new Error(`Market data unavailable for more than ${c.readFailureHaltMs / 1000} s`);
   }
-  /** Before 9:32, load one stock's catalog per tick while there is clearly time (see PREFETCH_FENCE_MS), rotating past
-   *  failures; anything not loaded by then loads at its entry instead. */
+  /** Before 9:32, load one stock's catalog per tick, rotating past failures. A load must never run into the first observation
+   *  after the range end (the late-first-quote rule would cost every stock its day): one starts only when more time is left
+   *  than the slowest load seen, and it is abandoned, like a failed read, at the range end minus one poll. Anything not
+   *  loaded by then loads at its entry. */
   async #prefetch(now: number, rangeEnd: number, events: PaperEvent[]): Promise<void> {
-    const missing = this.#config.symbols.filter(s => !this.#catalogs.has(s));
-    if (!missing.length || now + Math.max(PREFETCH_FENCE_MS, this.#slowestCatalogMs) >= rangeEnd) return;
+    const missing = this.#config.symbols.filter(s => !this.#catalogs.has(s)), budgetMs = rangeEnd - this.#config.pollMs - now;
+    if (!missing.length || budgetMs <= this.#slowestCatalogMs) return;
     const symbol = missing[this.#prefetches++ % missing.length]!, started = this.#clock();
-    const catalog = await this.#read("catalog", now, events, () => this.#loadCatalog(symbol));
+    const catalog = await this.#read("catalog", now, events, () => this.#withDeadline(symbol, budgetMs));
     this.#slowestCatalogMs = Math.max(this.#slowestCatalogMs, this.#clock() - started);
     if (!catalog) return;
     this.#catalogs.set(symbol, catalog);
     if ("skip" in catalog) events.push({ type: "no_tradable_calls", data: { symbol, reason: catalog.skip } });
+  }
+  /** A catalog load raced against a real-time deadline. The provider call cannot be cancelled; if it finishes late its catalog
+   *  is still kept for the entry (no event is written outside a step). */
+  #withDeadline(symbol: string, ms: number): Promise<Catalog> {
+    const load = this.#loadCatalog(symbol);
+    load.then(catalog => { if (!this.#catalogs.has(symbol)) this.#catalogs.set(symbol, catalog); }, () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Catalog load ran past the prefetch deadline")), ms); timer.unref?.();
+    });
+    return Promise.race([load, deadline]).finally(() => clearTimeout(timer));
   }
   /** Opening ranges from minute bars, retried each tick until rangeDeadlineMs after the first candle: its last bar can
    *  publish late, and stocks keep being observed meanwhile. */

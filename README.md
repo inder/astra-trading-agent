@@ -201,8 +201,8 @@ the contracts displayed at the ask, so how far from the money it lands depends o
 the stock's price. Each stock's option catalog loads before 9:32; at an entry
 Astra quotes the 20 strikes nearest the price and widens 20 at a time only while
 none qualifies (`maxEntryQuoteBatches`, default 3), which finds the same nearest
-qualifying strike as quoting everything. Strikes the exchange adds during the day
-are not in that morning catalog. Each of these is a setting you can change when
+qualifying strike as quoting every strike would; the journal lists the strikes it
+quoted. Strikes the exchange adds during the day are not in that morning catalog. Each of these is a setting you can change when
 configuring a run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`,
 `minimumContracts`, `maximumContractsPerTrade`, `maximumPositions`,
 `maxOptionSpreadPercent`, `feeReserveCentsPerContract`, `entryWindowMinutes`,

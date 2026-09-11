@@ -13,8 +13,8 @@ export interface PaperMarket {
   optionQuotes(ids: string[]): Promise<CallQuote[]>;
 }
 export class RobinhoodPaperMarket implements PaperMarket {
-  #broker: RobinhoodConnection; #equities: RobinhoodMarketData;
-  constructor(broker: RobinhoodConnection) { this.#broker = broker; this.#equities = new RobinhoodMarketData(broker); }
+  #broker: RobinhoodConnection; #equities: RobinhoodMarketData; #clock: () => number;
+  constructor(broker: RobinhoodConnection, clock = Date.now) { this.#broker = broker; this.#equities = new RobinhoodMarketData(broker); this.#clock = clock; }
   quotes(symbols: string[]) { return this.#equities.quotes(symbols); }
   bars(symbols: string[], start: number, end: number, extended: boolean) {
     validateSymbols(symbols);
@@ -33,6 +33,8 @@ export class RobinhoodPaperMarket implements PaperMarket {
   }
   async optionQuotes(ids: string[]) {
     if (!ids.length || ids.length > 20 || new Set(ids).size !== ids.length || ids.some(id => !/^[a-f0-9-]{36}$/.test(id))) throw new Error("Invalid option IDs");
-    return parseAvailableOrbCallQuotes(await this.#broker.read("get_option_quotes", { instrument_ids: ids }), ids, new Date().toISOString());
+    // Stamped when the answer arrives, not when it was asked.
+    const raw = await this.#broker.read("get_option_quotes", { instrument_ids: ids });
+    return parseAvailableOrbCallQuotes(raw, ids, new Date(this.#clock()).toISOString());
   }
 }

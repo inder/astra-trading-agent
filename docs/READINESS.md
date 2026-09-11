@@ -47,7 +47,8 @@ No real-account readiness or trading performance is claimed.
   nearest strikes, so entries are one stock quote plus one to three option-quote
   requests; a catalog that has to load at the entry instead can still hold up
   polling past the gap, which drops the other stocks still being watched, honestly.
-  Strikes listed during the day are not in the morning catalog.
+  Strikes listed during the day are not in the morning catalog. The stock quote an
+  entry ranks strikes by is taken once, so by a third batch it is a few seconds old.
 - A single failed read is only counted; two in a row are a journaled data gap, not a halt; sustained failures
   (default 60 s) halt, except that open positions keep being managed on option
   prices through an equity-quote outage. An option-price outage alone never halts:

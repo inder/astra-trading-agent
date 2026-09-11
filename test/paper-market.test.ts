@@ -35,10 +35,10 @@ test("option pagination, duplicate identities and unexpected quotes fail closed"
   assert.throws(() => parseAvailableOrbCallQuotes({ data: { results: [{ quote: { instrument_id: chainId } }] } }, [contractId], new Date().toISOString()), /foreign/);
 });
 test("option retrieval timestamp follows the completed request", async () => {
-  const { provider } = source();
-  const broker = { async read(_name: string, args: any) { await new Promise(r => setTimeout(r, 30)); return provider.optionQuotes(args.instrument_ids); } } as unknown as RobinhoodConnection;
-  const asked = Date.now(), [quote] = await new RobinhoodPaperMarket(broker).optionQuotes([contractId]);
-  assert.ok(Date.parse(quote!.retrievedAt) >= asked + 25, "stamped when the answer arrived, not when it was asked");
+  const { provider } = source(); let clock = Date.parse("2026-09-08T13:32:00Z");
+  const broker = { async read(_name: string, args: any) { clock += 1000; return provider.optionQuotes(args.instrument_ids); } } as unknown as RobinhoodConnection;
+  const [quote] = await new RobinhoodPaperMarket(broker, () => clock).optionQuotes([contractId]);
+  assert.equal(quote!.retrievedAt, "2026-09-08T13:32:01.000Z", "stamped when the answer arrived, not when it was asked");
 });
 test("paper adapter maps requests to bounded read-only provider operations", async () => {
   const { provider, calls } = source(); const names: string[] = [];

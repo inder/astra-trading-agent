@@ -152,6 +152,16 @@ test("a running run reports what it is doing now, and that the app must stay ope
     assert.deepEqual(g.next, { tool: "get_paper_run", when: "after_user_yes", args: { runId: "plan-one" } });
   }
 });
+test("near the calendar's end the expiry is described by its rule, and the guide still answers", () => {
+  const g = guide({ now: at("2027-12-29T17:00:00-05:00"), broker: connected });
+  assert.equal(g.stage, "choose_symbols"); assert.equal(g.session?.date, "2027-12-30");   // its target expiry would be in 2028
+  assert.match(g.explain.find(l => l.startsWith("Which option:"))!, /fit under the per-trade limit, with the first week-ending expiry at least 3 trading days out/);
+});
+test("unreadable saved runs are named and left out, never guessed at", () => {
+  const g = guide({ broker: connected, unreadable: ["broken-one"] });
+  assert.equal(g.stage, "choose_symbols");
+  assert.match(g.explain[0]!, /couldn't read saved run broken-one, so this guide leaves it out rather than guess/);
+});
 test("after the calendar's last session there is nothing to plan", () => {
   const g = guide({ now: at("2027-12-31T17:00:00-05:00"), broker: connected });
   assert.equal(g.stage, "calendar_ended"); assert.equal(g.next.tool, null); assert.match(g.status, /2026–2027/);

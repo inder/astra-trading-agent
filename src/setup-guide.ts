@@ -25,6 +25,8 @@ export interface GuideRun {
 }
 export interface GuideInput {
   now: number; strategyId: string; runs: GuideRun[];
+  /** Saved runs whose records couldn't be read: named, never guessed at. */
+  unreadable?: string[];
   /** paperDataAvailable: every market-data read a paper run needs is authorized. */
   broker: { state: BrokerState; paperDataAvailable: boolean; authorizationExpiresAt: string | null };
 }
@@ -96,13 +98,17 @@ export function nextSessionDate(now: number, used: ReadonlySet<string>): string 
 const sessionOpen = (date: string, now: number) => { try { return now < sessionTimes(date).close; } catch { return false; } };
 
 function strategyLines(p: Plan, s: SessionInfo): string[] {
+  const rule = `the first week-ending expiry at least ${MIN_EXPIRY_SESSIONS} trading days out, counting the trade day`;
+  let expiry: string | null = null;
+  // Near the calendar's end the target can fall past its coverage: then the rule is described, not dated.
+  try { expiry = day(weeklyExpiryTarget(s.date)); } catch { /* described by rule only */ }
   return [
     `Here is what Astra does on ${s.day}, on paper only: simulated trades on real Robinhood prices, no real orders.`,
     `The first ${OPENING_RANGE_MINUTES} minutes after the ${s.opens} open set each stock's opening high and low.`,
     `If a stock then trades above that high before ${s.entriesUntil}, Astra buys call options on it. If it trades below the low first, that stock is done for the day.`,
     `Limits: at most ${count(p.positions, "stock")} entered per day, ${dollars(p.perTradeCents)} of option premium per trade and ${dollars(p.perDayCents)} per day.`,
-    `Which option: the strike closest to the stock price where at least ${count(p.minimumContracts, "contract")} fit under the per-trade limit, expiring ${day(weeklyExpiryTarget(s.date))} ` +
-      `(the first week-ending expiry at least ${MIN_EXPIRY_SESSIONS} trading days out, counting the trade day).`,
+    `Which option: the strike closest to the stock price where at least ${count(p.minimumContracts, "contract")} fit under the per-trade limit, ` +
+      (expiry ? `expiring ${expiry} (${rule}).` : `with ${rule}.`),
     `Exits: half the contracts (rounded up) sell when the option reaches ${p.first}x its entry price${p.first >= 2 ? ", which recovers at least the premium paid" : ""}; ` +
       `the last one sells at ${p.final}x and any in between at ${p.middle}x.`,
     `Stops: before that first sale, a drop ${percent(p.stopBuffer)} below the opening low sells everything; after it, a fall back to the stock's entry price does. ` +
@@ -132,7 +138,11 @@ export function setupGuide(input: GuideInput): Guide {
   const used = new Set(runs.filter(r => r.status !== "configured").map(r => r.date));
   const sessionDate = nextSessionDate(now, used);
   const session = sessionDate ? describeSession(sessionDate, now) : null;
-  const make = (g: Omit<Guide, "rules" | "session"> & { session?: SessionInfo | null }): Guide => ({ session, ...g, rules: RULES });
+  const unreadable = input.unreadable ?? [];
+  const warning = unreadable.length ? [`Astra couldn't read saved run ${unreadable.join(", ")}, so this guide leaves ${unreadable.length === 1 ? "it" : "them"} out ` +
+    "rather than guess; get_paper_run shows the error."] : [];
+  const make = (g: Omit<Guide, "rules" | "session"> & { session?: SessionInfo | null }): Guide =>
+    ({ session, ...g, explain: [...warning, ...g.explain], rules: RULES });
   const connecting = (status: string, context: string[], runId?: string, fresh = false): Guide => {
     if (["preparing", "awaiting_authorization", "verifying"].includes(broker.state)) return make({ stage: "awaiting_robinhood", runId,
       status: `Waiting for your approval of Robinhood market-data access in the browser${broker.authorizationExpiresAt ? ` (the link works until ${clock(Date.parse(broker.authorizationExpiresAt))})` : ""}.`,

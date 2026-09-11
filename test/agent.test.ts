@@ -55,6 +55,19 @@ test("bad run IDs, symlinks and corrupt records fail closed", t => {
   assert.throws(() => service.runSample(request));
   assert.equal(readFileSync(join(directory, "runs", "sample-one.json"), "utf8"), "broken");
 });
+test("one unreadable paper run doesn't take the guide down; it is named instead", t => {
+  const { directory } = fixture(t);
+  // Friday evening before the planned Monday session, so the readable plan is still upcoming whatever today's date is.
+  const service = new TradingAgentService(directory, undefined, undefined, { clock: () => Date.parse("2026-09-11T17:48:00-04:00"), auto: false });
+  t.after(() => service.close());
+  const plan = { strategyId: "opening-range-options", date: "2026-09-14", symbols: ["DEMOA"], includePremarket: false };
+  service.paper.configure({ ...plan, runId: "good-one" }); service.paper.configure({ ...plan, runId: "bad-one" });
+  writeFileSync(join(directory, "paper", "bad-one", "00000000.json"), "broken");
+  const guide = service.readiness().guide!;
+  assert.ok(guide.explain[0]!.includes("couldn't read saved run bad-one"));
+  assert.equal(guide.runId, "good-one");   // the readable plan still leads
+  assert.throws(() => service.paper.list());   // the listing itself still fails closed, as before
+});
 test("second plug-in works without changing service or transport", t => {
   const { directory } = fixture(t);
   const plugin: AgentStrategy = { id: "test-only", version: "1.2.3", name: "Test fixture", description: "Not a trading strategy",

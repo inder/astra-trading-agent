@@ -81,8 +81,13 @@ export class PaperController {
     pnlEstimateOnly: true, feesExcluded: true }; }
   /** The run's session has closed. A date the calendar no longer covers reads as not ended rather than breaking listings. */
   #ended(record: PaperRecord) { try { return this.#clock() >= sessionTimes(record.date).close; } catch { return false; } }
+  /** Saved run IDs, without reading their records. */
+  ids(): string[] {
+    try { return readdirSync(this.#root).filter(validId).filter(id => id !== "reservations"); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw e; }
+  }
   list() {
-    try { return readdirSync(this.#root).filter(validId).filter(id => id !== "reservations").map(id => {
+    try { return this.ids().map(id => {
       const r = this.status(id); return { runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsResume: r.needsResume,
         needsSettlement: r.needsSettlement, positions: r.view.positions.length };
     }); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw e; }

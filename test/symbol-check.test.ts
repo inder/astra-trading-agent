@@ -37,6 +37,15 @@ test("an unknown ticker fails alone: the rest are asked one by one, and it costs
   assert.deepEqual(r.symbols.map(x => [x.symbol, x.problem]), [["DEMOA", null], ["NOPEX", "no_price"], ["DEMOB", null]]);
   assert.deepEqual(f.calls, { batches: 1, singles: 3, chains: ["DEMOA", "DEMOB"] });
 });
+test("when no price lookup succeeds, Robinhood is the suspect, not every ticker's spelling", async () => {
+  const down = source({ DEMOA: [TARGET], DEMOB: [TARGET] }, ["DEMOA", "DEMOB"]);
+  const r = await checkSymbols(down.s, ["DEMOA", "DEMOB"], MONDAY);
+  assert.deepEqual(r.symbols.map(x => [x.symbol, x.problem]), [["DEMOA", "lookup_failed"], ["DEMOB", "lookup_failed"]]);
+  assert.deepEqual(down.calls, { batches: 1, singles: 2, chains: [] });
+  const one = source({}, ["DEMOA"]);   // a lone ticker is not asked twice
+  assert.equal((await checkSymbols(one.s, ["DEMOA"], MONDAY)).symbols[0]!.problem, "lookup_failed");
+  assert.deepEqual(one.calls, { batches: 0, singles: 1, chains: [] });
+});
 test("bad ticker lists are rejected before any read", async () => {
   const f = source({});
   await assert.rejects(checkSymbols(f.s, ["DEMOA", "DEMOA"], MONDAY)); await assert.rejects(checkSymbols(f.s, ["../x"], MONDAY));

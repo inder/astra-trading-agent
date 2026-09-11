@@ -8,7 +8,7 @@ import { RobinhoodMarketData } from "./market-data.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
-import { setupGuide } from "./setup-guide.ts";
+import { setupGuide, type GuideRun } from "./setup-guide.ts";
 import { checkSymbols, type SymbolSource } from "./symbol-check.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
@@ -41,10 +41,17 @@ export class TradingAgentService {
   }
   /** The next step for the user, from live broker and run state. */
   guide() {
-    const status = this.broker.status();
-    // Completed runs are history; only the others need their saved plan.
-    const runs = this.paper.list().map(r => r.status === "completed" ? r : (({ at, config }) => ({ ...r, at, config }))(this.paper.get(r.runId)));
-    return setupGuide({ now: this.#clock(), strategyId: this.strategies.find(s => s.paperFactory)?.id ?? "", runs,
+    const status = this.broker.status(), runs: GuideRun[] = [], unreadable: string[] = [];
+    // One unreadable record is named and left out rather than taking the guide down; its state is never guessed.
+    for (const id of this.paper.ids()) {
+      try {
+        const r = this.paper.status(id);
+        // Completed runs are history; only the others need their saved plan.
+        runs.push({ runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsSettlement: r.needsSettlement,
+          positions: r.view.positions.length, ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
+      } catch { unreadable.push(id); }
+    }
+    return setupGuide({ now: this.#clock(), strategyId: this.strategies.find(s => s.paperFactory)?.id ?? "", runs, unreadable,
       broker: { state: status.state, paperDataAvailable: this.#ready(), authorizationExpiresAt: status.authorizationExpiresAt } });
   }
   /** Tickers checked against the session the guide would plan next. */

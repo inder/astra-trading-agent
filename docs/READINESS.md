@@ -47,7 +47,8 @@ No real-account readiness or trading performance is claimed.
   stocks still being watched, honestly; faster entries arrive in the next slice.
 - A single failed read is a journaled data gap, not a halt; sustained failures
   (default 60 s) halt, except that open positions keep being managed on option
-  prices through an equity-quote outage.
+  prices through an equity-quote outage. An option-price outage alone never halts:
+  exits wait for a fresh bid and anything unsold at the close is written off.
 - Memory-only tokens: restart needs authorization and explicit recovery.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio

@@ -44,6 +44,7 @@ test("risk and sizing are user settings with validated ranges and cross-checks",
   assert.throws(() => parseOrbOptionsConfig({ ...config, rangeDeadlineMs: 600001 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, readFailureHaltMs: 4999 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 1000.5 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, pollMs: 3000, maxObservationGapMs: 6000, readFailureHaltMs: 5000 }));   // halt before two polls
 });
 test("while a range's bars are pending, observations keep the lowest later trade and any gap for when the range arrives", () => {
   const rangeEnd = sessionTimes(config.date).open + 120000, real = { high: 105, low: 100, startMs: rangeEnd - 120000, endMs: rangeEnd };

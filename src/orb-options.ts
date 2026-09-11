@@ -65,7 +65,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     !inRange(c.pollMs, SETTINGS.pollMs) || !inRange(c.maxQuoteAgeMs, SETTINGS.maxQuoteAgeMs) || !inRange(c.maxObservationGapMs, SETTINGS.maxObservationGapMs) ||
     !inRange(c.rangeDeadlineMs, SETTINGS.rangeDeadlineMs) || !inRange(c.readFailureHaltMs, SETTINGS.readFailureHaltMs) ||
     // A poll must fit inside the gap twice (one missed poll is not a gap) and a quote must be allowed to age one poll.
-    c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs ||
+    c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs || c.readFailureHaltMs < 2 * c.pollMs ||
     ![0, 2].includes(c.includePremarketLeadMinutes) ||
     !Number.isSafeInteger(c.entryWindowMinutes) || c.entryWindowMinutes < ENTRY_WINDOW_MINUTES.min || c.entryWindowMinutes > ENTRY_WINDOW_MINUTES.max)
     throw new Error("Invalid opening-range options configuration");
@@ -216,6 +216,8 @@ export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
   /** When the opening range ends is a calendar fact; its high and low come from bars that may arrive later. */
   readonly #rangeEndMs: number;
+  /** When the opening range ends (epoch ms): the one source for the runtime's range window. */
+  get rangeEndMs(): number { return this.#rangeEndMs; }
   constructor(config: OrbOptionsConfig) {
     this.config = parseOrbOptionsConfig(config);
     this.#rangeEndMs = sessionTimes(this.config.date).open + this.config.openingRangeMinutes * 60000;

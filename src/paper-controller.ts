@@ -14,6 +14,8 @@ export interface PaperRecord {
   events: PaperEvent[]; view: ReturnType<PaperRuntime["view"]>; mode: "paper"; ordersSubmitted: 0;
 }
 const validId = (id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id);
+/** Mark staleness for strategies that do not configure a quote age of their own. */
+const DEFAULT_MARK_STALE_MS = 5000;
 function readJSON(path: string) { const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { return JSON.parse(readFileSync(fd, "utf8")); } finally { closeSync(fd); } }
 function publish(path: string, value: unknown) {
   const tmp = path + "." + randomUUID() + ".tmp";
@@ -63,7 +65,7 @@ export class PaperController {
   }
   status(id: string) { const record = this.get(id);
     // A detached run's marks go stale on the run's own quote-age setting (5 s for strategies without one).
-    const setting = (record.config as { maxQuoteAgeMs?: unknown } | null)?.maxQuoteAgeMs, staleMs = typeof setting === "number" ? setting : 5000;
+    const setting = (record.config as { maxQuoteAgeMs?: unknown } | null)?.maxQuoteAgeMs, staleMs = typeof setting === "number" ? setting : DEFAULT_MARK_STALE_MS;
     if (!this.#active.has(id) && record.view.positions.some(p => {
       const age = p.markAt ? this.#clock() - Date.parse(p.markAt) : NaN;
       return !Number.isFinite(age) || age < 0 || age > staleMs;

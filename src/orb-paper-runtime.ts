@@ -107,8 +107,8 @@ export class OrbPaperRuntime implements PaperRuntime {
     return events;
   }
   async #step(events: PaperEvent[]): Promise<void> {
-    const now = this.#clock(), { open, close } = this.#session, c = this.#config;
-    if (this.#saved.complete || now < open + 120000) return;
+    const now = this.#clock(), { close } = this.#session, c = this.#config, rangeEnd = this.#engine.rangeEndMs;
+    if (this.#saved.complete || now < rangeEnd) return;
     for (const symbol of this.#resumeNotes.splice(0)) events.push({ type: "setup_disqualified", data: { symbol, reason: "resumed_management_only" } });
     if (now >= close) {
       for (const symbol of this.#engine.closeEntryWindow(now)) events.push({ type: "setup_disqualified", data: { symbol, reason: "entry_window_closed" } });
@@ -131,12 +131,12 @@ export class OrbPaperRuntime implements PaperRuntime {
       return batch;
     });
     for (const q of (quotes ?? []).sort((a, b) => (a.tradeAt ?? "").localeCompare(b.tradeAt ?? "") || a.symbol.localeCompare(b.symbol))) {
-      events.push({ type: "quote", data: q });
+      events.push({ type: "quote", data: { ...q, fresh: this.#fresh(q) } });
       if (!this.#fresh(q)) continue;
       this.#saved.lastQuoteAt = q.tradeAt;
       const state = this.#engine.snapshot().symbols[q.symbol]!, observedAt = Date.parse(q.retrievedAt);
       // Never infer an unobserved path: a stock first seen after the opening window cannot use its opening range.
-      if (state.lastObservationMs === null && observedAt > open + 120000 + c.maxObservationGapMs) this.#engine.disqualify(q.symbol, "late_first_quote");
+      if (state.lastObservationMs === null && observedAt > rangeEnd + c.maxObservationGapMs) this.#engine.disqualify(q.symbol, "late_first_quote");
       if (this.#saved.resumed && state.status !== "open") continue;
       // Observed as of retrieval, so time spent handling other stocks is not a market gap. Stocks whose range bars are
       // still pending are observed too: the engine keeps their lowest trade and any gap for when the range arrives.
@@ -167,7 +167,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       }
     }
     const holding = this.view().positions.length > 0;
-    if (!holding) delete this.#gaps.options;   // nothing held: an option outage no longer matters
+    if (!holding) this.#endGap("options", now, events, "nothing_held");   // an option outage no longer matters
     // Halt only after data has been out longer than the setting. With positions open, bid-driven exits keep managing them
     // through an equity outage (a halt would end in a -100% settlement), so the run halts only if option prices are out too.
     const outFor = (source: "quotes" | "options") => this.#gaps[source] === undefined ? 0 : now - this.#gaps[source]!;
@@ -177,46 +177,55 @@ export class OrbPaperRuntime implements PaperRuntime {
   /** Opening ranges from minute bars, retried each tick until rangeDeadlineMs after the first candle: its last bar can
    *  publish late, and stocks keep being observed meanwhile. */
   async #loadRanges(now: number, events: PaperEvent[]): Promise<void> {
-    const { open } = this.#session, c = this.#config, symbols = this.#engine.snapshot().symbols;
+    const { open } = this.#session, c = this.#config, symbols = this.#engine.snapshot().symbols, rangeEnd = this.#engine.rangeEndMs;
     const forming = c.symbols.filter(s => symbols[s]!.status === "forming");
     if (!this.#saved.loaded) {
       this.#saved.loaded = true;
       // A run first ticking after the opening window has an unobserved path, so its ranges cannot be used today.
-      if (now > open + 120000 + c.maxObservationGapMs) {
+      if (now > rangeEnd + c.maxObservationGapMs) {
         for (const symbol of forming) { this.#engine.failRange(symbol, "late_first_quote"); events.push({ type: "setup_disqualified", data: { symbol, reason: "late_first_quote" } }); }
         return;
       }
     }
-    if (!forming.length) { delete this.#gaps.bars; return; }
-    if (now > open + 120000 + c.rangeDeadlineMs) {
+    if (!forming.length) { this.#endGap("bars", now, events, "no_range_pending"); return; }
+    if (now > rangeEnd + c.rangeDeadlineMs) {
       for (const symbol of forming) { this.#engine.failRange(symbol, "range_unavailable"); events.push({ type: "setup_disqualified", data: { symbol, reason: "range_unavailable" } }); }
       return;
     }
     const bars = await this.#read("bars", now, events,
-      () => this.#market.bars(forming, open - c.includePremarketLeadMinutes * 60000, open + 120000, c.includePremarketLeadMinutes > 0));
+      () => this.#market.bars(forming, open - c.includePremarketLeadMinutes * 60000, rangeEnd, c.includePremarketLeadMinutes > 0));
     if (bars === null) return;
     for (const symbol of forming) {
       let range: OpeningRange;
-      try { range = parseOpeningRange(bars, symbol, open, 2, c.includePremarketLeadMinutes); } catch { continue; }   // not published yet: retry
+      try { range = parseOpeningRange(bars, symbol, open, c.openingRangeMinutes, c.includePremarketLeadMinutes); } catch { continue; }   // not published yet: retry
       const lowSeen = symbols[symbol]!.lowAfterRangeEnd;
       this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range } });
       const after = this.#engine.snapshot().symbols[symbol]!;
       if (after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol, reason: after.endReason, lowSeen } });
     }
   }
-  /** One provider read. A failure never ends the step: it is journaled once per outage (data_gap), recovery too, and yields null. */
+  /** One provider read. A failure never ends the step: it is journaled once per outage (data_gap), recovery too, and yields null.
+   *  A code defect (TypeError/ReferenceError) is not an outage: it halts the step with its message instead of hiding for hours.
+   *  Provider and network failures never arrive as TypeError: RobinhoodConnection.read rethrows every failure, fetch's
+   *  "TypeError: fetch failed" included, as a plain Error. */
   async #read<T>(source: "quotes" | "bars" | "options", now: number, events: PaperEvent[], read: () => Promise<T>): Promise<T | null> {
     try {
       const value = await read(), since = this.#gaps[source];
       if (since !== undefined) { delete this.#gaps[source]; events.push({ type: "data_restored", data: { source, outageMs: now - since } }); }
       return value;
     } catch (error) {
+      if (error instanceof TypeError || error instanceof ReferenceError) throw error;
       if (this.#gaps[source] === undefined) {
         this.#gaps[source] = now;
         events.push({ type: "data_gap", data: { source, detail: String((error as Error)?.message ?? error).slice(0, 200) } });
       }
       return null;
     }
+  }
+  /** An outage that stopped mattering (no range pending, nothing held) closes in the journal instead of staying open. */
+  #endGap(source: "bars" | "options", now: number, events: PaperEvent[], reason: string): void {
+    const since = this.#gaps[source]; if (since === undefined) return;
+    delete this.#gaps[source]; events.push({ type: "data_gap_ended", data: { source, outageMs: now - since, reason } });
   }
   async control(command: PaperControl): Promise<PaperEvent[]> {
     if (this.#clock() < this.#session.open || this.#clock() >= this.#session.close || !["trim", "close"].includes(command.action)) throw new Error("Regular session required");

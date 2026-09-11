@@ -59,7 +59,10 @@ A proposal binds run, symbol, action, exact rounded quantity, expected remaining
 quantity and a two-minute expiration. Browser approval requires a separate cookie,
 form token, exact loopback origin/host, and single use. Execution rechecks position
 state and fresh data inside the strategy queue. It cannot affect another run or
-actual account holdings. This is not a real-trade authorization system.
+actual account holdings. This is not a real-trade authorization system: it stops
+browser attacks, but any local process that can reach loopback and holds the URL
+(including the MCP client's own agent) can complete the page. Real-money approval needs an
+out-of-band channel.
 
 ## Outside this release
 

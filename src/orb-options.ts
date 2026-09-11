@@ -8,17 +8,16 @@ export interface OrbOptionsConfig {
   maximumPositions: number; trimGainFraction: number; maximumTrimSteps: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number;
-  includePremarketLeadMinutes: 0 | 2; balanceBarMinutes: 2; balanceMinimumBars: number;
-  balanceMaximumBars: number; balanceMaximumWidthFraction: number;
-  balanceBreakoutCloseLocation: number;
+  includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number;
 }
+/** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
+export const ENTRY_WINDOW_MINUTES = { default: 90, min: 5, max: 390 } as const;
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "minimumContracts", "preferredContracts", "maximumPositions", "trimGainFraction", "maximumTrimSteps",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs",
-    "includePremarketLeadMinutes", "balanceBarMinutes", "balanceMinimumBars", "balanceMaximumBars",
-    "balanceMaximumWidthFraction", "balanceBreakoutCloseLocation"];
+    "includePremarketLeadMinutes", "entryWindowMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
     c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) || c.openingRangeMinutes !== 2 ||
@@ -27,17 +26,14 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     !Number.isSafeInteger(c.feeReserveCentsPerContract) || c.feeReserveCentsPerContract < 1 || c.feeReserveCentsPerContract > 1000 ||
     !(c.maxOptionSpreadFraction > 0 && c.maxOptionSpreadFraction <= .2) || !Number.isSafeInteger(c.maxQuoteAgeMs) || c.maxQuoteAgeMs < 1000 ||
     !Number.isSafeInteger(c.maxObservationGapMs) || c.maxObservationGapMs < 1000 || !Number.isSafeInteger(c.pollMs) || c.pollMs < 250 || c.pollMs > 30000 ||
-    ![0, 2].includes(c.includePremarketLeadMinutes) || c.balanceBarMinutes !== 2 || !Number.isSafeInteger(c.balanceMinimumBars) ||
-    c.balanceMinimumBars < 3 || c.balanceMinimumBars > 15 || !Number.isSafeInteger(c.balanceMaximumBars) ||
-    c.balanceMaximumBars < c.balanceMinimumBars + 1 || c.balanceMaximumBars > 30 ||
-    !(c.balanceMaximumWidthFraction >= .002 && c.balanceMaximumWidthFraction <= .05) ||
-    !(c.balanceBreakoutCloseLocation >= .5 && c.balanceBreakoutCloseLocation <= 1))
+    ![0, 2].includes(c.includePremarketLeadMinutes) ||
+    !Number.isSafeInteger(c.entryWindowMinutes) || c.entryWindowMinutes < ENTRY_WINDOW_MINUTES.min || c.entryWindowMinutes > ENTRY_WINDOW_MINUTES.max)
     throw new Error("Invalid opening-range options configuration");
   return structuredClone(c);
 }
 
 export interface OpeningRange { high: number; low: number; startMs: number; endMs: number }
-export type OrbSetup = "opening_range" | "opening_balance";
+export type OrbSetup = "opening_range";
 export interface SetupRange extends OpeningRange { setup: OrbSetup }
 export function parseOpeningRange(raw: unknown, symbol: string, startMs: number, minutes = 2, leadMinutes = 0): OpeningRange {
   const results = (raw as any)?.data?.results;
@@ -79,97 +75,6 @@ export function replayOpeningRange(raw: unknown, symbol: string, startMs: number
     }
   }
   return { symbol, range, outcome: "no_event", eventAt: null, eventPrice: null };
-}
-
-export interface TwoMinuteBar { beginsAt: number; endsAt: number; open: number; high: number; low: number; close: number; volume: number }
-export function twoMinuteBars(raw: unknown, symbol: string, startMs: number): TwoMinuteBar[] {
-  const results = (raw as any)?.data?.results;
-  const matches = Array.isArray(results) ? results.filter((r: any) => r?.symbol === symbol) : [];
-  if (matches.length !== 1 || matches[0]?.interval !== "minute" || !["regular", "extended"].includes(matches[0]?.bounds) || !Array.isArray(matches[0]?.bars))
-    throw new Error("Opening-balance bars unavailable");
-  const source = new Map<number, any>();
-  for (const bar of matches[0].bars) {
-    const at = timestamp(bar?.begins_at);
-    if (at < startMs || (at - startMs) % 60000 !== 0) continue;
-    if (source.has(at) || bar.interpolated === true || (bar.session !== undefined && bar.session !== "reg")) throw new Error("Invalid opening-balance bars");
-    source.set(at, bar);
-  }
-  const answer: TwoMinuteBar[] = [];
-  for (let at = startMs; ; at += 120000) {
-    const a = source.get(at), b = source.get(at + 60000);
-    if (!a || !b) break;
-    const open = Number(a.open_price), high = Math.max(Number(a.high_price), Number(b.high_price)),
-      low = Math.min(Number(a.low_price), Number(b.low_price)), close = Number(b.close_price), volume = Number(a.volume) + Number(b.volume);
-    if (![open, high, low, close, volume].every(Number.isFinite) || open <= 0 || low <= 0 || high < low || close <= 0 || volume < 0)
-      throw new Error("Invalid opening-balance prices");
-    answer.push({ beginsAt: at, endsAt: at + 120000, open, high, low, close, volume });
-  }
-  return answer;
-}
-
-export interface BalanceReplayResult {
-  symbol: string; setup: "opening_balance"; range: OpeningRange | null;
-  outcome: "forming" | "qualified" | "disqualified" | "no_event";
-  eventAt: string | null; eventPrice: number | null; barsInBalance: number;
-}
-export function replayOpeningBalance(raw: unknown, symbol: string, startMs: number, c: OrbOptionsConfig): BalanceReplayResult {
-  const bars = twoMinuteBars(raw, symbol, startMs);
-  if (!bars.length) return { symbol, setup: "opening_balance", range: null, outcome: "forming", eventAt: null, eventPrice: null, barsInBalance: 0 };
-  const first = bars[0]!;
-  let range: OpeningRange = { high: Math.max(first.open, first.close), low: Math.min(first.open, first.close), startMs, endMs: first.endsAt };
-  const width = (high: number, low: number) => (high - low) / ((high + low) / 2);
-  if (width(range.high, range.low) > c.balanceMaximumWidthFraction)
-    return { symbol, setup: "opening_balance", range, outcome: "disqualified", eventAt: new Date(first.endsAt).toISOString(), eventPrice: null, barsInBalance: 1 };
-  for (let i = 1; i < bars.length && i < c.balanceMaximumBars; i++) {
-    const bar = bars[i]!, closeLocation = (bar.close - bar.low) / Math.max(Number.EPSILON, bar.high - bar.low);
-    if (i >= c.balanceMinimumBars && bar.close > range.high && bar.low >= range.low && closeLocation >= c.balanceBreakoutCloseLocation) {
-      range = { ...range, endMs: bar.beginsAt };
-      return { symbol, setup: "opening_balance", range, outcome: "qualified", eventAt: new Date(bar.endsAt).toISOString(), eventPrice: bar.close, barsInBalance: i };
-    }
-    const high = Math.max(range.high, bar.high), low = Math.min(range.low, bar.low);
-    range = { ...range, high, low, endMs: bar.endsAt };
-    if (width(high, low) > c.balanceMaximumWidthFraction)
-      return { symbol, setup: "opening_balance", range, outcome: "disqualified", eventAt: new Date(bar.endsAt).toISOString(), eventPrice: null, barsInBalance: i + 1 };
-  }
-  if (bars.length >= c.balanceMaximumBars)
-    return { symbol, setup: "opening_balance", range, outcome: "no_event", eventAt: new Date(range.endMs).toISOString(), eventPrice: null, barsInBalance: c.balanceMaximumBars };
-  return { symbol, setup: "opening_balance", range, outcome: "forming", eventAt: null, eventPrice: null, barsInBalance: bars.length };
-}
-
-export interface TrimReplay { step: number; threshold: number; firstHitAt: string | null }
-export interface DualReplayResult {
-  symbol: string; selectedSetup: OrbSetup | null; entryAt: string | null; entryPrice: number | null;
-  openingRange: ReplayResult; openingBalance: BalanceReplayResult; protectiveStop: number | null;
-  stoppedAt: string | null; ambiguousExitAt: string | null; trims: TrimReplay[];
-}
-export function replayOrbSetups(raw: unknown, symbol: string, startMs: number, c: OrbOptionsConfig): DualReplayResult {
-  const openingRange = replayOpeningRange(raw, symbol, startMs, c.includePremarketLeadMinutes);
-  const openingBalance = replayOpeningBalance(raw, symbol, startMs, c);
-  const candidates = [
-    ...(openingRange.outcome === "qualified" && openingRange.eventAt && openingRange.eventPrice ? [{ setup: "opening_range" as const, at: openingRange.eventAt, price: openingRange.eventPrice }] : []),
-    ...(openingBalance.outcome === "qualified" && openingBalance.eventAt && openingBalance.eventPrice ? [{ setup: "opening_balance" as const, at: openingBalance.eventAt, price: openingBalance.eventPrice }] : []),
-  ].sort((a, b) => timestamp(a.at) - timestamp(b.at) || a.setup.localeCompare(b.setup));
-  const selected = candidates[0] ?? null;
-  const selectedRange = selected?.setup === "opening_range" ? openingRange.range : selected?.setup === "opening_balance" ? openingBalance.range : null;
-  const protectiveStop = selectedRange ? selectedRange.low * (1 - c.stopBufferFraction) : null;
-  const trims: TrimReplay[] = Array.from({ length: c.maximumTrimSteps }, (_, i) => ({ step: i + 1,
-    threshold: selected ? selected.price * (1 + c.trimGainFraction * (i + 1)) : 0, firstHitAt: null }));
-  let stoppedAt: string | null = null, ambiguousExitAt: string | null = null;
-  if (selected) {
-    const result = ((raw as any).data.results as any[]).find(r => r?.symbol === symbol);
-    for (const bar of result?.bars ?? []) {
-      const at = timestamp(bar?.begins_at), high = Number(bar?.high_price), low = Number(bar?.low_price);
-      const beforeLifecycle = selected.setup === "opening_range" ? at <= timestamp(selected.at) : at < timestamp(selected.at);
-      if (beforeLifecycle || !Number.isFinite(high) || !Number.isFinite(low)) continue;
-      const stopHit = protectiveStop !== null && low < protectiveStop;
-      const newlyHit = trims.filter(t => !t.firstHitAt && high >= t.threshold);
-      if (stopHit && newlyHit.length) { ambiguousExitAt = bar.begins_at; break; }
-      if (stopHit) { stoppedAt = bar.begins_at; break; }
-      for (const trim of newlyHit) trim.firstHitAt = bar.begins_at;
-    }
-  }
-  return { symbol, selectedSetup: selected?.setup ?? null, entryAt: selected?.at ?? null, entryPrice: selected?.price ?? null,
-    openingRange, openingBalance, protectiveStop, stoppedAt, ambiguousExitAt, trims };
 }
 
 export interface OrbCallContract {
@@ -227,12 +132,13 @@ export function selectOrbCall(contracts: readonly OrbCallContract[], quotes: rea
 }
 
 type Status = "forming" | "watching" | "disqualified" | "entry_pending" | "open" | "closed" | "skipped";
-type RouteStatus = "forming" | "watching" | "qualified" | "disqualified" | "no_event";
+/** Why a symbol stopped watching without entering; surfaced in views and the journal. */
+export type EndReason = "opening_low_failed" | "range_unavailable" | "late_first_quote" | "observation_gap" | "entry_window_closed";
+const END_REASONS: readonly EndReason[] = ["opening_low_failed", "range_unavailable", "late_first_quote", "observation_gap", "entry_window_closed"];
 interface Position { contractId: string; originalQuantity: number; remainingQuantity: number; entryStockPrice: number; trimStepsFilled: number }
 interface SymbolState {
-  status: Status; range: SetupRange | null; strictRange: OpeningRange | null;
-  strictStatus: RouteStatus; balanceStatus: RouteStatus; lastTradeMs: number | null;
-  lastObservationMs: number | null; position: Position | null; pendingSale: number;
+  status: Status; range: SetupRange | null; openingRange: OpeningRange | null; endReason: EndReason | null;
+  lastTradeMs: number | null; lastObservationMs: number | null; position: Position | null; pendingSale: number;
 }
 export type OrbIntent =
   | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; range: SetupRange }
@@ -242,43 +148,50 @@ export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
   constructor(config: OrbOptionsConfig) {
     this.config = parseOrbOptionsConfig(config);
-    this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, strictRange: null,
-      strictStatus: "forming" as const, balanceStatus: "forming" as const, lastTradeMs: null, lastObservationMs: null, position: null, pendingSale: 0 }]));
+    this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null,
+      lastTradeMs: null, lastObservationMs: null, position: null, pendingSale: 0 }]));
   }
   setRange(symbol: string, range: OpeningRange): void {
     const s = this.#need(symbol);
     const duration = (this.config.openingRangeMinutes + this.config.includePremarketLeadMinutes) * 60000;
     if (s.status !== "forming" || range.endMs - range.startMs !== duration || !(range.high >= range.low && range.low > 0)) throw new Error("Invalid/finalized opening range");
-    s.strictRange = structuredClone(range); s.range = { ...structuredClone(range), setup: "opening_range" };
-    s.strictStatus = "watching"; s.balanceStatus = "watching"; s.status = "watching";
+    s.openingRange = structuredClone(range); s.range = { ...structuredClone(range), setup: "opening_range" }; s.status = "watching";
   }
-  failRange(symbol: string): void {
+  /** No usable opening range: the symbol has no route to an entry today. */
+  failRange(symbol: string, reason: "range_unavailable" | "late_first_quote" = "range_unavailable"): void {
     const s = this.#need(symbol); if (s.status !== "forming") throw new Error("Opening range already finalized");
-    s.status = "watching"; s.strictStatus = "disqualified"; s.balanceStatus = "watching";
+    s.status = "disqualified"; s.endReason = reason;
   }
-  disableStrict(symbol: string): void {
+  /** End watching for the day (never affects an entry or position already in progress). */
+  disqualify(symbol: string, reason: EndReason): void {
     const s = this.#need(symbol);
-    if (s.status === "watching") s.strictStatus = "disqualified";
+    if (s.status === "watching") { s.status = "disqualified"; s.endReason = reason; }
+  }
+  /** New entries stop entryWindowMinutes after the open; open positions keep being managed. */
+  entryDeadline(): number | null {
+    const r = [...this.#state.values()].find(s => s.openingRange)?.openingRange;
+    return r ? r.endMs - this.config.openingRangeMinutes * 60000 + this.config.entryWindowMinutes * 60000 : null;
+  }
+  closeEntryWindow(now: number): string[] {
+    const deadline = this.entryDeadline(); if (deadline === null || now < deadline) return [];
+    const closed = [...this.#state].filter(([, s]) => s.status === "watching").map(([symbol]) => symbol);
+    for (const symbol of closed) this.disqualify(symbol, "entry_window_closed");
+    return closed;
   }
   observe(symbol: string, stockPrice: number, at: number, observedAt = at): OrbIntent[] {
     const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
-    if (s.lastObservationMs !== null && observedAt - s.lastObservationMs > this.config.maxObservationGapMs && s.status === "watching") {
-      s.status = "disqualified"; s.strictStatus = "disqualified"; s.balanceStatus = "disqualified";
-    }
+    if (s.lastObservationMs !== null && observedAt - s.lastObservationMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
     if (s.lastObservationMs !== null && observedAt < s.lastObservationMs) return [];
     s.lastObservationMs = observedAt;
-    if (s.lastTradeMs !== null && at - s.lastTradeMs > this.config.maxObservationGapMs && s.status === "watching") {
-      s.status = "disqualified"; s.strictStatus = "disqualified"; s.balanceStatus = "disqualified";
-    }
+    if (s.lastTradeMs !== null && at - s.lastTradeMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
     if (s.lastTradeMs !== null && at <= s.lastTradeMs) return [];
     s.lastTradeMs = at;
-    if (s.status === "watching" && s.strictStatus === "watching" && s.strictRange && at >= s.strictRange.endMs) {
-      if (stockPrice < s.strictRange.low) s.strictStatus = "disqualified";
-      else if (stockPrice > s.strictRange.high) {
-        s.strictStatus = "qualified";
-        return this.#reserve(symbol, stockPrice, at, { ...structuredClone(s.strictRange), setup: "opening_range" });
-      }
-      if (s.strictStatus === "disqualified" && ["disqualified", "no_event"].includes(s.balanceStatus)) s.status = "disqualified";
+    if (s.status === "watching" && s.openingRange && at >= s.openingRange.endMs) {
+      // The founder's rule: a trade beneath the opening-range low ends the day for this symbol, even if it later rallies.
+      // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
+      if (at >= this.entryDeadline()!) this.disqualify(symbol, "entry_window_closed");
+      else if (stockPrice < s.openingRange.low) this.disqualify(symbol, "opening_low_failed");
+      else if (stockPrice > s.openingRange.high) return this.#reserve(symbol, stockPrice, at, { ...structuredClone(s.openingRange), setup: "opening_range" });
     }
     if (s.status !== "open" || !s.position || !s.range || s.pendingSale) return [];
     const p = s.position, stop = s.range.low * (1 - this.config.stopBufferFraction);
@@ -293,18 +206,6 @@ export class OrbOptionsEngine {
       s.pendingSale = quantity;
       return [{ kind: "sell_to_close", reason: "profit_trim", symbol, contractId: p.contractId, quantity, stockPrice, at }];
     }
-    return [];
-  }
-  offerOpeningBalance(result: BalanceReplayResult): OrbIntent[] {
-    const s = this.#need(result.symbol);
-    if (result.outcome === "forming") return [];
-    if (s.balanceStatus === "qualified" || ["disqualified", "no_event"].includes(s.balanceStatus)) return [];
-    s.balanceStatus = result.outcome;
-    if (result.outcome === "qualified") {
-      if (!result.range || !result.eventAt || !(result.eventPrice && result.eventPrice > result.range.high)) throw new Error("Invalid opening-balance qualification");
-      return this.#reserve(result.symbol, result.eventPrice, timestamp(result.eventAt), { ...structuredClone(result.range), setup: "opening_balance" });
-    }
-    if (s.status === "watching" && s.strictStatus === "disqualified") s.status = "disqualified";
     return [];
   }
   confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number): void {
@@ -342,6 +243,8 @@ export class OrbOptionsEngine {
       const s = raw.symbols[symbol];
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0)
         throw new Error("Checkpoint contains incomplete transaction");
+      if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null))
+        throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
         if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||

@@ -106,17 +106,25 @@ test("automatic scheduling advances a configured run without a connected chat cl
     assert.equal(auto.paper.status(setup.runId).view.positions[0]?.quantity, 4);
   } finally { await auto.close(); }
 });
-test("paper runtime accepts the completed drive-then-balance route independently", async t => {
+test("paper runtime journals the rule that ends watching and never enters after the opening low fails", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]); // fixture range is 100–105
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0, entryWindowMinutes: 30 }), f.market, f.options.clock);
+  f.setTime(open + 120000); f.prices.DEMOA = 99.5; f.prices.DEMOB = 104; await runtime.step();
+  const journal: any[] = [];
+  for (let s = 1; s <= 5; s++) { f.advance(); f.prices.DEMOA = 106 + s; journal.push(...await runtime.step()); }
+  assert.ok(!journal.some(e => e.type === "paper_entry"), "a later rally does not erase the opening failure");
+  const view = runtime.view().detail as any;
+  assert.equal(view.symbols.DEMOA.endReason, "opening_low_failed");
+  f.setTime(open + 30 * 60000); const closing = await runtime.step();
+  assert.deepEqual(closing.filter(e => e.type === "setup_disqualified").map(e => e.data), [{ symbol: "DEMOB", reason: "entry_window_closed" }]);
+});
+test("the opening-low failure is written to the journal with its reason", async t => {
   const f = fixture(t, ["DEMOA"]);
-  const pairs = [[100,110,99,101],[101,101.2,99.9,100.8],[100.8,101.1,99.8,100.5],[100.5,101.3,99.7,100.9],[100.9,101.2,99.6,100.7],[100.7,101.8,100.5,101.7]];
-  f.market.bars = async (_symbols, _start, end) => ({ data: { results: [{ symbol: "DEMOA", interval: "minute", bounds: "regular",
-    bars: pairs.flatMap(([o,h,l,c], i) => [0,1].map(j => ({ begins_at: new Date(open + (i * 2 + j) * 60000).toISOString(),
-      open_price: String(o), high_price: String(h), low_price: String(l), close_price: String(c), volume: "1000", session: "reg" }))).filter(b => Date.parse(b.begins_at) < end) }] } });
   const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
-  f.setTime(open + 120000); f.prices.DEMOA = 100.5; await runtime.step();
-  f.setTime(open + 720000); f.prices.DEMOA = 101.7;
+  f.setTime(open + 120000); f.prices.DEMOA = 104; await runtime.step();
+  f.advance(); f.prices.DEMOA = 99.5;
   const events = await runtime.step();
-  assert.ok(events.some(e => e.type === "paper_entry" && (e.data as any).setup === "opening_balance"));
+  assert.deepEqual(events.filter(e => e.type === "setup_disqualified").map(e => e.data), [{ symbol: "DEMOA", reason: "opening_low_failed" }]);
 });
 test("stop persists positions; explicit restart recovery manages only prior positions", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);

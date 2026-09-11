@@ -1,4 +1,4 @@
-import { EntrySkip, OrbOptionsEngine, parseOrbOptionsConfig, parseOpeningRange, replayOpeningBalance, selectOrbCall,
+import { EntrySkip, OrbOptionsEngine, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract } from "./orb-options.ts";
 import { CalendarCoverageError, isEarlyClose, isTradingDay } from "./daily-history.ts";
 import type { PaperMarket } from "./paper-market.ts";
@@ -12,7 +12,7 @@ export function sessionTimes(date: string) {
   return { open, close: open + (isEarlyClose(date) ? 3.5 : 6.5) * 3600000 };
 }
 type Holding = { contract: OrbCallContract; entryPrice: number; mark: CallQuote | null };
-export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<string, Holding>; loaded: boolean; nextBalance: number;
+export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<string, Holding>; loaded: boolean;
   nextMark: number; committedCents: number; realizedPnlCents: number; complete: boolean; lastQuoteAt: string | null; resumed: boolean;
   protectiveExits: Record<string, "protective_stop" | "session_close"> }
 export class OrbPaperRuntime implements PaperRuntime {
@@ -21,7 +21,7 @@ export class OrbPaperRuntime implements PaperRuntime {
   constructor(raw: unknown, market: PaperMarket, clock = Date.now, checkpoint?: unknown) {
     this.#config = parseOrbOptionsConfig(raw); this.#market = market; this.#clock = clock;
     this.#engine = new OrbOptionsEngine(this.#config); this.#session = sessionTimes(this.#config.date);
-    this.#saved = { holdings: {}, loaded: false, nextBalance: this.#session.open + 720000, nextMark: 0,
+    this.#saved = { holdings: {}, loaded: false, nextMark: 0,
       committedCents: 0, realizedPnlCents: 0, complete: false, lastQuoteAt: null, resumed: false, protectiveExits: {} };
     if (checkpoint) {
       const s = checkpoint as OrbPaperCheckpoint;
@@ -91,24 +91,19 @@ export class OrbPaperRuntime implements PaperRuntime {
     if (!this.#saved.loaded) {
       const bars = await this.#market.bars(c.symbols, open - c.includePremarketLeadMinutes * 60000, open + 120000, c.includePremarketLeadMinutes > 0);
       for (const symbol of c.symbols) {
+        const late = this.#saved.resumed || this.#clock() > open + 120000 + c.maxObservationGapMs;
         try {
-          if (this.#saved.resumed || this.#clock() > open + 120000 + c.maxObservationGapMs) throw new Error("Opening monitoring gap");
+          if (late) throw new Error("Opening monitoring gap");
           const range = parseOpeningRange(bars, symbol, open, 2, c.includePremarketLeadMinutes);
           this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range } });
-        } catch { this.#engine.failRange(symbol); events.push({ type: "strict_setup_disabled", data: { symbol, reason: "incomplete_range_or_observation_gap" } }); }
+        } catch {
+          const reason = late ? "late_first_quote" : "range_unavailable";
+          this.#engine.failRange(symbol, reason); events.push({ type: "setup_disqualified", data: { symbol, reason } });
+        }
       }
       this.#saved.loaded = true;
     }
-    if (!this.#saved.resumed && now >= this.#saved.nextBalance && now <= open + c.balanceMaximumBars * 120000) {
-      const end = open + Math.floor((now - open) / 120000) * 120000;
-      const history = await this.#market.bars(c.symbols, open, end, false);
-      const candidates = c.symbols.map(symbol => replayOpeningBalance(history, symbol, open, c)).sort((a, b) => (a.eventAt ?? "").localeCompare(b.eventAt ?? "") || a.symbol.localeCompare(b.symbol));
-      for (const result of candidates) {
-        if (result.outcome === "qualified" && (!result.eventAt || this.#clock() - Date.parse(result.eventAt) > c.maxQuoteAgeMs)) continue;
-        for (const intent of this.#engine.offerOpeningBalance(result)) events.push(...await this.#handle(intent));
-      }
-      this.#saved.nextBalance = end + 120000;
-    }
+    for (const symbol of this.#engine.closeEntryWindow(now)) events.push({ type: "setup_disqualified", data: { symbol, reason: "entry_window_closed" } });
     const quotes = await this.#market.quotes(c.symbols);
     if (quotes.length !== c.symbols.length || new Set(quotes.map(q => q.symbol)).size !== quotes.length || quotes.some(q => !c.symbols.includes(q.symbol)))
       throw new Error("Incomplete or mismatched quote batch");
@@ -120,7 +115,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       if (!state) throw new Error("Foreign quote");
       if (state.status === "watching" && state.lastObservationMs === null && this.#clock() > open + 120000 + c.maxObservationGapMs) {
         // Never infer an unobserved opening-range path from a late first quote.
-        this.#engine.disableStrict(q.symbol);
+        this.#engine.disqualify(q.symbol, "late_first_quote");
       }
       if (this.#saved.resumed && state.status !== "open") continue;
       // Flatten simulated positions before the close, without inventing a fill if quotes fail.
@@ -128,6 +123,9 @@ export class OrbPaperRuntime implements PaperRuntime {
         for (const intent of this.#engine.requestPositionSale(q.symbol, this.#saved.protectiveExits[q.symbol] ?? "session_close", state.position.remainingQuantity, state.position.remainingQuantity, q.price!, Date.parse(q.tradeAt!)))
           events.push(...await this.#handle(intent));
       } else for (const intent of this.#engine.observe(q.symbol, q.price!, Date.parse(q.tradeAt!), this.#clock())) events.push(...await this.#handle(intent));
+      // Journal the rule that ended watching (opening low, gap, late first quote) so every skip is explainable.
+      const after = this.#engine.snapshot().symbols[q.symbol]!;
+      if (state.status === "watching" && after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason } });
     }
     if (now >= this.#saved.nextMark) {
       for (const p of this.view().positions) {

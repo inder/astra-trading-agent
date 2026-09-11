@@ -1,5 +1,5 @@
-import { parseOrbOptionsConfig, type OrbOptionsConfig } from "./orb-options.ts";
-export interface StrategySetupInput { date: string; symbols: string[]; includePremarketLeadMinutes: 0 | 2 }
+import { ENTRY_WINDOW_MINUTES, parseOrbOptionsConfig, type OrbOptionsConfig } from "./orb-options.ts";
+export interface StrategySetupInput { date: string; symbols: string[]; includePremarketLeadMinutes: 0 | 2; entryWindowMinutes?: number }
 export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig => parseOrbOptionsConfig({
   date: input.date,
   symbols: input.symbols,
@@ -17,9 +17,5 @@ export const openingRangeConfig = (input: StrategySetupInput): OrbOptionsConfig 
   maxObservationGapMs: 5000,
   pollMs: 1000,
   includePremarketLeadMinutes: input.includePremarketLeadMinutes,
-  balanceBarMinutes: 2,
-  balanceMinimumBars: 5,
-  balanceMaximumBars: 30,
-  balanceMaximumWidthFraction: .02,
-  balanceBreakoutCloseLocation: .75,
+  entryWindowMinutes: input.entryWindowMinutes ?? ENTRY_WINDOW_MINUTES.default,
 });

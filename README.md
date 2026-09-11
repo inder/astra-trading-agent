@@ -177,8 +177,13 @@ time. Ask for positions, daily paper P&L or event history. Ask for a 25% trim or
 full close and review the exact whole-contract quantity in your local browser.
 Stopping monitoring retains positions; request closes first if that is intended.
 
-The first strategy supports strict opening-range and separate drive-then-balance
-setups, with optional final-two-minute premarket range inclusion. It allows two
+The first strategy trades the opening-range breakout: the first two-minute
+candle's high and low (optionally including the last two premarket minutes). A
+trade above the high buys; a trade below the low first ends the day for that stock,
+even if it later rallies. New entries stop after a configurable window
+(`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
+positions are managed all day. Prices are polled about once a second, so a dip
+below the low that reverses between polls can be missed. It allows two
 to four calls per entry, at most two tickers/session, $2,000 including a $1 per
 contract fee reserve per ticker, $4,000 total. Proceeds never replenish the budget.
 The expiry is the first week-ending expiration with at least three trading

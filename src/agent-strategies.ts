@@ -17,8 +17,8 @@ export interface AgentStrategy {
 // Transport-independent plug-in contract: no chat, filesystem, credentials or broker.
 
 export const openingRangeStrategy: AgentStrategy = {
-  id: "opening-range-options", version: "0.3.0", name: "Opening-range call options",
-  description: "Deterministic strict opening-range and drive-then-balance call-option strategy.",
+  id: "opening-range-options", version: "0.4.0", name: "Opening-range call options",
+  description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a trade below its low first ends the day for that stock.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
   paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
   preview: input => openingRangeConfig(input),
@@ -74,7 +74,8 @@ export const openingRangeStrategy: AgentStrategy = {
     const summary = { mode: "synthetic_sample", dataset: "synthetic-orb-v1", ordersSubmitted: 0,
       committedCents, pnl: null, pnlExplanation: "No option exit-price model: P&L is intentionally unavailable.",
       snapshot: engine.snapshot(), limitations: ["Invented prices and assumed fills; not real market data.",
-        "Exercises strict breakout, sizing, position cap, trims and stop; not balance-detector or broker validation."] };
+        "Exercises the opening-range breakout, sizing, position cap, trims and stop; not broker validation.",
+        "The opening-low rule is checked at polled-trade resolution: a dip below the low that reverses between polls can be missed."] };
     emit("sample_completed", summary);
     return { events, summary };
   },

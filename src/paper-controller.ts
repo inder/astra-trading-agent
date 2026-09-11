@@ -6,7 +6,7 @@ import type { PaperMarket } from "./paper-market.ts";
 import type { PaperRuntime, PaperControl, PaperEvent } from "./paper-runtime.ts";
 import { sessionTimes } from "./orb-paper-runtime.ts";
 
-export interface PaperSetup { runId: string; strategyId: string; date: string; symbols: string[]; includePremarket: boolean }
+export interface PaperSetup { runId: string; strategyId: string; date: string; symbols: string[]; includePremarket: boolean; entryWindowMinutes?: number }
 export interface PaperRecord {
   runId: string; strategyId: string; version: string; date: string; config: unknown; configHash: string; revision: number;
   status: "configured" | "running" | "stopped" | "completed" | "error"; at: string; checkpoint: unknown;
@@ -38,7 +38,7 @@ export class PaperController {
   configure(input: PaperSetup) {
     const s = this.#strategy(input.strategyId);
     if (!validId(input.runId) || typeof input.includePremarket !== "boolean") throw new Error("Invalid paper setup");
-    const config = s.preview({ date: input.date, symbols: input.symbols, includePremarketLeadMinutes: input.includePremarket ? 2 : 0 });
+    const config = s.preview({ date: input.date, symbols: input.symbols, includePremarketLeadMinutes: input.includePremarket ? 2 : 0, entryWindowMinutes: input.entryWindowMinutes });
     const configHash = createHash("sha256").update(JSON.stringify({ strategy: s.id, version: s.version, config })).digest("hex");
     try { const old = this.get(input.runId); if (old.configHash !== configHash) throw new Error("Run ID already has different settings"); return old; }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }

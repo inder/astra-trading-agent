@@ -272,7 +272,8 @@ export class OrbOptionsEngine {
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
         if (!p || !s.range || !(s.range.high >= s.range.low && s.range.low > 0) ||
-          !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isSafeInteger(p.originalQuantity) || p.originalQuantity < 1 ||
+          !/^[a-f0-9-]{36}$/.test(p.contractId) || !Number.isSafeInteger(p.originalQuantity) || p.originalQuantity < this.config.minimumContracts ||
+          (this.config.maximumContractsPerTrade !== null && p.originalQuantity > this.config.maximumContractsPerTrade) ||
           !Number.isInteger(p.remainingQuantity) || p.remainingQuantity < 0 || p.remainingQuantity > p.originalQuantity ||
           (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0)) throw new Error("Invalid saved position");
       } else if (s.position) throw new Error("Unexpected saved position");

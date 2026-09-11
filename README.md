@@ -194,7 +194,7 @@ the contracts displayed at the ask, so how far from the money it lands depends o
 the stock's price. Each of these is a setting you can change when configuring a
 run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`, `minimumContracts`,
 `maximumContractsPerTrade`, `maximumPositions`, `maxOptionSpreadPercent`,
-`feeReservePerContractCents`, `entryWindowMinutes`); a run keeps the settings it
+`feeReserveCentsPerContract`, `entryWindowMinutes`); a run keeps the settings it
 started with.
 The expiry is the first week-ending expiration with at least three trading
 sessions counting the trade day. In a normal week that means Monday–Wednesday

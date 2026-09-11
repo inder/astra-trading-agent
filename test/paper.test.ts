@@ -223,12 +223,16 @@ test("chat settings arrive in human units and are pinned to the run in internal 
   t.after(async () => { await client.close(); await server.close(); });
   const configure = async (args: Record<string, unknown>) => client.callTool({ name: "configure_paper_strategy", arguments: { ...setup, ...args } });
   const ok = await configure({ maxPremiumPerTradeDollars: 1000, maxPremiumPerDayDollars: 2500, minimumContracts: 5, maximumPositions: 3,
-    maxOptionSpreadPercent: 10, feeReservePerContractCents: 50, entryWindowMinutes: 60 });
+    maxOptionSpreadPercent: 2.5, feeReserveCentsPerContract: 50, entryWindowMinutes: 60 });
   assert.ok(!ok.isError, JSON.stringify(ok));
   const pinned = JSON.parse((ok.content as any)[0].text).config;
   assert.deepEqual({ ...pinned, symbols: undefined, date: undefined }, { ...pinned, symbols: undefined, date: undefined,
     budgetCentsPerPosition: 100000, budgetCentsPerDay: 250000, minimumContracts: 5, maximumContractsPerTrade: null, maximumPositions: 3,
-    maxOptionSpreadFraction: .1, feeReserveCentsPerContract: 50, entryWindowMinutes: 60 });
+    maxOptionSpreadFraction: .025, feeReserveCentsPerContract: 50, entryWindowMinutes: 60 });
+  // Omitting every setting pins the founder's defaults: the path where behavior changed (minimum 2 -> 4, no 3/2 fallback).
+  const defaults = JSON.parse(((await configure({ runId: "defaults" })).content as any)[0].text).config;
+  assert.deepEqual([defaults.budgetCentsPerPosition, defaults.budgetCentsPerDay, defaults.minimumContracts, defaults.maximumContractsPerTrade,
+    defaults.maximumPositions, defaults.maxOptionSpreadFraction, defaults.feeReserveCentsPerContract, defaults.entryWindowMinutes], [200000, 400000, 4, null, 2, .2, 100, 90]);
   assert.ok((await configure({ runId: "fractional", maxPremiumPerTradeDollars: 1000.5 })).isError, "dollars must be whole");
   assert.ok((await configure({ runId: "inverted", maxPremiumPerTradeDollars: 3000, maxPremiumPerDayDollars: 2000 })).isError, "day cap below trade cap");
 });

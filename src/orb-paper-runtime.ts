@@ -62,6 +62,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
         const capCents = Math.min(this.#config.budgetCentsPerPosition, this.#config.budgetCentsPerDay - this.#saved.committedCents);
         const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock(), capCents);
+        // capCents already bounds the selection; the day-cap comparison is a defensive restatement of the invariant.
         if (!selected || this.#saved.committedCents + selected.committedCents > this.#config.budgetCentsPerDay) throw new EntrySkip("no_affordable_eligible_call");
         this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!);
         this.#saved.holdings[intent.symbol] = { contract: selected.contract, entryPrice: selected.limitPrice, mark: null };

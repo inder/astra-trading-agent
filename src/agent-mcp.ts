@@ -71,15 +71,14 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       minimumContracts: whole(SETTINGS.minimumContracts).describe(`Fewest contracts per entry; the strike nearest the money that fits this many is chosen, then filled to the cap. Default ${SETTINGS.minimumContracts.default}.`),
       maximumContractsPerTrade: whole(SETTINGS.maximumContractsPerTrade).describe("Optional ceiling on contracts per entry; by default only the displayed ask size limits the fill."),
       maximumPositions: whole(SETTINGS.maximumPositions).describe(`Most stocks entered per day; default ${SETTINGS.maximumPositions.default}.`),
-      maxOptionSpreadPercent: z.number().int().min(SETTINGS.maxOptionSpreadFraction.min * 100).max(SETTINGS.maxOptionSpreadFraction.max * 100).optional()
+      maxOptionSpreadPercent: z.number().min(SETTINGS.maxOptionSpreadFraction.min * 100).max(SETTINGS.maxOptionSpreadFraction.max * 100).optional()
         .describe(`Widest bid-ask spread accepted, as a percent of the midpoint; default ${SETTINGS.maxOptionSpreadFraction.default * 100}.`),
-      feeReservePerContractCents: whole(SETTINGS.feeReserveCentsPerContract).describe(`Cents reserved per contract for fees inside the cap; default ${SETTINGS.feeReserveCentsPerContract.default}.`),
+      feeReserveCentsPerContract: whole(SETTINGS.feeReserveCentsPerContract).describe(`Cents reserved per contract for fees inside the cap; default ${SETTINGS.feeReserveCentsPerContract.default}.`),
     }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
-    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, feeReservePerContractCents, ...a }) => guarded(() => service.paper.configure({ ...a,
+    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, ...a }) => guarded(() => service.paper.configure({ ...a,
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100,
-      feeReserveCentsPerContract: feeReservePerContractCents })));
+      maxOptionSpreadFraction: maxOptionSpreadPercent === undefined ? undefined : maxOptionSpreadPercent / 100 })));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId)));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting. No new entries after a monitoring gap. Requires reauthorization after server restart. Does not place real orders.",

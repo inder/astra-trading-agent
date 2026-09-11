@@ -74,7 +74,7 @@ test("selector takes the strike nearest the money where at least 4 fit, then fil
   assert.deepEqual([selectOrbCall(withNear.contracts, withNear.quotes, "CRWV", "2026-09-11", 104, sel, now)!.contract.strike,
     selectOrbCall(withNear.contracts, withNear.quotes, "CRWV", "2026-09-11", 104, sel, now)!.quantity], [102, 6]);
   const deep = chain("CRWV", [[102, 1.95, 2, 500]], now);
-  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, sel, now)!.quantity, 9);   // floor($2000 / $2.01)
+  assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, sel, now)!.quantity, 9);   // floor($2,000 / $201 per contract: $2.00 x 100 + $1 fee reserve)
   assert.equal(selectOrbCall(deep.contracts, deep.quotes, "CRWV", "2026-09-11", 104, { ...sel, maximumContractsPerTrade: 5 }, now)!.quantity, 5);
   // An in-the-money strike is eligible when it is nearest and fits.
   const itm = chain("CRWV", [[103, 1.45, 1.5, 50], [106, 0.95, 1, 50]], now);

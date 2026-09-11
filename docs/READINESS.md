@@ -43,9 +43,12 @@ No real-account readiness or trading performance is claimed.
   P&L excludes fees; missing marks are unavailable, never zero-valued marks.
 - Polling (default one second) is not streaming. Latency and the freshness/gap
   settings (default five seconds) can conservatively skip entries; unseen crossings
-  remain possible. A slow entry that holds up polling past the gap drops the other
-  stocks still being watched, honestly; faster entries arrive in the next slice.
-- A single failed read is a journaled data gap, not a halt; sustained failures
+  remain possible. Option catalogs load before 9:32 and an entry quotes only the
+  nearest strikes, so entries are one stock quote plus one to three option-quote
+  requests; a catalog that has to load at the entry instead can still hold up
+  polling past the gap, which drops the other stocks still being watched, honestly.
+  Strikes listed during the day are not in the morning catalog.
+- A single failed read is only counted; two in a row are a journaled data gap, not a halt; sustained failures
   (default 60 s) halt, except that open positions keep being managed on option
   prices through an equity-quote outage. An option-price outage alone never halts:
   exits wait for a fresh bid and anything unsold at the close is written off.
@@ -53,8 +56,9 @@ No real-account readiness or trading performance is claimed.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio
   follows its client. No launch daemon, cloud hosting or public client OAuth.
-- Strategy 0.7.0 made market-data timing configurable (0.6.0 replaced the
-  stock-gain trims with option-price targets). Paper runs configured under an
+- Strategy 0.8.0 prefetches option catalogs and journals on change (0.7.0 made
+  market-data timing configurable; 0.6.0 replaced the stock-gain trims with
+  option-price targets). Paper runs configured under an
   earlier version cannot resume or be reconfigured under the same runId; configure
   a new runId.
 - Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover;
@@ -62,7 +66,8 @@ No real-account readiness or trading performance is claimed.
 - Contracts with no fresh bid by the close are written off at -100%. No invented
   liquidation price, exercise or overnight management.
 - Single owner, one run per strategy/date, no account sharing or multi-tenancy.
-- Journals grow during runs; no automatic retention/deletion. Keep data private.
+- Journals hold decisions plus a heartbeat a minute (a few hundred revisions a day);
+  no automatic retention/deletion. Keep data private.
 - License selection is pending. Public source alone is not an open-source
   license; package publication remains disabled pending release review.
 

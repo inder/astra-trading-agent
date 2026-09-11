@@ -5,6 +5,7 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { VERSION } from "./version.ts";
 
 export const ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading";
 export const MARKET_READS = ["get_equity_quotes", "get_equity_technical_indicators", "get_equity_historicals", "get_option_chains", "get_option_instruments", "get_option_quotes"] as const;
@@ -91,7 +92,7 @@ const network = robinhoodFetch();
 const defaults: ConnectionDependencies = {
   authorize: (provider, options) => auth(provider, { ...options, fetchFn: network }),
   connect: async provider => {
-    const client = new Client({ name: "astra-market-data", version: "0.3.0" });
+    const client = new Client({ name: "astra-market-data", version: VERSION });
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(ROBINHOOD_MCP_URL), { authProvider: provider, fetch: network }));
       return client;

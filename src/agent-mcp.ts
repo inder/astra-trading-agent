@@ -3,9 +3,10 @@ import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
 import { ENTRY_WINDOW_MINUTES, SETTINGS } from "./orb-options.ts";
+import { VERSION } from "./version.ts";
 
 export function createAgentMcpServer(service: TradingAgentService): McpServer {
-  const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: "0.3.0" });
+  const server = new McpServer({ name: "astra-trading-agent", title: "Astra Trading Agent for Robinhood", version: VERSION });
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
   const guarded = (action: () => unknown) => {
@@ -90,10 +91,13 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       maxQuoteAgeSeconds: seconds(SETTINGS.maxQuoteAgeMs).describe(`Oldest a stock or option quote may be when fetched and still be acted on; default ${SETTINGS.maxQuoteAgeMs.default / 1000}; at least one poll.`),
       maxObservationGapSeconds: seconds(SETTINGS.maxObservationGapMs).describe(`Longest gap between observations before a watched stock is dropped for the day, so an unseen price path is never assumed; default ${SETTINGS.maxObservationGapMs.default / 1000}; at least two polls.`),
       rangeDeadlineSeconds: seconds(SETTINGS.rangeDeadlineMs).describe(`How long after 9:32 ET to keep retrying the opening-range bars before skipping a stock; default ${SETTINGS.rangeDeadlineMs.default / 1000}.`),
+      maxEntryQuoteBatches: whole(SETTINGS.maxEntryQuoteBatches).describe(`Most batches of 20 nearest strikes quoted at an entry before skipping it; default ${SETTINGS.maxEntryQuoteBatches.default}.`),
+      heartbeatSeconds: seconds(SETTINGS.heartbeatMs).describe(`Seconds between journal heartbeats (latest prices, price range seen, marks, read failures); default ${SETTINGS.heartbeatMs.default / 1000}.`),
       readFailureHaltSeconds: seconds(SETTINGS.readFailureHaltMs).describe(`How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default ${SETTINGS.readFailureHaltMs.default / 1000}.`),
     }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
     ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent,
-      pollSeconds, maxQuoteAgeSeconds, maxObservationGapSeconds, rangeDeadlineSeconds, readFailureHaltSeconds, ...a }) => guarded(() => service.paper.configure({ ...a,
+      pollSeconds, maxQuoteAgeSeconds, maxObservationGapSeconds, rangeDeadlineSeconds, readFailureHaltSeconds, heartbeatSeconds, ...a }) => guarded(() => service.paper.configure({ ...a,
+      heartbeatMs: ms(heartbeatSeconds),
       pollMs: ms(pollSeconds), maxQuoteAgeMs: ms(maxQuoteAgeSeconds), maxObservationGapMs: ms(maxObservationGapSeconds),
       rangeDeadlineMs: ms(rangeDeadlineSeconds), readFailureHaltMs: ms(readFailureHaltSeconds),
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,

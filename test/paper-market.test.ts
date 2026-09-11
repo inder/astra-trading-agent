@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadOrbContracts, parseAvailableOrbCallQuotes, quoteOrbContracts, type OrbOptionSource } from "../src/option-source.ts";
+import { loadOrbContracts, parseAvailableOrbCallQuotes, type OrbOptionSource } from "../src/option-source.ts";
 import { RobinhoodPaperMarket } from "../src/paper-market.ts";
 import type { RobinhoodConnection } from "../src/broker-connection.ts";
 const chainId = "00000000-0000-0000-0000-000000000001", contractId = "00000000-0000-0000-0000-000000000002";
@@ -35,11 +35,10 @@ test("option pagination, duplicate identities and unexpected quotes fail closed"
   assert.throws(() => parseAvailableOrbCallQuotes({ data: { results: [{ quote: { instrument_id: chainId } }] } }, [contractId], new Date().toISOString()), /foreign/);
 });
 test("option retrieval timestamp follows the completed request", async () => {
-  const { provider } = source(); let clock = Date.parse("2026-09-08T13:32:00Z");
-  const catalog = await loadOrbContracts(provider, "DEMOA", "2026-09-08"), original = provider.optionQuotes;
-  provider.optionQuotes = async ids => { clock += 1000; return original(ids); };
-  const quotes = await quoteOrbContracts(provider, catalog.contracts, () => clock);
-  assert.equal(quotes[0]?.retrievedAt, "2026-09-08T13:32:01.000Z");
+  const { provider } = source();
+  const broker = { async read(_name: string, args: any) { await new Promise(r => setTimeout(r, 30)); return provider.optionQuotes(args.instrument_ids); } } as unknown as RobinhoodConnection;
+  const asked = Date.now(), [quote] = await new RobinhoodPaperMarket(broker).optionQuotes([contractId]);
+  assert.ok(Date.parse(quote!.retrievedAt) >= asked + 25, "stamped when the answer arrived, not when it was asked");
 });
 test("paper adapter maps requests to bounded read-only provider operations", async () => {
   const { provider, calls } = source(); const names: string[] = [];
@@ -52,10 +51,11 @@ test("paper adapter maps requests to bounded read-only provider operations", asy
     throw new Error("Unexpected operation");
   } } as unknown as RobinhoodConnection;
   const market = new RobinhoodPaperMarket(broker);
-  const catalog = await market.calls("DEMOA", "2026-09-08"); assert.equal(catalog.quotes.length, 1);
+  const catalog = await market.contracts("DEMOA", "2026-09-08"); assert.equal(catalog.contracts.length, 1);
+  assert.ok(!names.includes("get_option_quotes"), "the catalog is instruments only: no quotes until an entry asks");
   await market.optionQuotes([contractId]); await market.bars(["DEMOA"], 0, 120000, true);
   assert.throws(() => market.bars(["DEMOA"], 0, 86400001, false));
   await assert.rejects(market.optionQuotes([contractId, contractId]));
   assert.deepEqual(new Set(names), new Set(["get_option_chains", "get_option_instruments", "get_option_quotes", "get_equity_historicals"]));
-  assert.ok(calls.length >= 4);
+  assert.deepEqual(calls.map(c => (c as unknown[])[0]), ["chains", "instruments", "quotes"], "one catalog load, then quotes only when asked");
 });

@@ -8,6 +8,7 @@ export interface OrbOptionsConfig {
   maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number; rangeDeadlineMs: number; readFailureHaltMs: number;
+  maxEntryQuoteBatches: number; heartbeatMs: number;
   includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
 }
 /** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
@@ -39,6 +40,10 @@ export const SETTINGS = {
   rangeDeadlineMs: { default: 60_000, min: 0, max: 600_000 },
   // How long market-data reads may keep failing before the run halts.
   readFailureHaltMs: { default: 60_000, min: 5000, max: 900_000 },
+  // Entry quoting: batches of the nearest strikes quoted before giving up (15 x 20 = the old whole-catalog cap of 300).
+  maxEntryQuoteBatches: { default: 3, min: 1, max: 15 },
+  // Journal heartbeat: latest prices, the price range seen, marks and read failures, between state changes.
+  heartbeatMs: { default: 60_000, min: 5000, max: 600_000 },
 } as const;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
@@ -47,6 +52,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs", "rangeDeadlineMs", "readFailureHaltMs",
+    "maxEntryQuoteBatches", "heartbeatMs",
     "includePremarketLeadMinutes", "entryWindowMinutes", "flattenLeadMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
@@ -64,6 +70,7 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
     !inRange(c.pollMs, SETTINGS.pollMs) || !inRange(c.maxQuoteAgeMs, SETTINGS.maxQuoteAgeMs) || !inRange(c.maxObservationGapMs, SETTINGS.maxObservationGapMs) ||
     !inRange(c.rangeDeadlineMs, SETTINGS.rangeDeadlineMs) || !inRange(c.readFailureHaltMs, SETTINGS.readFailureHaltMs) ||
+    !inRange(c.maxEntryQuoteBatches, SETTINGS.maxEntryQuoteBatches) || !inRange(c.heartbeatMs, SETTINGS.heartbeatMs) || c.heartbeatMs < c.pollMs ||
     // A poll must fit inside the gap twice (one missed poll is not a gap) and a quote must be allowed to age one poll.
     c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs || c.readFailureHaltMs < 2 * c.pollMs ||
     ![0, 2].includes(c.includePremarketLeadMinutes) ||
@@ -128,8 +135,24 @@ export interface OrbCallSelection {
 }
 /** A deliberate no-entry decision (a rule said no), as opposed to missing or stale data. */
 export class EntrySkip extends Error {
-  readonly reason: string;
-  constructor(reason: string) { super(reason); this.reason = reason; }
+  readonly reason: string; readonly evidence: Record<string, unknown>;
+  /** evidence: the observation behind the decision, journaled with it. */
+  constructor(reason: string, evidence: Record<string, unknown> = {}) { super(reason); this.reason = reason; this.evidence = evidence; }
+}
+/** The provider's per-request limit on option quotes. */
+export const QUOTE_BATCH_SIZE = 20;
+/** Contracts nearest the stock price first (ties by id), cut into quote batches that never split contracts at the same
+ *  distance: selecting the nearest qualifying strike batch by batch then equals selecting it over the whole catalog. */
+export function strikeBatches(contracts: readonly OrbCallContract[], stockPrice: number, size = QUOTE_BATCH_SIZE): OrbCallContract[][] {
+  const distance = (k: OrbCallContract) => Math.abs(k.strike - stockPrice);
+  const ranked = [...contracts].sort((a, b) => distance(a) - distance(b) || a.id.localeCompare(b.id));
+  const batches: OrbCallContract[][] = [];
+  for (let i = 0; i < ranked.length;) {
+    let end = Math.min(i + size, ranked.length);
+    while (end < ranked.length && end > i + 1 && distance(ranked[end - 1]!) === distance(ranked[end]!)) end--;
+    batches.push(ranked.slice(i, end)); i = end;
+  }
+  return batches;
 }
 export const MIN_EXPIRY_SESSIONS = 3;
 /** Founder rule (2026-09-10): the first week-ending expiry with at least 3 trading sessions counting the

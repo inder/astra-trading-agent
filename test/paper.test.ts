@@ -11,6 +11,7 @@ import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
 import { StepError } from "../src/paper-runtime.ts";
+import { EntrySkip } from "../src/orb-options.ts";
 import type { PaperMarket } from "../src/paper-market.ts";
 import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
@@ -82,7 +83,8 @@ test("the simulated Robinhood backstop sells everything once the bid halves, wit
   f.advance(); f.setBid(2); await f.service.paper.tick(setup.runId);
   const s = f.service.paper.status(setup.runId);
   assert.equal(s.view.positions.length, 0); assert.equal(s.view.realizedPnlCents, -80000);   // 4 × ($2 − $4)
-  assert.ok(s.events.some(e => e.type === "paper_sale" && (e.data as any).reason === "broker_backstop"));
+  const sale = s.events.find(e => e.type === "paper_sale")!.data as any;
+  assert.equal(sale.reason, "broker_backstop"); assert.equal(sale.triggeredAt, new Date(open + 123000).toISOString(), "the bid that triggered it");
 });
 test("the final-minute flatten needs only a fresh option bid, not a fresh stock quote", async t => {
   const f = fixture(t); await entered(f); f.staleStock(6000); f.setTime(close - 60000);
@@ -271,8 +273,137 @@ test("the journal records the run's own freshness verdict, not the market layer'
   const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0, maxQuoteAgeMs: 10000 }), f.market, f.options.clock);
   f.setTime(open + 120000); f.staleStock(7000);
   const events = await runtime.step();
-  assert.equal((events.find(e => e.type === "quote")!.data as any).fresh, true, "7 s old is fresh under a 10 s setting");
+  assert.equal((events.find(e => e.type === "heartbeat")!.data as any).latest.DEMOA.fresh, true, "7 s old is fresh under a 10 s setting");
   assert.notEqual((runtime.view().detail as any).symbols.DEMOA.lastObservationMs, null);
+});
+test("catalogs load before 9:32, one per tick, so an entry quotes one batch and loads no catalog", async t => {
+  const f = fixture(t);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: setup.symbols, includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  for (let at = open + 60000; at < open + 120000; at += 1000) { f.setTime(at); await runtime.step(); }
+  assert.equal(f.reads.contracts, 3);
+  f.setTime(open + 120000); await runtime.step();
+  f.advance(); f.prices.DEMOA = 106;
+  const entry = await runtime.step();
+  assert.equal((entry.find(e => e.type === "option_selection")!.data as any).batches, 1);
+  assert.equal(f.reads.contracts, 3, "no catalog read at the entry");
+  // Inside the fence before 9:32 nothing is prefetched; the catalog then loads at the entry instead.
+  const late = fixture(t, ["DEMOA"]);
+  const lateRun = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), late.market, late.options.clock);
+  late.setTime(open + 111000); await lateRun.step(); assert.equal(late.reads.contracts, 0);
+  late.setTime(open + 120000); await lateRun.step(); late.advance(); late.prices.DEMOA = 106;
+  late.slowCatalog(6000); const lazy = await lateRun.step();
+  assert.deepEqual([late.reads.contracts, lateRun.view().positions.length], [1, 1]);
+  // The slow catalog load comes first, so the stock quote the entry uses is fetched after it, not 6 s before.
+  assert.equal((lazy.find(e => e.type === "option_selection")!.data as any).stock.retrievedAt, new Date(open + 127000).toISOString());
+});
+test("a slow catalog prefetch never delays the first observation after 9:32", async t => {
+  const f = fixture(t);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: setup.symbols, includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  f.slowCatalog(6000); f.setTime(open + 100000);
+  const journal: any[] = [];
+  while (f.options.clock() < open + 120000) { journal.push(...await runtime.step()); f.advance(); }
+  assert.equal(f.reads.contracts, 2, "the third load would have run past the fence");
+  f.slowCatalog(0); f.setTime(open + 120000); journal.push(...await runtime.step());
+  assert.deepEqual(journal.filter(e => e.type === "setup_disqualified"), [], "every stock observed in time");
+});
+test("prefetch failures retry and close at 9:32; a no-expiry catalog is a decision, journaled once and reused at the entry", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]); const contracts = f.market.contracts; let failing = true, demob = 0;
+  f.market.contracts = async (symbol, day) => {
+    if (symbol === "DEMOB") { demob++; throw new EntrySkip("no_qualifying_expiry"); }
+    if (failing) throw new Error("test-only catalog outage");
+    return contracts(symbol, day);
+  };
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  const journal: any[] = [];
+  for (let at = open + 60000; at < open + 120000; at += 1000) { f.setTime(at); journal.push(...await runtime.step()); }
+  assert.deepEqual(journal.filter(e => e.type === "no_tradable_calls").map(e => e.data), [{ symbol: "DEMOB", reason: "no_qualifying_expiry" }]);
+  assert.deepEqual(journal.filter(e => e.type === "data_gap").map(e => e.data.source), ["catalog"]);
+  failing = false; f.setTime(open + 120000); journal.push(...await runtime.step());
+  assert.deepEqual(journal.filter(e => e.type === "data_gap_ended").map(e => [e.data.source, e.data.reason]), [["catalog", "prefetch_window_closed"]]);
+  f.advance(); f.prices.DEMOA = 106; f.prices.DEMOB = 106; journal.push(...await runtime.step());
+  assert.deepEqual(journal.filter(e => e.type === "entry_skipped").map(e => e.data), [{ symbol: "DEMOB", reason: "no_qualifying_expiry" }]);
+  assert.equal(demob, 1, "the decision is reused, not reloaded");
+  assert.equal(runtime.view().positions[0]?.symbol, "DEMOA", "DEMOA's catalog loaded at its entry");
+});
+test("an entry quotes the nearest strikes first and widens only while nothing qualifies", async t => {
+  const f = fixture(t, ["DEMOA"]), seen: number[] = [];
+  const strike = (n: number) => 100 + n, contractFor = (n: number) => ({ id: id(n + 1), symbol: "DEMOA", expiration: "2026-09-11", strike: strike(n), multiplier: 100 as const,
+    tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: "2026-09-11T19:30:00Z" });
+  const catalog = Array.from({ length: 31 }, (_, n) => contractFor(n));   // strikes 100 through 130
+  f.market.contracts = async () => ({ expiration: "2026-09-11", contracts: catalog });
+  // Strikes up to 121 cost $6 (4 contracts would be $2,404, over the cap); from 122 they cost $4 and 4 fit.
+  f.market.optionQuotes = async ids => { seen.push(ids.length); const now = new Date(f.options.clock()).toISOString();
+    return ids.map(qid => { const k = catalog.find(x => x.id === qid)!; const ask = k.strike <= 121 ? 6 : 4;
+      return { id: qid, bid: ask - .1, ask, askSize: 20, updatedAt: now, retrievedAt: now }; }); };
+  await entered(f, ["DEMOA"]);
+  const selection = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).find(e => e.type === "option_selection")!.data as any;
+  assert.equal(selection.selected.contract.strike, 122); assert.equal(selection.batches, 2);
+  assert.deepEqual(seen.slice(0, 2), [20, 11], "the nearest 20 by distance from $106, then the rest");
+  // With one batch allowed, the entry is skipped for that reason, not as if no strike could ever fit.
+  const capped = fixture(t, ["DEMOA"]);
+  capped.market.contracts = f.market.contracts; capped.market.optionQuotes = f.market.optionQuotes;
+  capped.service.paper.configure({ ...setup, symbols: ["DEMOA"], maxEntryQuoteBatches: 1 }); await capped.service.paper.start(setup.runId);
+  capped.setTime(open + 120000); await capped.service.paper.tick(setup.runId);
+  capped.advance(); capped.prices.DEMOA = 106; await capped.service.paper.tick(setup.runId);
+  assert.deepEqual(capped.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
+    { symbol: "DEMOA", reason: "no_qualifying_call_within_quote_batches", quotedContracts: 20, batches: 1 });
+});
+test("a stop that cannot fill during an option outage is journaled once, and each tick asks for option prices once", async t => {
+  const f = fixture(t, ["DEMOA"]); await entered(f, ["DEMOA"]);
+  const optionQuotes = f.market.optionQuotes; let calls = 0;
+  f.market.optionQuotes = async ids => { calls++; return optionQuotes(ids); };
+  f.outage("options"); f.prices.DEMOA = 99;
+  const before = f.service.paper.events(setup.runId, -1, 100).length;
+  for (let s = 0; s < 30; s++) { f.advance(); await f.service.paper.tick(setup.runId); }
+  const pages = f.service.paper.events(setup.runId, -1, 100), journal = pages.flatMap(p => p.events);
+  assert.deepEqual(journal.filter(e => ["exit_triggered", "sale_deferred", "data_gap"].includes(e.type)).map(e => e.type), ["exit_triggered", "sale_deferred", "data_gap"]);
+  assert.equal(calls, 30, "one option batch per tick, no second request per stop");
+  assert.ok(pages.length - before <= 3, `${pages.length - before} revisions over 30 ticks`);
+  f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
+  assert.ok(f.service.paper.status(setup.runId).events.some(e => e.type === "paper_sale" && (e.data as any).reason === "protective_stop" && (e.data as any).quantity === 4));
+});
+test("a breakout with every position slot taken, or one that reverses before the entry quote, is a skip with its evidence", async t => {
+  const f = fixture(t); await entered(f);
+  f.advance(); f.prices.DEMOB = 106; await f.service.paper.tick(setup.runId);
+  f.advance(); f.prices.DEMOC = 106.5; await f.service.paper.tick(setup.runId);
+  assert.deepEqual(f.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
+    { symbol: "DEMOC", reason: "maximum_positions_reached", price: 106.5, tradeAt: new Date(open + 123000).toISOString() });
+  const r = fixture(t, ["DEMOA"]); const quotes = r.market.quotes; let reads = 0;
+  r.market.quotes = async s => { reads++; const got = await quotes(s); return reads === 3 ? got.map(q => ({ ...q, price: 104.5 })) : got; };
+  r.service.paper.configure({ ...setup, symbols: ["DEMOA"] }); await r.service.paper.start(setup.runId);
+  r.setTime(open + 120000); await r.service.paper.tick(setup.runId);
+  r.advance(); r.prices.DEMOA = 106; await r.service.paper.tick(setup.runId);   // observed above the high; the entry's own quote is back inside
+  assert.deepEqual(r.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
+    { symbol: "DEMOA", reason: "breakout_reversed", price: 104.5, tradeAt: new Date(open + 121000).toISOString() });
+});
+test("a full session journals changes and a heartbeat a minute: under 1,000 revisions through a flapping provider and an option outage", async t => {
+  const f = fixture(t);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: setup.symbols, includePremarketLeadMinutes: 0, entryWindowMinutes: 390 }), f.market, f.options.clock);
+  const quotes = f.market.quotes; let flapping = false, tick = 0, revisions = 0; const heartbeats: any[] = [], types = new Set<string>();
+  f.market.quotes = async s => { if (flapping && tick % 2) throw new Error("test-only 429"); return quotes(s); };
+  for (f.setTime(open + 120000); f.options.clock() <= close; f.advance(), tick++) {
+    const at = f.options.clock() - open;
+    if (at === 30 * 60000) f.prices.DEMOA = 106;                               // 10:00 DEMOA breaks out
+    flapping = at >= 60 * 60000 && at < 90 * 60000;                           // 10:30-11:00 every other quote read fails
+    if (at === 120 * 60000) { f.outage("options"); f.prices.DEMOA = 99; }      // 11:30 its stop fires into an option outage
+    if (at === 150 * 60000) f.restore();                                       // 12:00 prices return and the stop fills
+    const events = await runtime.step();
+    if (events.length) revisions++;
+    for (const e of events) { types.add(e.type); if (e.type === "heartbeat") heartbeats.push(e.data); }
+  }
+  assert.ok(revisions < 1000, `${revisions} revisions`);
+  assert.ok(heartbeats.length >= 385 && heartbeats.length <= 392, `${heartbeats.length} heartbeats`);
+  for (const t of ["paper_entry", "exit_triggered", "sale_deferred", "paper_sale", "session_ended"]) assert.ok(types.has(t), t);
+  assert.ok(!types.has("quote") && !types.has("option_mark"), "no per-tick events");
+  const flap = heartbeats.find(h => h.readFailures.quotes);
+  assert.ok(flap.readFailures.quotes >= 25 && flap.observed.DEMOB.observations >= 25, "the heartbeat counts failures and observations");
+  assert.deepEqual(Object.keys(heartbeats[0].latest), setup.symbols);
+});
+test("the MCP server and its clients report the package version", async t => {
+  const f = fixture(t), server = createAgentMcpServer(f.service), client = new Client({ name: "version", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
+  t.after(async () => { await client.close(); await server.close(); });
+  assert.equal(client.getServerVersion()?.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
 });
 test("a quote stamped after its own fetch (clock skew) is not an observation and cannot throw", async t => {
   const f = fixture(t, ["DEMOA"]);
@@ -286,11 +417,11 @@ test("a slow entry does not cost the other stock its observation that tick, but 
   const f = fixture(t, ["DEMOA", "DEMOB"]);
   const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
   f.setTime(open + 120000); await runtime.step();
-  f.slowCalls(6000); f.advance(); f.prices.DEMOA = 106;
+  f.slowCatalog(6000); f.advance(); f.prices.DEMOA = 106;
   const first = await runtime.step();
   assert.deepEqual(first.filter(e => e.type === "paper_entry").map(e => (e.data as any).symbol), ["DEMOA"]);
   assert.equal((runtime.view().detail as any).symbols.DEMOB.status, "watching", "observed as of the shared fetch, before the slow entry");
-  f.slowCalls(0); f.advance();
+  f.slowCatalog(0); f.advance();
   const second = await runtime.step();
   assert.deepEqual(second.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOB", "observation_gap"]]);
 });
@@ -320,20 +451,25 @@ test("duplicate processes and second same-date runs cannot recycle reservations"
   second.paper.configure({ ...setup, runId: "another" });
   await assert.rejects(second.paper.start("another"), /already has a run/);
 });
-test("one failed read is a journaled data gap, not a halt; the gap rule still judges watched stocks honestly", async t => {
+test("one failed read is only counted; two in a row are a journaled data gap, never a halt; the gap rule still judges watched stocks", async t => {
   const f = fixture(t); await entered(f);
+  const journal = () => f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events);
   f.outage("quotes"); f.advance(); await f.service.paper.tick(setup.runId);
-  let s = f.service.paper.status(setup.runId);
-  assert.equal(s.status, "running"); assert.ok(s.events.some(e => e.type === "data_gap" && (e.data as any).source === "quotes"));
-  assert.equal(s.view.dataGapSince, new Date(open + 122000).toISOString());
+  assert.equal(journal().filter(e => e.type === "data_gap").length, 0, "a single failed read is only counted");
+  assert.equal(f.service.paper.status(setup.runId).view.dataGapSince, new Date(open + 122000).toISOString());
+  f.advance(); await f.service.paper.tick(setup.runId);
+  assert.deepEqual(journal().filter(e => e.type === "data_gap").map(e => [(e.data as any).source, (e.data as any).since]),
+    [["quotes", new Date(open + 122000).toISOString()]]);
   f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
-  s = f.service.paper.status(setup.runId);
-  assert.deepEqual(s.events.find(e => e.type === "data_restored")?.data, { source: "quotes", outageMs: 1000 });
-  assert.equal((s.view.detail as any).symbols.DEMOB.status, "watching", "two seconds between observations is within the gap");
+  const s = f.service.paper.status(setup.runId);
+  assert.equal(s.status, "running");
+  assert.deepEqual(journal().find(e => e.type === "data_restored")?.data, { source: "quotes", outageMs: 2000 });
+  assert.equal((s.view.detail as any).symbols.DEMOB.status, "watching", "three seconds between observations is within the gap");
   f.outage("quotes"); f.advance(6000); await f.service.paper.tick(setup.runId);
   f.restore(); f.advance(); await f.service.paper.tick(setup.runId);
-  assert.deepEqual(f.service.paper.status(setup.runId).events.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).symbol, (e.data as any).reason]),
-    [["DEMOB", "observation_gap"], ["DEMOC", "observation_gap"]]);
+  const gaps = journal().filter(e => e.type === "setup_disqualified");
+  assert.deepEqual(gaps.map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOB", "observation_gap"], ["DEMOC", "observation_gap"]]);
+  assert.equal((gaps[0]!.data as any).previousObservedAt, new Date(open + 124000).toISOString(), "a gap names its other end");
 });
 test("a sustained outage halts a run holding nothing, but not one whose option prices still manage its exits", async t => {
   const idle = fixture(t); idle.service.paper.configure(setup); await idle.service.paper.start(setup.runId);
@@ -458,7 +594,7 @@ test("settlement needs no market data or authorization: a halted run settles whi
   f.advance(60001); await assert.rejects(f.service.paper.tick(setup.runId), /halted/);
   f.setTime(close + 60000);
   const fail = async (): Promise<never> => { throw new Error("test-only: no market data after the close"); };
-  const dead: PaperMarket = { quotes: fail, bars: fail, calls: fail, optionQuotes: fail };
+  const dead: PaperMarket = { quotes: fail, bars: fail, contracts: fail, optionQuotes: fail };
   const offline = new TradingAgentService(f.directory, undefined, undefined, { ...f.options, ready: () => false, market: dead });
   try {
     const settled = await offline.paper.start(setup.runId, true);
@@ -568,6 +704,9 @@ test("chat settings arrive in human units and are pinned to the run in internal 
   assert.deepEqual([timing.pollMs, timing.maxQuoteAgeMs, timing.maxObservationGapMs, timing.rangeDeadlineMs, timing.readFailureHaltMs],
     [500, 10000, 15000, 90000, 120000]);
   assert.ok((await configure({ runId: "gap", pollSeconds: 1, maxObservationGapSeconds: 1.5 })).isError, "a gap must hold two polls");
+  assert.deepEqual([defaults.maxEntryQuoteBatches, defaults.heartbeatMs], [3, 60000]);
+  const entryAndJournal = JSON.parse(((await configure({ runId: "journal", maxEntryQuoteBatches: 5, heartbeatSeconds: 30 })).content as any)[0].text).config;
+  assert.deepEqual([entryAndJournal.maxEntryQuoteBatches, entryAndJournal.heartbeatMs], [5, 30000]);
   const rounded = JSON.parse(((await configure({ runId: "rounded", pollSeconds: .2505 })).content as any)[0].text).config;
   assert.equal(rounded.pollMs, 251, "seconds become whole milliseconds, rounded half up");
   assert.ok((await configure({ runId: "unordered", firstTargetMultiple: 3, middleTargetMultiple: 3 })).isError, "targets must rise");

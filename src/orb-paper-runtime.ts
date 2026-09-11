@@ -1,27 +1,44 @@
-import { EntrySkip, OrbOptionsEngine, backstopPrice, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, type OpeningRange,
-  type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type SaleReason } from "./orb-options.ts";
+import { EntrySkip, OrbOptionsEngine, backstopPrice, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
+  type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type OrbCallSelection, type SaleReason } from "./orb-options.ts";
 import { CalendarCoverageError, sessionTimes } from "./daily-history.ts";
-import type { PaperMarket } from "./paper-market.ts";
+import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperEvent, type PaperPosition, type PaperControl } from "./paper-runtime.ts";
 
 export { sessionTimes };
 type Holding = { contract: OrbCallContract; entryPrice: number; mark: CallQuote | null };
 export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<string, Holding>; loaded: boolean;
-  nextMark: number; committedCents: number; realizedPnlCents: number; complete: boolean; lastQuoteAt: string | null; resumed: boolean;
+  nextHeartbeat: number; committedCents: number; realizedPnlCents: number; complete: boolean; lastQuoteAt: string | null; resumed: boolean;
   protectiveExits: Record<string, PersistentExit> }
 /** Sell-everything exits that keep retrying on later ticks (through rebounds and restarts) until a fresh bid fills them. */
 const PERSISTENT_EXITS = ["protective_stop", "breakeven_stop", "broker_backstop", "session_close"] as const satisfies readonly SaleReason[];
 type PersistentExit = typeof PERSISTENT_EXITS[number];
 const isPersistentExit = (reason: unknown): reason is PersistentExit => (PERSISTENT_EXITS as readonly unknown[]).includes(reason);
+type Source = "quotes" | "bars" | "options" | "catalog";
+/** A stock's catalog, or the rule decision that it has nothing to trade today (a decision, never an outage). */
+type Catalog = OptionCatalog | { skip: string };
+/** An invariant fence, not a strategy number: a catalog prefetch must finish before the first observation after the range
+ *  ends, or the late-first-quote rule would cost every stock its day. Never shorter than the slowest load seen. */
+const PREFETCH_FENCE_MS = 10_000;
+const iso = (ms: number) => new Date(ms).toISOString();
 export class OrbPaperRuntime implements PaperRuntime {
   #config: OrbOptionsConfig; #market: PaperMarket; #clock: () => number; #engine: OrbOptionsEngine;
   #saved: Omit<OrbPaperCheckpoint, "engine">; #session: { open: number; close: number }; #resumeNotes: string[] = [];
   /** When each kind of read began failing, for the current outage only (a restart starts clean). */
-  #gaps: Partial<Record<"quotes" | "bars" | "options", number>> = {};
+  #gaps: Partial<Record<Source, number>> = {};
+  /** Outages already journaled: a single failed read is only counted, in the heartbeat. */
+  #journaledGaps = new Set<Source>();
+  #failures: Partial<Record<Source, number>> = {};
+  /** Session catalogs, prefetched before 9:32. Memory only: a restarted run manages positions and never enters. */
+  #catalogs = new Map<string, Catalog>(); #slowestCatalogMs = 0; #prefetches = 0;
+  /** Sell-everything exits whose "no fresh bid" is already journaled: an outage adds one event, not one per tick. */
+  #deferred = new Set<string>();
+  /** Since the last heartbeat: each stock's observed price range and count, and its latest quote. */
+  #seen = new Map<string, { low: number; high: number; observations: number }>();
+  #latest = new Map<string, { price: number | null; tradeAt: string | null; fresh: boolean }>();
   constructor(raw: unknown, market: PaperMarket, clock = Date.now, checkpoint?: unknown) {
     this.#config = parseOrbOptionsConfig(raw); this.#market = market; this.#clock = clock;
     this.#engine = new OrbOptionsEngine(this.#config); this.#session = sessionTimes(this.#config.date);
-    this.#saved = { holdings: {}, loaded: false, nextMark: 0,
+    this.#saved = { holdings: {}, loaded: false, nextHeartbeat: 0,
       committedCents: 0, realizedPnlCents: 0, complete: false, lastQuoteAt: null, resumed: false, protectiveExits: {} };
     if (checkpoint) {
       const s = checkpoint as OrbPaperCheckpoint;
@@ -57,33 +74,64 @@ export class OrbPaperRuntime implements PaperRuntime {
     const retrieved = Date.parse(q.retrievedAt), age = retrieved - Date.parse(q.tradeAt);
     return Number.isFinite(age) && age >= 0 && age <= this.#config.maxQuoteAgeMs && retrieved <= this.#clock();
   }
+  /** A stock's catalog, or the rule decision that it has nothing to trade (no qualifying expiry, calendar not covered). */
+  async #loadCatalog(symbol: string): Promise<Catalog> {
+    try { return await this.#market.contracts(symbol, this.#config.date); }
+    catch (error) {
+      if (error instanceof EntrySkip) return { skip: error.reason };
+      if (error instanceof CalendarCoverageError) return { skip: "calendar_not_covered" };
+      throw error;
+    }
+  }
   async #handle(intent: OrbIntent, fetched?: CallQuote): Promise<PaperEvent[]> {
     if (intent.kind === "enter_calls") {
+      const c = this.#config; let quotes: CallQuote[] = [], batches = 0;
       try {
-        if (this.#clock() >= this.#session.close - this.#config.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
-        const catalog = await this.#market.calls(intent.symbol, this.#config.date);
+        if (this.#clock() >= this.#session.close - c.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
+        // Catalog first (prefetched before 9:32, else loaded now), then the fresh stock quote, then the nearest strikes' quotes.
+        let catalog = this.#catalogs.get(intent.symbol);
+        if (!catalog) { catalog = await this.#loadCatalog(intent.symbol); this.#catalogs.set(intent.symbol, catalog); }
+        if ("skip" in catalog) throw new EntrySkip(catalog.skip);
         const stock = (await this.#market.quotes([intent.symbol]))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
-        if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed");
+        if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed", { price: stock!.price, tradeAt: stock!.tradeAt });
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
-        const capCents = Math.min(this.#config.budgetCentsPerPosition, this.#config.budgetCentsPerDay - this.#saved.committedCents);
-        const selected = selectOrbCall(catalog.contracts, catalog.quotes, intent.symbol, catalog.expiration, stock!.price!, this.#config, this.#clock(), capCents);
+        const capCents = Math.min(c.budgetCentsPerPosition, c.budgetCentsPerDay - this.#saved.committedCents);
+        // Nearest strikes first, a batch at a time: the first batch holding any qualifying strike holds the nearest one.
+        const plan = strikeBatches(catalog.contracts, stock!.price!);
+        let selected: OrbCallSelection | null = null;
+        for (const batch of plan.slice(0, c.maxEntryQuoteBatches)) {
+          batches++; quotes = [...quotes, ...await this.#market.optionQuotes(batch.map(k => k.id))];
+          selected = selectOrbCall(catalog.contracts, quotes, intent.symbol, catalog.expiration, stock!.price!, c, this.#clock(), capCents);
+          if (selected) break;
+        }
         // capCents already bounds the selection; the day-cap comparison is a defensive restatement of the invariant.
-        if (!selected || this.#saved.committedCents + selected.committedCents > this.#config.budgetCentsPerDay) throw new EntrySkip("no_affordable_eligible_call");
-        const backstop = backstopPrice(selected.limitPrice, selected.contract, this.#config.backstopFraction);
+        if (!selected || this.#saved.committedCents + selected.committedCents > c.budgetCentsPerDay)
+          throw new EntrySkip(plan.length > c.maxEntryQuoteBatches ? "no_qualifying_call_within_quote_batches" : "no_affordable_eligible_call",
+            { quotedContracts: quotes.length, batches });
+        const backstop = backstopPrice(selected.limitPrice, selected.contract, c.backstopFraction);
         this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!, selected.limitPrice, backstop);
         this.#saved.holdings[intent.symbol] = { contract: selected.contract, entryPrice: selected.limitPrice, mark: null };
         this.#saved.committedCents += selected.committedCents;
-        return [{ type: "option_selection", data: { symbol: intent.symbol, contracts: catalog.contracts, quotes: catalog.quotes, selected, stock } },
+        const quoted = new Set(quotes.map(q => q.id));
+        return [{ type: "option_selection", data: { symbol: intent.symbol, batches, contracts: catalog.contracts.filter(k => quoted.has(k.id)), quotes, selected, stock } },
           { type: "paper_entry", data: { symbol: intent.symbol, setup: intent.setup, stockPrice: stock!.price,
           strike: selected.contract.strike, expiration: selected.contract.expiration, quantity: selected.quantity,
           assumedFill: selected.limitPrice, committedCents: selected.committedCents, backstopPrice: backstop, fillGuaranteed: false } }];
       } catch (error) {
         // Rule decisions and calendar gaps are named, so a review can tell a policy skip from a data problem.
         const reason = error instanceof EntrySkip ? error.reason : error instanceof CalendarCoverageError ? "calendar_not_covered" : "data_unavailable";
-        const detail = reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
-        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...detail } }];
+        const evidence = error instanceof EntrySkip ? error.evidence : reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
+        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...evidence } }];
       }
+    }
+    // A stock-triggered sell-everything exit is executed by this tick's option batch: one quote request per tick however many
+    // stops fire. The stop re-fires every tick until it fills; only the first trigger is journaled, with its observation.
+    if (!fetched && isPersistentExit(intent.reason)) {
+      this.#engine.failSale(intent.symbol);
+      if (this.#saved.protectiveExits[intent.symbol]) return [];
+      this.#saved.protectiveExits[intent.symbol] = intent.reason;
+      return [{ type: "exit_triggered", data: { symbol: intent.symbol, exit: intent.reason, stockPrice: intent.stockPrice, tradeAt: iso(intent.at) } }];
     }
     if (isPersistentExit(intent.reason)) this.#saved.protectiveExits[intent.symbol] = intent.reason;
     try {
@@ -92,11 +140,22 @@ export class OrbPaperRuntime implements PaperRuntime {
       const h = this.#saved.holdings[intent.symbol]!;
       const pnlCents = Math.round((quote.bid - h.entryPrice) * 10000 * intent.quantity);
       this.#engine.confirmSale(intent.symbol, intent.quantity); h.mark = quote; this.#saved.realizedPnlCents += pnlCents;
+      for (const key of [...this.#deferred]) if (key.startsWith(intent.symbol + ":")) this.#deferred.delete(key);
       if (this.#engine.snapshot().symbols[intent.symbol]!.status === "closed") delete this.#saved.protectiveExits[intent.symbol];
       return [{ type: "paper_sale", data: { symbol: intent.symbol, quantity: intent.quantity, reason: intent.reason,
-        stockPrice: intent.stockPrice, quote, assumedFill: quote.bid, realizedPnlCents: pnlCents, fillGuaranteed: false, feesExcluded: true,
-        ...(intent.targets ? { targets: intent.targets } : {}) } }];
-    } catch { this.#engine.failSale(intent.symbol); return [{ type: "sale_deferred", data: { symbol: intent.symbol, reason: "fresh_option_bid_unavailable" } }]; }
+        stockPrice: intent.stockPrice, triggeredAt: iso(intent.at), quote, assumedFill: quote.bid, realizedPnlCents: pnlCents,
+        fillGuaranteed: false, feesExcluded: true, ...(intent.targets ? { targets: intent.targets } : {}) } }];
+    } catch {
+      this.#engine.failSale(intent.symbol);
+      return isPersistentExit(intent.reason) ? this.#deferOnce(intent.symbol, intent.reason, intent.stockPrice, intent.at)
+        : [{ type: "sale_deferred", data: { symbol: intent.symbol, reason: "fresh_option_bid_unavailable", exit: intent.reason } }];
+    }
+  }
+  /** "No fresh bid" for a due sell-everything exit is journaled once per outage; the exit keeps retrying every tick. */
+  #deferOnce(symbol: string, exit: string, stockPrice: number | null, at: number): PaperEvent[] {
+    const key = `${symbol}:${exit}`; if (this.#deferred.has(key)) return [];
+    this.#deferred.add(key);
+    return [{ type: "sale_deferred", data: { symbol, reason: "fresh_option_bid_unavailable", exit, stockPrice, at: iso(at) } }];
   }
   /** Ticks at this interval; the controller's timer honors it. */
   get pollMs() { return this.#config.pollMs; }
@@ -108,7 +167,9 @@ export class OrbPaperRuntime implements PaperRuntime {
   }
   async #step(events: PaperEvent[]): Promise<void> {
     const now = this.#clock(), { close } = this.#session, c = this.#config, rangeEnd = this.#engine.rangeEndMs;
-    if (this.#saved.complete || now < rangeEnd) return;
+    if (this.#saved.complete) return;
+    if (now < rangeEnd) { if (!this.#saved.resumed) await this.#prefetch(now, rangeEnd, events); return; }
+    this.#endGap("catalog", now, events, "prefetch_window_closed");
     for (const symbol of this.#resumeNotes.splice(0)) events.push({ type: "setup_disqualified", data: { symbol, reason: "resumed_management_only" } });
     if (now >= close) {
       for (const symbol of this.#engine.closeEntryWindow(now)) events.push({ type: "setup_disqualified", data: { symbol, reason: "entry_window_closed" } });
@@ -130,49 +191,78 @@ export class OrbPaperRuntime implements PaperRuntime {
         throw new Error("Incomplete or mismatched quote batch");
       return batch;
     });
+    // Quotes are not journaled one by one: decisions carry the observation behind them and the heartbeat summarizes the rest.
     for (const q of (quotes ?? []).sort((a, b) => (a.tradeAt ?? "").localeCompare(b.tradeAt ?? "") || a.symbol.localeCompare(b.symbol))) {
-      events.push({ type: "quote", data: { ...q, fresh: this.#fresh(q) } });
-      if (!this.#fresh(q)) continue;
+      const fresh = this.#fresh(q);
+      this.#latest.set(q.symbol, { price: q.price, tradeAt: q.tradeAt, fresh });
+      if (!fresh) continue;
       this.#saved.lastQuoteAt = q.tradeAt;
+      const seen = this.#seen.get(q.symbol);
+      this.#seen.set(q.symbol, seen ? { low: Math.min(seen.low, q.price!), high: Math.max(seen.high, q.price!), observations: seen.observations + 1 }
+        : { low: q.price!, high: q.price!, observations: 1 });
       const state = this.#engine.snapshot().symbols[q.symbol]!, observedAt = Date.parse(q.retrievedAt);
       // Never infer an unobserved path: a stock first seen after the opening window cannot use its opening range.
       if (state.lastObservationMs === null && observedAt > rangeEnd + c.maxObservationGapMs) this.#engine.disqualify(q.symbol, "late_first_quote");
       if (this.#saved.resumed && state.status !== "open") continue;
       // Observed as of retrieval, so time spent handling other stocks is not a market gap. Stocks whose range bars are
       // still pending are observed too: the engine keeps their lowest trade and any gap for when the range arrives.
-      for (const intent of this.#engine.observe(q.symbol, q.price!, Date.parse(q.tradeAt!), observedAt)) events.push(...await this.#handle(intent));
-      // Journal the rule that ended watching (opening low, gap, late first quote) with the observation behind it.
+      const intents = this.#engine.observe(q.symbol, q.price!, Date.parse(q.tradeAt!), observedAt);
+      for (const intent of intents) events.push(...await this.#handle(intent));
+      // Journal the rule that ended watching (opening low, gap, late first quote) with the observation behind it; a gap
+      // also names its other end, which the engine no longer holds after this tick.
       const after = this.#engine.snapshot().symbols[q.symbol]!;
       if ((state.status === "watching" || state.status === "forming") && after.status === "disqualified")
-        events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt } });
+        events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt,
+          ...(after.endReason === "observation_gap" && state.lastObservationMs !== null && state.lastTradeMs !== null
+            ? { previousObservedAt: iso(state.lastObservationMs), previousTradeAt: iso(state.lastTradeMs) } : {}) } });
+      // A breakout with every position slot taken is a skip too, and says so.
+      if (state.status === "watching" && after.status === "skipped" && !intents.length)
+        events.push({ type: "entry_skipped", data: { symbol: q.symbol, reason: "maximum_positions_reached", price: q.price, tradeAt: q.tradeAt } });
     }
     // Option-price decisions need only a fresh option bid, one batch per tick: targets, the simulated Robinhood backstop,
-    // pending sell-everything exits and the final-minute flatten. A missing bid never fabricates a fill.
+    // pending sell-everything exits (including stock-triggered stops) and the final-minute flatten. No bid is ever invented.
     const held = this.view().positions;
     if (held.length) {
       const batch = await this.#read("options", now, events, () => this.#market.optionQuotes(held.map(p => p.contractId))) ?? [];
       for (const p of held) {
         const quote = batch.find(q => q.id === p.contractId), valid = this.#validOption(quote);
         this.#saved.holdings[p.symbol]!.mark = valid ? quote! : null;
-        if (!valid || this.#engine.snapshot().symbols[p.symbol]!.status !== "open") continue;
-        const pending = this.#saved.protectiveExits[p.symbol], at = Date.parse(quote!.updatedAt);
-        const intents = pending || now >= close - c.flattenLeadMinutes * 60000
+        const state = this.#engine.snapshot().symbols[p.symbol]!;
+        if (state.status !== "open") continue;
+        const pending = this.#saved.protectiveExits[p.symbol], closing = now >= close - c.flattenLeadMinutes * 60000;
+        if (!valid) { if (pending || closing) events.push(...this.#deferOnce(p.symbol, pending ?? "session_close", state.lastPrice, now)); continue; }
+        const at = Date.parse(quote!.updatedAt);
+        const intents = pending || closing
           ? this.#engine.requestPositionSale(p.symbol, pending ?? "session_close", p.quantity, p.quantity, null, at)
           : this.#engine.observeOption(p.symbol, quote!.bid, at);
         for (const intent of intents) events.push(...await this.#handle(intent, quote));
       }
-      if (now >= this.#saved.nextMark) {
-        for (const p of held) events.push({ type: "option_mark", data: { symbol: p.symbol, quote: this.#saved.holdings[p.symbol]!.mark } });
-        this.#saved.nextMark = now + 5000;
-      }
     }
     const holding = this.view().positions.length > 0;
     if (!holding) this.#endGap("options", now, events, "nothing_held");   // an option outage no longer matters
+    if (now >= this.#saved.nextHeartbeat) {
+      events.push({ type: "heartbeat", data: { latest: Object.fromEntries(this.#latest), observed: Object.fromEntries(this.#seen),
+        marks: Object.fromEntries(this.view().positions.map(p => [p.symbol, { bid: p.markBid, at: p.markAt }])),
+        readFailures: this.#failures, dataGapSince: this.#dataGapSince() } });
+      this.#saved.nextHeartbeat = now + c.heartbeatMs; this.#seen.clear(); this.#failures = {};
+    }
     // Halt only after data has been out longer than the setting. With positions open, bid-driven exits keep managing them
     // through an equity outage (a halt would end in a -100% settlement), so the run halts only if option prices are out too.
-    const outFor = (source: "quotes" | "options") => this.#gaps[source] === undefined ? 0 : now - this.#gaps[source]!;
+    const outFor = (source: Source) => this.#gaps[source] === undefined ? 0 : now - this.#gaps[source]!;
     if (outFor("quotes") > c.readFailureHaltMs && (!holding || outFor("options") > c.readFailureHaltMs))
       throw new Error(`Market data unavailable for more than ${c.readFailureHaltMs / 1000} s`);
+  }
+  /** Before 9:32, load one stock's catalog per tick while there is clearly time (see PREFETCH_FENCE_MS), rotating past
+   *  failures; anything not loaded by then loads at its entry instead. */
+  async #prefetch(now: number, rangeEnd: number, events: PaperEvent[]): Promise<void> {
+    const missing = this.#config.symbols.filter(s => !this.#catalogs.has(s));
+    if (!missing.length || now + Math.max(PREFETCH_FENCE_MS, this.#slowestCatalogMs) >= rangeEnd) return;
+    const symbol = missing[this.#prefetches++ % missing.length]!, started = this.#clock();
+    const catalog = await this.#read("catalog", now, events, () => this.#loadCatalog(symbol));
+    this.#slowestCatalogMs = Math.max(this.#slowestCatalogMs, this.#clock() - started);
+    if (!catalog) return;
+    this.#catalogs.set(symbol, catalog);
+    if ("skip" in catalog) events.push({ type: "no_tradable_calls", data: { symbol, reason: catalog.skip } });
   }
   /** Opening ranges from minute bars, retried each tick until rangeDeadlineMs after the first candle: its last bar can
    *  publish late, and stocks keep being observed meanwhile. */
@@ -204,28 +294,36 @@ export class OrbPaperRuntime implements PaperRuntime {
       if (after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol, reason: after.endReason, lowSeen } });
     }
   }
-  /** One provider read. A failure never ends the step: it is journaled once per outage (data_gap), recovery too, and yields null.
+  /** One provider read. A failure never ends the step. One failed read is only counted (in the heartbeat); a second in a
+   *  row opens a journaled outage (data_gap), later closed by data_restored. A flapping provider therefore cannot write
+   *  a revision per tick.
    *  A code defect (TypeError/ReferenceError) is not an outage: it halts the step with its message instead of hiding for hours.
    *  Provider and network failures never arrive as TypeError: RobinhoodConnection.read rethrows every failure, fetch's
    *  "TypeError: fetch failed" included, as a plain Error. */
-  async #read<T>(source: "quotes" | "bars" | "options", now: number, events: PaperEvent[], read: () => Promise<T>): Promise<T | null> {
+  async #read<T>(source: Source, now: number, events: PaperEvent[], read: () => Promise<T>): Promise<T | null> {
     try {
       const value = await read(), since = this.#gaps[source];
-      if (since !== undefined) { delete this.#gaps[source]; events.push({ type: "data_restored", data: { source, outageMs: now - since } }); }
+      if (since !== undefined) {
+        delete this.#gaps[source];
+        if (this.#journaledGaps.delete(source)) events.push({ type: "data_restored", data: { source, outageMs: now - since } });
+      }
       return value;
     } catch (error) {
       if (error instanceof TypeError || error instanceof ReferenceError) throw error;
-      if (this.#gaps[source] === undefined) {
-        this.#gaps[source] = now;
-        events.push({ type: "data_gap", data: { source, detail: String((error as Error)?.message ?? error).slice(0, 200) } });
+      this.#failures[source] = (this.#failures[source] ?? 0) + 1;
+      if (this.#gaps[source] === undefined) this.#gaps[source] = now;
+      else if (!this.#journaledGaps.has(source)) {
+        this.#journaledGaps.add(source);
+        events.push({ type: "data_gap", data: { source, since: iso(this.#gaps[source]!), detail: String((error as Error)?.message ?? error).slice(0, 200) } });
       }
       return null;
     }
   }
-  /** An outage that stopped mattering (no range pending, nothing held) closes in the journal instead of staying open. */
-  #endGap(source: "bars" | "options", now: number, events: PaperEvent[], reason: string): void {
+  /** An outage that stopped mattering (no range pending, nothing held, prefetch over) closes in the journal. */
+  #endGap(source: Source, now: number, events: PaperEvent[], reason: string): void {
     const since = this.#gaps[source]; if (since === undefined) return;
-    delete this.#gaps[source]; events.push({ type: "data_gap_ended", data: { source, outageMs: now - since, reason } });
+    delete this.#gaps[source];
+    if (this.#journaledGaps.delete(source)) events.push({ type: "data_gap_ended", data: { source, outageMs: now - since, reason } });
   }
   async control(command: PaperControl): Promise<PaperEvent[]> {
     if (this.#clock() < this.#session.open || this.#clock() >= this.#session.close || !["trim", "close"].includes(command.action)) throw new Error("Regular session required");

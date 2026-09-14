@@ -36,7 +36,7 @@ Paste this into Codex or Claude Code:
 Your app downloads Astra, checks it and adds it to itself. You may be asked to
 allow a command. It ends with one thing for you to do:
 
-> **Your app:** Quit and reopen Codex, then send any message (for example, "hi"). Astra will guide you from there: connecting Robinhood market data, choosing stocks, and starting a paper run.
+> **Your app** (Codex shown)**:** Quit and reopen Codex, then send any message (for example, "hi"). Astra will guide you from there: connecting Robinhood market data, choosing stocks, and starting a paper run.
 
 The app needs to be able to run commands on your computer. Chat apps that can't
 (such as Claude on the web) can't install it; see [Advanced](#advanced).
@@ -46,7 +46,8 @@ The app needs to be able to run commands on your computer. Chat apps that can't
 Below is a replayed session. The replies come from Astra's real tools, run on a
 simulated trading day (Tuesday, September 15, 2026) with **invented prices** for
 CRWV, HPE and SMCI. Your session uses live Robinhood prices, and the wording
-depends on your AI app.
+depends on your AI app. Two answers come from Astra's rules and settings rather
+than a tool, and are marked.
 
 #### Get started
 
@@ -107,7 +108,11 @@ depends on your AI app.
 > - Buys the call closest to the stock price where at least 4 contracts fit, expiring Friday, September 18.
 > - Exits at 2×, 3× and 5×; a safety stop at 50% of the entry price; everything left sells at 3:59 PM ET.
 >
-> Premium is treated as money you can lose in full. Save it and start?
+> Premium is treated as money you can lose in full. Save this plan?
+
+**You:** Yes.
+
+> **Astra:** Saved as run orb-2026-09-15. Start it now? Starting early is fine: I wait for the open.
 
 **You:** Yes, start it.
 
@@ -189,6 +194,8 @@ depends on your AI app.
 
 **You:** What can I change?
 
+*(From Astra's settings list; no tool is involved.)*
+
 > **Astra:** Every number in the plan:
 >
 > - **Money:** premium per trade and per day, and how many stocks a day.
@@ -202,7 +209,7 @@ depends on your AI app.
 
 #### What Astra won't do
 
-These follow Astra's rules; no tool is involved.
+*(These follow Astra's rules; no tool is involved.)*
 
 **You:** Buy 100 shares of NVDA for me.
 
@@ -265,7 +272,7 @@ become a local installer merely by receiving a URL.
 
 The Quick start replies were produced by `node scripts/quickstart-session.ts`,
 which drives every tool through a simulated day with a fake Robinhood login and
-invented prices. It needs no network or credentials.
+invented prices. It needs no internet connection or credentials.
 
 ### Manual installation
 

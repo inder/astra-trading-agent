@@ -1,5 +1,8 @@
 // Drives every Astra MCP tool through a simulated trading day, for the README's Quick start samples.
-// Invented prices, an injected clock and a fake Robinhood login: no network, no brokerage, nothing real.
+// Invented prices, an injected clock and a fake Robinhood login: no internet, no brokerage, nothing real. The only
+// connections are Astra's own loopback pages (the OAuth callback and the trim review), answered here as the user would.
+// The service stamps a few times with the real clock (quote retrieval, review expiry), so get_market_quotes reports
+// these future-dated sample quotes as not fresh; the README uses their prices and trade times only.
 //   node scripts/quickstart-session.ts > /tmp/quickstart.json
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,6 +109,7 @@ const symbolsSource = {
 };
 
 const dir = mkdtempSync(join(tmpdir(), "astra-quickstart-"));
+process.on("exit", () => rmSync(dir, { recursive: true, force: true }));   // also when a step throws
 const out: { step: string; tool: string; args: unknown; clock: string; result: unknown }[] = [];
 async function session() {
   const broker = fakeBroker();
@@ -114,8 +118,8 @@ async function session() {
   const server = createAgentMcpServer(service), client = new Client({ name: "quickstart", version: "1" });
   await server.connect(s); await client.connect(c);
   const call = async (step: string, tool: string, args: Record<string, unknown> = {}) => {
-    const r: any = await client.callTool({ name: tool, arguments: args });
-    const result = JSON.parse(r.content[0].text); out.push({ step, tool, args, clock: new Date(now).toLocaleTimeString("en-US", { timeZone: "America/New_York" }), result });
+    const r = await client.callTool({ name: tool, arguments: args }) as { content: { type: string; text: string }[] };
+    const result = JSON.parse(r.content[0]!.text); out.push({ step, tool, args, clock: new Date(now).toLocaleTimeString("en-US", { timeZone: "America/New_York" }), result });
     return result;
   };
   return { service, broker, client, server, call, close: async () => { await client.close(); await server.close(); await service.close(); } };
@@ -132,9 +136,8 @@ await a.call("preview", "preview_strategy", { strategyId: "opening-range-options
 await a.call("practice", "run_sample", { strategyId: "opening-range-options", symbols: ["DEMOA", "DEMOB", "DEMOC"], requestId: "practice-1" });
 await a.call("practice-detail", "get_run", { runId: "practice-1" });
 const link = await a.call("connect", "connect_robinhood");
-const waiting = a.call("connect-wait", "wait_for_robinhood", { seconds: 20 });
-await new Promise(r => setTimeout(r, 300)); await approveInBrowser(link.authorizationUrl, a.broker.redirect());
-await waiting;
+await approveInBrowser(link.authorizationUrl, a.broker.redirect());   // the callback listens once the link exists
+await a.call("connect-wait", "wait_for_robinhood", { seconds: 20 });   // reports connected, as it would mid-wait
 await a.call("broker-status", "get_broker_status");
 await a.call("check", "check_symbols", { symbols: ["CRWV", "HPE", "SMCI", "CRVW"] });
 await a.call("quotes", "get_market_quotes", { symbols: ["CRWV", "HPE", "SMCI"] });
@@ -180,9 +183,8 @@ now = at("10:41:00");
 const b = await session();
 await b.call("after-restart", "list_paper_runs");
 const link2 = await b.call("reconnect", "connect_robinhood");
-const waiting2 = b.call("reconnect-wait", "wait_for_robinhood", { seconds: 20 });
-await new Promise(r => setTimeout(r, 300)); await approveInBrowser(link2.authorizationUrl, b.broker.redirect());
-await waiting2;
+await approveInBrowser(link2.authorizationUrl, b.broker.redirect());
+await b.call("reconnect-wait", "wait_for_robinhood", { seconds: 20 });
 await b.call("resume", "resume_paper_run", { runId });
 await tickUntil(b.service, runId, at("10:44:00"));
 await b.call("resumed", "get_paper_run", { runId });
@@ -198,6 +200,5 @@ await b.call("paper-runs", "list_paper_runs");
 await b.call("history", "list_runs");
 await b.call("end-readiness", "get_readiness");
 await b.close();
-rmSync(dir, { recursive: true, force: true });
 console.log(JSON.stringify(out, null, 1));
 process.exit(0);

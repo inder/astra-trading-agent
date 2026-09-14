@@ -20,8 +20,8 @@ type BrokerState = "not_connected" | "preparing" | "awaiting_authorization" | "v
 export interface GuideRun {
   runId: string; strategyId: string; date: string; status: "configured" | "running" | "stopped" | "completed" | "error";
   attached: boolean; needsSettlement: boolean; positions: number;
-  /** Stocks that can still enter (watching, or waiting for their range), when the strategy reports it. */
-  watching?: number;
+  /** From entryCapacity, when the strategy reports it: stocks that can still enter, and whether the day's stock limit is used. */
+  watching?: number; atLimit?: boolean;
   /** When the plan was saved, and its pinned settings: needed only for runs that are not completed. */
   at?: string; config?: unknown;
 }
@@ -84,6 +84,16 @@ const day = (date: string) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC"
 const dollars = (cents: number) => "$" + (cents / 100).toLocaleString("en-US");
 const percent = (fraction: number) => `${Number((fraction * 100).toPrecision(12))}%`;
 const count = (n: number, thing: string) => `${n} ${thing}${n === 1 ? "" : "s"}`;
+/** Whether a paper run can still enter today, from its strategy state and pinned settings: the stocks that can still
+ *  enter (watching, waiting for their range, or mid-entry) and whether the day's stock limit is used up (entered stocks
+ *  count even after they close). Undefined when the strategy reports no per-stock state. */
+export function entryCapacity(detail: unknown, config: unknown): { watching: number; atLimit: boolean } | undefined {
+  const d = detail as { symbols?: Record<string, { status?: unknown }>; reservedPositions?: unknown } | null | undefined;
+  if (!d || typeof d !== "object" || !d.symbols || typeof d.symbols !== "object") return undefined;
+  const watching = Object.values(d.symbols).filter(s => ["watching", "forming", "entry_pending"].includes(String(s?.status))).length;
+  const limit = (config as { maximumPositions?: unknown } | null | undefined)?.maximumPositions;
+  return { watching, atLimit: typeof d.reservedPositions === "number" && typeof limit === "number" && d.reservedPositions >= limit };
+}
 
 function describeSession(date: string, now: number, plan: Plan = DEFAULT_PLAN): SessionInfo {
   const { open, close } = sessionTimes(date);
@@ -197,8 +207,9 @@ export function setupGuide(input: GuideInput): Guide {
     const plan = planOf(live.config) ?? DEFAULT_PLAN, s = describeSession(live.date, now, plan), { open } = sessionTimes(live.date);
     const phase = now < open ? `It waits for the ${s.opens} open; each stock's opening range is set by ${s.latestStart}.`
       : now >= open + plan.entryWindowMinutes * 60000 ? `The entry window is over; open positions are managed until ${s.closeOut}.`
-      // A resumed run, or one whose stocks have all entered or dropped out, can't enter again even inside the window.
+      // A resumed run, one whose stocks have all entered or dropped out, or one at its stock limit can't enter again.
       : live.watching === 0 ? `No more entries today: every stock has entered or is done for the day. Open positions are managed until ${s.closeOut}.`
+      : live.atLimit ? `No more entries today: the day's limit of ${count(plan.positions, "stock")} is reached. Open positions are managed until ${s.closeOut}.`
       : `New entries are possible until ${s.entriesUntil}; open positions are managed until ${s.closeOut}.`;
     return make({ stage: "monitoring", runId: live.runId, session: s,
       status: `Paper run ${live.runId} is running for ${s.day}${plan.symbols.length ? `, watching ${plan.symbols.join(", ")}` : ""}.`,

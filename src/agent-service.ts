@@ -8,7 +8,7 @@ import { RobinhoodMarketData } from "./market-data.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
-import { setupGuide, type GuideRun } from "./setup-guide.ts";
+import { entryCapacity, setupGuide, type GuideRun } from "./setup-guide.ts";
 import { checkSymbols, type SymbolSource } from "./symbol-check.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
@@ -46,12 +46,11 @@ export class TradingAgentService {
     for (const id of this.paper.ids()) {
       try {
         const r = this.paper.status(id);
-        // Stocks that can still enter, from the strategy's own state when it reports one (a resumed run has none).
-        const symbols = (r.view.detail as { symbols?: Record<string, { status?: string }> } | undefined)?.symbols;
-        const watching = symbols ? Object.values(symbols).filter(s => s.status === "watching" || s.status === "forming").length : undefined;
+        // Whether it can still enter, from the strategy's own state (a resumed run, or one at its stock limit, can't).
+        const capacity = entryCapacity(r.view.detail, r.config);
         // Completed runs are history; only the others need their saved plan.
         runs.push({ runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsSettlement: r.needsSettlement,
-          positions: r.view.positions.length, ...(watching === undefined ? {} : { watching }), ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
+          positions: r.view.positions.length, ...(capacity ?? {}), ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
       } catch { unreadable.push(id); }
     }
     return setupGuide({ now: this.#clock(), strategyId: this.strategies.find(s => s.paperFactory)?.id ?? "", runs, unreadable,

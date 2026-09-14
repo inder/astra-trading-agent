@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nextSessionDate, setupGuide, SERVER_INSTRUCTIONS, type Guide, type GuideInput, type GuideRun } from "../src/setup-guide.ts";
+import { entryCapacity, nextSessionDate, setupGuide, SERVER_INSTRUCTIONS, type Guide, type GuideInput, type GuideRun } from "../src/setup-guide.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
-import { ENTRY_WINDOW_MINUTES, SETTINGS } from "../src/orb-options.ts";
+import { ENTRY_WINDOW_MINUTES, OrbOptionsEngine, SETTINGS } from "../src/orb-options.ts";
+import { sessionTimes } from "../src/daily-history.ts";
 
 // New York wall-clock instants: September is EDT (-04:00), December EST (-05:00).
 const at = (iso: string) => Date.parse(iso);
@@ -157,6 +158,22 @@ test("a running run reports what it is doing now, and that the app must stay ope
   assert.doesNotMatch(text(done), /New entries are possible/);
   const some = guide({ now: at("2026-09-14T10:00:00-04:00"), broker: connected, runs: [run({ status: "running", attached: true, watching: 1 })] });
   assert.match(some.explain[0]!, /New entries are possible until 11:00 AM ET/);
+  // A stock still in its range can't enter once the day's stock limit is used.
+  const full = guide({ now: at("2026-09-14T10:00:00-04:00"), broker: connected, runs: [run({ status: "running", attached: true, watching: 1, atLimit: true })] });
+  assert.match(full.explain[0]!, /No more entries today: the day's limit of 2 stocks is reached/);
+});
+test("entry capacity comes from the engine's own state: watching, mid-entry, the stock limit, and a resumed run", () => {
+  const config = plan(MONDAY, ["AAA", "BBB"], { maximumPositions: 1 }), e = new OrbOptionsEngine(config), { open } = sessionTimes(MONDAY);
+  const range = { high: 105, low: 100, startMs: open, endMs: open + 120000 };
+  e.setRange("AAA", range); e.setRange("BBB", range);
+  assert.deepEqual(entryCapacity(e.snapshot(), config), { watching: 2, atLimit: false });
+  e.observe("AAA", 106, open + 121000);   // mid-entry counts as able to enter; its reservation uses the one slot
+  assert.deepEqual(entryCapacity(e.snapshot(), config), { watching: 2, atLimit: true });
+  e.confirmEntry("AAA", "00000000-0000-0000-0000-000000000001", 4, 106, 2, 1);
+  assert.deepEqual(entryCapacity(e.snapshot(), config), { watching: 1, atLimit: true }, "BBB is still in range but the day's one stock is used");
+  e.disqualify("BBB", "resumed_management_only");   // what resuming after a gap does to a stock still watching
+  assert.deepEqual(entryCapacity(e.snapshot(), config), { watching: 0, atLimit: true });
+  for (const detail of [undefined, null, {}, { symbols: null }]) assert.equal(entryCapacity(detail, config), undefined);
 });
 test("near the calendar's end the expiry is described by its rule, and the guide still answers", () => {
   const g = guide({ now: at("2027-12-29T17:00:00-05:00"), broker: connected });

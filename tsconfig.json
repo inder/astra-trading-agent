@@ -5,5 +5,5 @@
     "erasableSyntaxOnly": true, "noUncheckedIndexedAccess": true,
     "types": ["node"], "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }

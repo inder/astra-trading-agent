@@ -98,16 +98,20 @@ test("a reversed entry frees its slot and returns to watching until attempts run
   const stale = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); stale.setRange("CRWV", real);
   stale.observe("CRWV", 106, rangeEnd + 1000);
   assert.equal(stale.failEntry("CRWV", { newerPrice: null }), "watching");
+  assert.deepEqual([1, 10].map(n => parseOrbOptionsConfig({ ...config, maxEntryAttempts: n }).maxEntryAttempts), [1, 10]);
   assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryAttempts: 0 }));
   assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryAttempts: 11 }));
-  // Before this setting existed: a saved plan without it takes the default; a checkpoint without attempts restores.
-  const { maxEntryAttempts: _, ...legacy } = config;
-  assert.equal(parseOrbOptionsConfig(legacy).maxEntryAttempts, 3);
-  const saved = e.snapshot();
-  for (const s of Object.values(saved.symbols)) delete (s as { entryAttempts?: number }).entryAttempts;
-  const resumed = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], maximumPositions: 1, maxEntryAttempts: 2 }); resumed.restore(saved);
-  assert.deepEqual(Object.values(resumed.snapshot().symbols).map(s => s.entryAttempts), [0, 0]);
-  assert.throws(() => resumed.restore({ ...saved, symbols: { ...saved.symbols, CRWV: { ...saved.symbols.CRWV!, entryAttempts: 5 } } }), /entry attempts/);
+  const { maxEntryAttempts: _, ...missing } = config;
+  assert.throws(() => parseOrbOptionsConfig(missing), "required, like every setting: a plan from an earlier strategy version never resumes");
+  // Attempts are part of the checkpoint: they round-trip, and counts the engine could not produce are refused.
+  const saved = e.snapshot(), resumed = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], maximumPositions: 1, maxEntryAttempts: 2 });
+  resumed.restore(saved);
+  assert.deepEqual(Object.values(resumed.snapshot().symbols).map(s => s.entryAttempts), [2, 1]);
+  const altered = (entryAttempts: unknown, status = saved.symbols.CRWV!.status) =>
+    ({ ...saved, symbols: { ...saved.symbols, CRWV: { ...saved.symbols.CRWV!, status, entryAttempts } } }) as typeof saved;
+  for (const [n, status] of [[3, "skipped"], [undefined, "skipped"], [2, "watching"]] as const)
+    assert.throws(() => resumed.restore(altered(n, status)), /entry attempts/, `${n} ${status}`);
+  resumed.restore(altered(1, "watching"));   // one of two used: still watching is possible
 });
 test("two exact regular one-minute bars form the opening range", () => {
   const raw = { data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "regular", bars: [

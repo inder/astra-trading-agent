@@ -45,7 +45,8 @@ export const SETTINGS = {
   // Entry quoting: batches of the nearest strikes quoted before giving up (15 x 20 = the old whole-catalog cap of 300).
   maxEntryQuoteBatches: { default: 3, min: 1, max: 15 },
   // Entry attempts per stock per day (founder rule): an attempt whose own stock quote is back at or below the opening high
-  // returns the stock to watching, so a later breakout still enters while the low holds. 1 = the first attempt only.
+  // returns the stock to watching, so a later breakout still enters while the low holds. 1 = the first attempt only. A
+  // quote no newer than the breakout trade uses an attempt too: it bounds retries while a lagging feed repeats a trade.
   maxEntryAttempts: { default: 3, min: 1, max: 10 },
   // Journal heartbeat: latest prices, the price range seen, marks and read failures, between state changes.
   heartbeatMs: { default: 60_000, min: 5000, max: 600_000 },
@@ -53,8 +54,7 @@ export const SETTINGS = {
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
-  // A plan saved before maxEntryAttempts existed takes its default, so saved runs still resume after an upgrade.
-  const c = (raw && typeof raw === "object" && !("maxEntryAttempts" in raw) ? { ...raw, maxEntryAttempts: SETTINGS.maxEntryAttempts.default } : raw) as OrbOptionsConfig;
+  const c = raw as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs", "rangeDeadlineMs", "readFailureHaltMs",
@@ -389,15 +389,15 @@ export class OrbOptionsEngine {
     if (!raw || !raw.symbols || Object.keys(raw.symbols).length !== this.config.symbols.length ||
       !Number.isInteger(raw.reservedPositions) || raw.reservedPositions < 0 || raw.reservedPositions > this.config.maximumPositions)
       throw new Error("Invalid engine checkpoint");
-    let reserved = 0; const attempts = new Map<string, number>();
+    let reserved = 0;
     for (const symbol of this.config.symbols) {
       const s = raw.symbols[symbol];
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0 || s.pendingReason !== null)
         throw new Error("Checkpoint contains incomplete transaction");
-      // Checkpoints saved before attempts were counted: an entered stock used one, any other none.
-      const used = s.entryAttempts ?? (["open", "closed"].includes(s.status) ? 1 : 0); attempts.set(symbol, used);
-      if (!Number.isSafeInteger(used) || used < 0 || used > this.config.maxEntryAttempts ||
-        (["open", "closed"].includes(s.status) && used < 1)) throw new Error("Invalid saved entry attempts");
+      // An entered stock used at least one attempt; a stock still watching has one left.
+      if (!Number.isSafeInteger(s.entryAttempts) || s.entryAttempts < 0 || s.entryAttempts > this.config.maxEntryAttempts ||
+        (["open", "closed"].includes(s.status) && s.entryAttempts < 1) || (s.status === "watching" && s.entryAttempts >= this.config.maxEntryAttempts))
+        throw new Error("Invalid saved entry attempts");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
         (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)) ||
         !(s.lowAfterRangeEnd === null || ((s.status === "forming" || s.status === "disqualified") && Number.isFinite(s.lowAfterRangeEnd) && s.lowAfterRangeEnd > 0)))
@@ -416,8 +416,7 @@ export class OrbOptionsEngine {
       } else if (s.position) throw new Error("Unexpected saved position");
     }
     if (reserved !== raw.reservedPositions) throw new Error("Invalid saved risk reservations");
-    this.#state = new Map(this.config.symbols.map(symbol => [symbol, { ...structuredClone(raw.symbols[symbol]!), entryAttempts: attempts.get(symbol)! }]));
-    this.#reserved = reserved;
+    this.#state = new Map(this.config.symbols.map(symbol => [symbol, structuredClone(raw.symbols[symbol]!)])); this.#reserved = reserved;
   }
   #reserve(symbol: string, stockPrice: number, at: number, observedAt: number, range: SetupRange): OrbIntent[] {
     const s = this.#need(symbol);

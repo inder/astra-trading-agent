@@ -57,9 +57,10 @@ No real-account readiness or trading performance is claimed.
   Recovery makes no new entries after a monitoring gap.
 - A running local process is required. HTTP can outlive chat connections; stdio
   follows its client. No launch daemon, cloud hosting or public client OAuth.
-- Strategy 0.8.0 prefetches option catalogs and journals on change (0.7.0 made
-  market-data timing configurable; 0.6.0 replaced the stock-gain trims with
-  option-price targets). Paper runs configured under an
+- Strategy 0.9.0 keeps watching a stock whose entry quote no longer confirms the
+  breakout, up to `maxEntryAttempts` (0.8.0 prefetched option catalogs and
+  journaled on change; 0.7.0 made market-data timing configurable; 0.6.0 replaced
+  the stock-gain trims with option-price targets). Paper runs configured under an
   earlier version cannot resume or be reconfigured under the same runId; configure
   a new runId.
 - Calendar covers 2026–2027 with NYSE holidays/early closes. No automatic rollover;

@@ -467,11 +467,16 @@ test("an entry quote no newer than the breakout trade is not a reversal: it stop
     [["entry_quote_not_newer", 104.5, true], ["entry_quote_not_newer", 99.5, true]]);
   assert.deepEqual([of("setup_disqualified").length, of("paper_entry").length], [0, 1], "the third breakout confirms and enters");
 });
-test("after a reversal the entry window still closes on time", async t => {
-  const { of, breakout, r } = await reversing(t, [{ price: 104.5 }], { entryWindowMinutes: 5 });
-  await breakout(106);
-  r.setTime(open + 300000); r.prices.DEMOA = 106.5; await r.service.paper.tick(setup.runId);
-  assert.deepEqual([of("entry_aborted").length, of("setup_disqualified").map(d => d.reason), of("paper_entry").length], [1, ["entry_window_closed"], 0]);
+test("after a reversal the entry window and the observation-gap rule still apply", async t => {
+  const window = await reversing(t, [{ price: 104.5 }], { entryWindowMinutes: 5 });
+  await window.breakout(106);
+  window.r.setTime(open + 300000); window.r.prices.DEMOA = 106.5; await window.r.service.paper.tick(setup.runId);
+  assert.deepEqual([window.of("entry_aborted").length, window.of("setup_disqualified").map(d => d.reason), window.of("paper_entry").length],
+    [1, ["entry_window_closed"], 0]);
+  const gap = await reversing(t, [{ price: 104.5 }]);
+  await gap.breakout(106);
+  gap.r.advance(6000); gap.r.prices.DEMOA = 106.5; await gap.r.service.paper.tick(setup.runId);   // unseen for 6 s: over the 5 s allowed
+  assert.deepEqual([gap.of("setup_disqualified").map(d => d.reason), gap.of("paper_entry").length], [["observation_gap"], 0]);
 });
 test("a full session journals changes and a heartbeat a minute: under 1,000 revisions through a flapping provider and an option outage", async t => {
   const f = fixture(t);
@@ -727,6 +732,12 @@ test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses 
   assert.deepEqual(events.filter(e => e.type === "entry_skipped").map(e => e.data),
     [{ symbol: "DEMOB", reason: "too_close_to_session_end", triggerPrice: 106, triggerTradeAt: new Date(close - 600000).toISOString(), triggerRetrievedAt: new Date(close - 600000).toISOString(), attempt: 1, maxEntryAttempts: 3 }]);
   assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOA", "session_close"]]);
+});
+test("a run from an earlier strategy version says so when configured again, rather than claiming different settings", t => {
+  const f = fixture(t); f.service.paper.configure(setup);
+  const path = join(f.directory, "paper", setup.runId, String(f.service.paper.status(setup.runId).revision).padStart(8, "0") + ".json");
+  const value = JSON.parse(readFileSync(path, "utf8")); value.version = "0.8.0"; writeFileSync(path, JSON.stringify(value));
+  assert.throws(() => f.service.paper.configure(setup), /strategy version 0\.8\.0; configure a new run ID/);
 });
 test("corrupt checkpoint cannot resume a fabricated reservation", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);

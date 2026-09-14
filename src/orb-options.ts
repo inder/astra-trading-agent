@@ -8,7 +8,7 @@ export interface OrbOptionsConfig {
   maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
   feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
   maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number; rangeDeadlineMs: number; readFailureHaltMs: number;
-  maxEntryQuoteBatches: number; heartbeatMs: number;
+  maxEntryQuoteBatches: number; maxEntryAttempts: number; heartbeatMs: number;
   includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
 }
 /** The opening range: the first two minutes of the regular session. A new run must start before it completes. */
@@ -44,17 +44,21 @@ export const SETTINGS = {
   readFailureHaltMs: { default: 60_000, min: 5000, max: 900_000 },
   // Entry quoting: batches of the nearest strikes quoted before giving up (15 x 20 = the old whole-catalog cap of 300).
   maxEntryQuoteBatches: { default: 3, min: 1, max: 15 },
+  // Entry attempts per stock per day (founder rule): an attempt whose own stock quote is back at or below the opening high
+  // returns the stock to watching, so a later breakout still enters while the low holds. 1 = the first attempt only.
+  maxEntryAttempts: { default: 3, min: 1, max: 10 },
   // Journal heartbeat: latest prices, the price range seen, marks and read failures, between state changes.
   heartbeatMs: { default: 60_000, min: 5000, max: 600_000 },
 } as const;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
-  const c = raw as OrbOptionsConfig;
+  // A plan saved before maxEntryAttempts existed takes its default, so saved runs still resume after an upgrade.
+  const c = (raw && typeof raw === "object" && !("maxEntryAttempts" in raw) ? { ...raw, maxEntryAttempts: SETTINGS.maxEntryAttempts.default } : raw) as OrbOptionsConfig;
   const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
     "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
     "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs", "rangeDeadlineMs", "readFailureHaltMs",
-    "maxEntryQuoteBatches", "heartbeatMs",
+    "maxEntryQuoteBatches", "maxEntryAttempts", "heartbeatMs",
     "includePremarketLeadMinutes", "entryWindowMinutes", "flattenLeadMinutes"];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
@@ -72,7 +76,8 @@ export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
     c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
     !inRange(c.pollMs, SETTINGS.pollMs) || !inRange(c.maxQuoteAgeMs, SETTINGS.maxQuoteAgeMs) || !inRange(c.maxObservationGapMs, SETTINGS.maxObservationGapMs) ||
     !inRange(c.rangeDeadlineMs, SETTINGS.rangeDeadlineMs) || !inRange(c.readFailureHaltMs, SETTINGS.readFailureHaltMs) ||
-    !inRange(c.maxEntryQuoteBatches, SETTINGS.maxEntryQuoteBatches) || !inRange(c.heartbeatMs, SETTINGS.heartbeatMs) || c.heartbeatMs < c.pollMs ||
+    !inRange(c.maxEntryQuoteBatches, SETTINGS.maxEntryQuoteBatches) || !inRange(c.maxEntryAttempts, SETTINGS.maxEntryAttempts) ||
+    !inRange(c.heartbeatMs, SETTINGS.heartbeatMs) || c.heartbeatMs < c.pollMs ||
     // A poll must fit inside the gap twice (one missed poll is not a gap) and a quote must be allowed to age one poll.
     c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs || c.readFailureHaltMs < 2 * c.pollMs ||
     ![0, 2].includes(c.includePremarketLeadMinutes) ||
@@ -235,10 +240,12 @@ interface SymbolState {
   lastTradeMs: number | null; lastObservationMs: number | null; lastPrice: number | null;
   /** While the range's bars are pending: the lowest trade observed at or after the range's end, judged by setRange. */
   lowAfterRangeEnd: number | null;
+  /** Entries started today; an aborted attempt may return the stock to watching until maxEntryAttempts are used. */
+  entryAttempts: number;
   position: Position | null; pendingSale: number; pendingReason: SaleReason | null;
 }
 export type OrbIntent =
-  | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; range: SetupRange }
+  | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; observedAt: number; range: SetupRange }
   | { kind: "sell_to_close"; reason: SaleReason; symbol: string; contractId: string; quantity: number; stockPrice: number | null; at: number;
       optionBid?: number; targets?: number[] };
 export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPositions: number }
@@ -252,7 +259,7 @@ export class OrbOptionsEngine {
     this.config = parseOrbOptionsConfig(config);
     this.#rangeEndMs = sessionTimes(this.config.date).open + this.config.openingRangeMinutes * 60000;
     this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null,
-      lastTradeMs: null, lastObservationMs: null, lastPrice: null, lowAfterRangeEnd: null, position: null, pendingSale: 0, pendingReason: null }]));
+      lastTradeMs: null, lastObservationMs: null, lastPrice: null, lowAfterRangeEnd: null, entryAttempts: 0, position: null, pendingSale: 0, pendingReason: null }]));
   }
   setRange(symbol: string, range: OpeningRange): void {
     const s = this.#need(symbol);
@@ -299,7 +306,7 @@ export class OrbOptionsEngine {
       // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
       if (at >= this.entryDeadline()!) this.disqualify(symbol, "entry_window_closed");
       else if (stockPrice < s.openingRange.low) this.disqualify(symbol, "opening_low_failed");
-      else if (stockPrice > s.openingRange.high) return this.#reserve(symbol, stockPrice, at, { ...structuredClone(s.openingRange), setup: "opening_range" });
+      else if (stockPrice > s.openingRange.high) return this.#reserve(symbol, stockPrice, at, observedAt, { ...structuredClone(s.openingRange), setup: "opening_range" });
     }
     if (s.status !== "open" || !s.position || !s.range || s.pendingSale) return [];
     const p = s.position;
@@ -335,9 +342,15 @@ export class OrbOptionsEngine {
       targetsSold: 0, userSold: 0, stage: "initial" };
     s.status = "open";
   }
-  failEntry(symbol: string): void {
+  /** An entry that did not happen. retry (the entry's own quote did not confirm the breakout) returns the stock to
+   *  watching while attempts remain, so a later breakout can enter. retry.newerPrice is that quote when it is a later
+   *  trade: beneath the low, it ends the day as any observed trade there does. Every other failure ends the day. */
+  failEntry(symbol: string, retry?: { newerPrice: number | null }): "watching" | "skipped" | "disqualified" {
     const s = this.#need(symbol); if (s.status !== "entry_pending") throw new Error("No pending entry");
-    s.status = "skipped"; this.#reserved--;
+    this.#reserved--;
+    if (retry?.newerPrice != null && s.openingRange && retry.newerPrice < s.openingRange.low) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
+    else s.status = retry && s.entryAttempts < this.config.maxEntryAttempts ? "watching" : "skipped";
+    return s.status;
   }
   confirmSale(symbol: string, quantity: number): void {
     const s = this.#need(symbol), p = s.position;
@@ -376,11 +389,15 @@ export class OrbOptionsEngine {
     if (!raw || !raw.symbols || Object.keys(raw.symbols).length !== this.config.symbols.length ||
       !Number.isInteger(raw.reservedPositions) || raw.reservedPositions < 0 || raw.reservedPositions > this.config.maximumPositions)
       throw new Error("Invalid engine checkpoint");
-    let reserved = 0;
+    let reserved = 0; const attempts = new Map<string, number>();
     for (const symbol of this.config.symbols) {
       const s = raw.symbols[symbol];
       if (!s || !["forming", "watching", "disqualified", "open", "closed", "skipped"].includes(s.status) || s.pendingSale !== 0 || s.pendingReason !== null)
         throw new Error("Checkpoint contains incomplete transaction");
+      // Checkpoints saved before attempts were counted: an entered stock used one, any other none.
+      const used = s.entryAttempts ?? (["open", "closed"].includes(s.status) ? 1 : 0); attempts.set(symbol, used);
+      if (!Number.isSafeInteger(used) || used < 0 || used > this.config.maxEntryAttempts ||
+        (["open", "closed"].includes(s.status) && used < 1)) throw new Error("Invalid saved entry attempts");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
         (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)) ||
         !(s.lowAfterRangeEnd === null || ((s.status === "forming" || s.status === "disqualified") && Number.isFinite(s.lowAfterRangeEnd) && s.lowAfterRangeEnd > 0)))
@@ -399,14 +416,15 @@ export class OrbOptionsEngine {
       } else if (s.position) throw new Error("Unexpected saved position");
     }
     if (reserved !== raw.reservedPositions) throw new Error("Invalid saved risk reservations");
-    this.#state = new Map(this.config.symbols.map(symbol => [symbol, structuredClone(raw.symbols[symbol]!)])); this.#reserved = reserved;
+    this.#state = new Map(this.config.symbols.map(symbol => [symbol, { ...structuredClone(raw.symbols[symbol]!), entryAttempts: attempts.get(symbol)! }]));
+    this.#reserved = reserved;
   }
-  #reserve(symbol: string, stockPrice: number, at: number, range: SetupRange): OrbIntent[] {
+  #reserve(symbol: string, stockPrice: number, at: number, observedAt: number, range: SetupRange): OrbIntent[] {
     const s = this.#need(symbol);
     if (s.status !== "watching") return [];
     if (this.#reserved >= this.config.maximumPositions) { s.status = "skipped"; return []; }
-    s.status = "entry_pending"; s.range = structuredClone(range); this.#reserved++;
-    return [{ kind: "enter_calls", setup: range.setup, symbol, stockPrice, at, range: structuredClone(range) }];
+    s.status = "entry_pending"; s.range = structuredClone(range); this.#reserved++; s.entryAttempts++;
+    return [{ kind: "enter_calls", setup: range.setup, symbol, stockPrice, at, observedAt, range: structuredClone(range) }];
   }
   #need(symbol: string): SymbolState { const s = this.#state.get(symbol); if (!s) throw new Error("Symbol outside run universe"); return s; }
 }

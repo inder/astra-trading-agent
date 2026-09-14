@@ -135,6 +135,7 @@ export function timeline(result: ReplayResult): string[] {
     if (e.type === "opening_range") lines.push(`${at}  ${d.symbol}  opening range ${d.range.low}-${d.range.high}`);
     else if (e.type === "setup_disqualified") lines.push(`${at}  ${d.symbol}  out for the day: ${d.reason}${d.price ? ` (traded ${d.price})` : d.lowSeen ? ` (low ${d.lowSeen} seen while the range was pending)` : ""}`);
     else if (e.type === "entry_skipped") lines.push(`${at}  ${d.symbol}  entry skipped: ${d.reason}`);
+    else if (e.type === "entry_aborted") lines.push(`${at}  ${d.symbol}  entry attempt ${d.attempt} of ${d.maxEntryAttempts} stopped: ${d.reason} (quote ${d.price}); watching again`);
     else if (e.type === "paper_entry") lines.push(`${at}  ${d.symbol}  BUY ${d.quantity} x ${d.strike} call exp ${d.expiration} at ${d.assumedFill} MODELED; stock ${d.stockPrice}; committed ${dollars(d.committedCents)}`);
     else if (e.type === "exit_triggered") lines.push(`${at}  ${d.symbol}  ${d.exit} triggered at stock ${d.stockPrice}`);
     else if (e.type === "paper_sale") lines.push(`${at}  ${d.symbol}  SELL ${d.quantity} (${d.reason}${d.targets ? ` ${d.targets.join("x, ")}x` : ""}) at ${d.assumedFill} MODELED; stock ${d.stockPrice}; P&L ${dollars(d.realizedPnlCents)}`);

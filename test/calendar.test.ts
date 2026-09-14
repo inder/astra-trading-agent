@@ -49,6 +49,8 @@ test("a date outside the calendar is an explicit coverage error, never a silent 
   assert.throws(() => preferredWeeklyExpiration(all, "2028-01-03"), /Unsupported trade date/);
   assert.equal(isTradingDay("2027-06-18"), false); assert.equal(isTradingDay("2027-07-05"), false); assert.equal(isTradingDay("2027-12-31"), true);
 });
+/** The breakout that started the attempt (106 at the first tick after the range) and its count, journaled with any skip. */
+const firstAttempt = { triggerPrice: 106, triggerTradeAt: new Date(open + 121000).toISOString(), triggerRetrievedAt: new Date(open + 121000).toISOString(), attempt: 1, maxEntryAttempts: 3 };
 test("an unlisted target expiry reaches the journal as a named policy skip", async t => {
   const provider: OrbOptionSource = {
     async equityCallChains(symbol) { return { data: { chains: [{ id: "11111111-1111-1111-1111-111111111111", symbol, can_open_position: true,
@@ -64,12 +66,12 @@ test("an unlisted target expiry reaches the journal as a named policy skip", asy
   f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
   f.advance(); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);
   const skips = f.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events).filter(e => e.type === "entry_skipped");
-  assert.deepEqual(skips.map(e => e.data), [{ symbol: "DEMOA", reason: "no_qualifying_expiry" }]);
+  assert.deepEqual(skips.map(e => e.data), [{ symbol: "DEMOA", reason: "no_qualifying_expiry", ...firstAttempt }]);
 });
 test("a calendar gap and a data failure reach the journal as different skip reasons", async t => {
   for (const [thrown, expected] of [
-    [new CalendarCoverageError("Exchange calendar does not cover 2028"), { symbol: "DEMOA", reason: "calendar_not_covered" }],
-    [new Error("broker 503"), { symbol: "DEMOA", reason: "data_unavailable", detail: "broker 503" }],
+    [new CalendarCoverageError("Exchange calendar does not cover 2028"), { symbol: "DEMOA", reason: "calendar_not_covered", ...firstAttempt }],
+    [new Error("broker 503"), { symbol: "DEMOA", reason: "data_unavailable", detail: "broker 503", ...firstAttempt }],
   ] as const) {
     const f = fixture(t);
     f.market.contracts = async () => { throw thrown; };

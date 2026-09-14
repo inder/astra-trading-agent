@@ -84,15 +84,21 @@ export class OrbPaperRuntime implements PaperRuntime {
   async #handle(intent: OrbIntent, fetched?: CallQuote): Promise<PaperEvent[]> {
     if (intent.kind === "enter_calls") {
       const c = this.#config; let quotes: CallQuote[] = [], batches = 0;
+      let stock: Awaited<ReturnType<PaperMarket["quotes"]>>[number] | undefined;
       try {
         if (this.#clock() >= this.#session.close - c.flattenLeadMinutes * 60000) throw new EntrySkip("too_close_to_session_end");
         // Catalog first (prefetched before 9:32, else loaded now), then the fresh stock quote, then the nearest strikes' quotes.
         let catalog = this.#catalogs.get(intent.symbol);
         if (!catalog) { catalog = await this.#counted("catalog", () => this.#loadCatalog(intent.symbol)); this.#catalogs.set(intent.symbol, catalog); }
         if ("skip" in catalog) throw new EntrySkip(catalog.skip);
-        const stock = (await this.#counted("quotes", () => this.#market.quotes([intent.symbol])))[0];
+        stock = (await this.#counted("quotes", () => this.#market.quotes([intent.symbol])))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
-        if (stock!.price! <= intent.range.high) throw new EntrySkip("breakout_reversed", { price: stock!.price, tradeAt: stock!.tradeAt });
+        if (stock!.price! <= intent.range.high) {
+          // Only a later trade shows a reversal. A quote no newer than the trade that triggered the attempt says nothing
+          // new (the engine ignores such trades too), so the attempt stops without calling it a reversal.
+          const seen = { price: stock!.price, tradeAt: stock!.tradeAt, retrievedAt: stock!.retrievedAt };
+          throw new EntrySkip(Date.parse(stock!.tradeAt!) > intent.at ? "breakout_reversed" : "entry_quote_not_newer", seen);
+        }
         // Committed premium never decreases (proceeds never replenish the budget), so the day cap is spent, not recycled.
         const capCents = Math.min(c.budgetCentsPerPosition, c.budgetCentsPerDay - this.#saved.committedCents);
         // Nearest strikes first, a batch at a time: the first batch holding any qualifying strike holds the nearest one.
@@ -120,7 +126,17 @@ export class OrbPaperRuntime implements PaperRuntime {
         // Rule decisions and calendar gaps are named, so a review can tell a policy skip from a data problem.
         const reason = error instanceof EntrySkip ? error.reason : error instanceof CalendarCoverageError ? "calendar_not_covered" : "data_unavailable";
         const evidence = error instanceof EntrySkip ? error.evidence : reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
-        this.#engine.failEntry(intent.symbol); return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...evidence } }];
+        // An entry quote that did not confirm the breakout returns the stock to watching while attempts remain (founder
+        // rule); a later trade beneath the low ends its day. Every other failure keeps ending the day, as before.
+        const retry = reason === "breakout_reversed" ? { newerPrice: stock!.price! } : reason === "entry_quote_not_newer" ? { newerPrice: null } : undefined;
+        const next = this.#engine.failEntry(intent.symbol, retry);
+        // The breakout that started the attempt is journaled beside the entry's own quote, so a review can compare them.
+        const attempt = { triggerPrice: intent.stockPrice, triggerTradeAt: iso(intent.at), triggerRetrievedAt: iso(intent.observedAt),
+          attempt: this.#engine.snapshot().symbols[intent.symbol]!.entryAttempts, maxEntryAttempts: c.maxEntryAttempts };
+        if (next === "watching") return [{ type: "entry_aborted", data: { symbol: intent.symbol, reason, ...evidence, ...attempt } }];
+        // A later trade beneath the low ends the day like any observed trade there, journaled as the low failing.
+        if (next === "disqualified") return [{ type: "setup_disqualified", data: { symbol: intent.symbol, reason: "opening_low_failed", ...evidence, during: reason, ...attempt } }];
+        return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...evidence, ...attempt } }];
       }
     }
     // A stock-triggered sell-everything exit is executed by this tick's option batch: one quote request per tick however many
@@ -222,9 +238,9 @@ export class OrbPaperRuntime implements PaperRuntime {
       const intents = this.#engine.observe(q.symbol, q.price!, Date.parse(q.tradeAt!), observedAt);
       for (const intent of intents) events.push(...await this.#handle(intent));
       // Journal the rule that ended watching (opening low, gap, late first quote) with the observation behind it; a gap
-      // also names its other end, which the engine no longer holds after this tick.
+      // also names its other end, which the engine no longer holds after this tick. An entry attempt journals its own end.
       const after = this.#engine.snapshot().symbols[q.symbol]!;
-      if ((state.status === "watching" || state.status === "forming") && after.status === "disqualified")
+      if ((state.status === "watching" || state.status === "forming") && after.status === "disqualified" && !intents.length)
         events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt,
           ...(after.endReason === "observation_gap" && state.lastObservationMs !== null && state.lastTradeMs !== null
             ? { previousObservedAt: iso(state.lastObservationMs), previousTradeAt: iso(state.lastTradeMs) } : {}) } });

@@ -22,14 +22,229 @@ production trading system or a claim of strategy profitability.
 
 ## Quick start
 
-### Install through your coding agent
+Astra works inside the AI app you already use, such as Codex or Claude Code. You
+talk to it in plain English. It watches the stocks you pick at the market open and
+simulates option trades on real Robinhood prices. **Paper only: it never places
+real orders, and no money moves.**
 
-One-line prompt for your chatbot:
+### 1. Install it with one prompt
+
+Paste this into Codex or Claude Code:
 
 > Install Astra Trading Agent for Robinhood from https://github.com/inder/astra-trading-agent using its INSTALL.md instructions.
 
-Give a locally capable coding agent this repository URL and ask it to install
-Astra. [INSTALL.md](INSTALL.md) is the agent-facing runbook: prerequisites,
+Your app downloads Astra, checks it and adds it to itself. You may be asked to
+allow a command. It ends with one thing for you to do:
+
+> **Your app:** Quit and reopen Codex, then send any message (for example, "hi"). Astra will guide you from there: connecting Robinhood market data, choosing stocks, and starting a paper run.
+
+The app needs to be able to run commands on your computer. Chat apps that can't
+(such as Claude on the web) can't install it; see [Advanced](#advanced).
+
+### 2. Talk to Astra
+
+Below is a replayed session. The replies come from Astra's real tools, run on a
+simulated trading day (Tuesday, September 15, 2026) with **invented prices** for
+CRWV, HPE and SMCI. Your session uses live Robinhood prices, and the wording
+depends on your AI app.
+
+#### Get started
+
+**You:** hi, what can you do?
+
+> **Astra:** I'm installed and working. Setup has three steps: connect Robinhood market data, pick the stocks to watch, then start a paper run on a trading morning.
+>
+> I watch the stocks you pick at the market open and simulate option trades on real Robinhood prices. I never place real orders, and no money moves. To see those prices I need read-only access to Robinhood market data, which you approve on Robinhood's own website; I never see your password.
+>
+> Shall I create the Robinhood link now, or would you like a practice run on made-up prices first?
+
+**You:** Show me a practice run first.
+
+> **Astra:** Here's a practice run on made-up prices, with three pretend stocks (DEMOA, DEMOB, DEMOC) on a fixed sample day. Nothing real was traded.
+>
+> - All three set an opening range of $100 to $101 in the first two minutes.
+> - DEMOA and DEMOB then traded at $101.10, above the high, so I bought 4 call contracts on each.
+> - DEMOC broke out too but was skipped: the plan allows 2 stocks a day.
+> - DEMOA's option kept climbing: 2 contracts sold at 2× the entry price, 1 at 3× and the last at 5×.
+> - DEMOB fell back below its $100 opening low, so its stop sold everything.
+>
+> There's no P&L for this practice run: the made-up data has no option price at DEMOB's stop, so I leave it blank rather than guess.
+
+**You:** Which strategies do you have?
+
+> **Astra:** One: **Opening-range call options** (version 0.9.0). The first two minutes after the open set each stock's high and low. A trade above the high buys call options; a trade below the low first ends that stock's day.
+
+#### Connect Robinhood
+
+**You:** Connect my Robinhood.
+
+> **Astra:** Open this link in a browser on this computer, sign in to Robinhood if asked, review the requested access and approve it: *(Robinhood approval link)*. I only use market-data reads; my code blocks order tools. I'm checking automatically, so there's no need to type "done".
+
+*(You approve on Robinhood's page.)*
+
+> **Astra:** Robinhood is connected. Next, let's plan a paper run for Tuesday, September 15. Which stocks should I watch? Pick 3 to 5 that trade heavily and have weekly options. I enter at most 2 stocks a day, so extras give me choices.
+
+**You:** Is Robinhood still connected?
+
+> **Astra:** Yes. Quotes and price history are available, and order submission is off. The approval lasts until this app restarts.
+
+#### Plan the day
+
+**You:** Watch CRWV, HPE, SMCI and CRVW.
+
+> **Astra:** CRWV ($90.85), HPE ($60.55) and SMCI ($39.95) all work: each has the Friday, September 18 options my entry rule needs. CRVW got no price from Robinhood, so check the spelling. Did you mean CRWV?
+
+**You:** What are they trading at right now?
+
+> **Astra:** Premarket, as of 8:29 AM ET: CRWV $90.85, HPE $60.55, SMCI $39.95. These are before the 9:30 open, not regular-session prices.
+
+**You:** Use CRWV, HPE and SMCI, with $1,000 per trade and $2,000 for the day.
+
+> **Astra:** Here's the plan for Tuesday, September 15, on paper only:
+>
+> - Watches CRWV, HPE, SMCI; new entries until 11:00 AM ET.
+> - Up to 2 stocks, $1,000 per trade and $2,000 per day in paper premium.
+> - Buys the call closest to the stock price where at least 4 contracts fit, expiring Friday, September 18.
+> - Exits at 2×, 3× and 5×; a safety stop at 50% of the entry price; everything left sells at 3:59 PM ET.
+>
+> Premium is treated as money you can lose in full. Save it and start?
+
+**You:** Yes, start it.
+
+> **Astra:** Run orb-2026-09-15 is running, watching CRWV, HPE and SMCI. It waits for the 9:30 AM ET open; each stock's opening range is set by 9:32 AM ET. Keep this app open until 4:00 PM ET. If it closes, monitoring stops, but open positions are kept and can be resumed.
+
+#### During the day
+
+**You** *(9:36 AM)***:** What did you buy?
+
+> **Astra:** One position: 4 CRWV $92 calls expiring Friday, September 18, bought at $2.15 when CRWV was $91.95. That commits $864 of the $2,000 day budget. The bid is $2.07 now, so it's down $32 on paper. If CRWV trades below $90.11, the stop sells everything; the safety stop sells if the option falls to $1.08.
+
+**You:** Why not HPE? And did you try CRWV more than once?
+
+> **Astra:** The opening ranges were set at 9:32: CRWV $90.20 to $91.80, HPE $60.10 to $61.00, SMCI $39.60 to $40.30.
+>
+> - **HPE** traded at $60.05 at 9:33:08, below its $60.10 low, so it's out for the day.
+> - **CRWV** broke out at 9:33:10 at $91.95. My own check a moment later showed $91.70, back under the high, so I waited instead of buying. Two seconds later it was at $91.95 again, and I bought.
+> - **SMCI** is still inside its range and can enter until 11:00.
+
+**You** *(10:15 AM)***:** How am I doing today?
+
+> **Astra:** Up $868 on paper. CRWV's option doubled: 2 of the 4 contracts sold at $4.32 for +$434, which covers the premium you paid. The other 2 are worth $4.32 each, another +$434 on paper. The stop has moved to breakeven, so CRWV back at $91.95 sells the rest. Fees aren't included.
+
+**You:** Trim 25% of my CRWV position.
+
+> **Astra:** 25% of 2 contracts rounds to 1 contract. Approve the sale on this page in your browser; it expires in 2 minutes: *(review link)*. Only you can approve it; I can't.
+
+*(You click "Approve simulated sale".)*
+
+**You:** Did it go through?
+
+> **Astra:** Yes. 1 CRWV contract sold at $4.32, +$217. You have 1 left.
+
+#### Stop, restart and pick up again
+
+**You** *(10:30 AM)***:** Stop watching for now.
+
+> **Astra:** Stopped. Your 1 CRWV contract is kept, but its automatic exits are off. Anything still held at the close counts as a total loss. Want me to resume managing it?
+
+*(You restart your computer and reopen the app.)*
+
+**You:** I restarted my computer. Where were we?
+
+> **Astra:** Run orb-2026-09-15 is stopped with 1 open CRWV contract. To manage it I need Robinhood prices again, and approvals last only until a restart. Please approve here: *(Robinhood approval link)*.
+
+*(You approve on Robinhood's page.)*
+
+> **Astra:** Connected. Resume managing the position now?
+
+**You:** Yes.
+
+> **Astra:** Resumed. I'm managing your CRWV contract again: targets, stops and the 3:59 PM ET close-out. No more entries today: after a gap I never open new trades.
+
+**You:** Close everything.
+
+> **Astra:** That's your 1 CRWV contract. Approve the sale here: *(review link)*.
+
+*(You approve it in the browser.)*
+
+> **Astra:** Closed. 1 contract sold at $4.32, +$217. Nothing is held now.
+
+**You:** How did today go?
+
+> **Astra:** +$868 on paper, all realized, from $864 of premium. CRWV's 4 contracts all sold at $4.32: 2 at the 2× target, 1 in your trim and 1 when you closed. HPE dropped out at the open, and SMCI hadn't broken out when you stopped. After the resume I don't open new trades. Fees aren't included.
+
+#### Plans, history and settings
+
+**You:** Set up tomorrow with CRWV and SMCI: at most one stock, $500, entries until 10:30, and two tries per breakout.
+
+> **Astra:** Saved run orb-2026-09-16 for Wednesday, September 16: CRWV and SMCI, 1 stock at most, $500 per trade and per day, new entries until 10:30 AM ET, up to 2 tries per breakout. It won't start until you say yes tomorrow morning.
+
+**You:** Show my paper runs.
+
+> **Astra:** orb-2026-09-15 is today's: running, with nothing held. orb-2026-09-16 is tomorrow's: saved, not started.
+
+**You:** And my practice runs?
+
+> **Astra:** One: practice-1, on made-up prices, completed.
+
+**You:** What can I change?
+
+> **Astra:** Every number in the plan:
+>
+> - **Money:** premium per trade and per day, and how many stocks a day.
+> - **Contracts:** the fewest per trade, and an optional most per trade.
+> - **Option filter:** the widest bid-ask spread accepted.
+> - **Entries:** how long they stay open after the 9:30 start, and how many tries a stock gets when a breakout slips back under the high before I buy.
+> - **Exits:** the three profit targets (2×, 3×, 5×), the safety stop (50%), how far below the opening low the stop sits (0.1%), and when everything sells before the close (3:59).
+> - **Timing:** how often I check prices and how old a price may be.
+>
+> A few more technical ones are listed in the Advanced section. Changes apply to a new plan; a running plan keeps its settings.
+
+#### What Astra won't do
+
+These follow Astra's rules; no tool is involved.
+
+**You:** Buy 100 shares of NVDA for me.
+
+> **Astra:** I can't. Astra is paper only: it simulates option trades and never places real orders. I can add NVDA to a paper plan instead.
+
+**You:** What's in my Robinhood account?
+
+> **Astra:** I can't see your account. I only read market prices, and my code blocks account and order tools.
+
+**You:** Here's my Robinhood password: …
+
+> **Astra:** Please don't share it. I never need your password: you approve access on Robinhood's own page, and I never see your credentials.
+
+### Everything you can ask
+
+| Ask something like | What Astra does | Tool |
+| --- | --- | --- |
+| "hi" / "What can you do?" / "What's next?" | Explains where you are and the one next step | `get_readiness` |
+| "Which strategies do you have?" | Lists strategies and versions | `list_strategies` |
+| "What would a practice run use?" | Shows a practice plan without running it | `preview_strategy` |
+| "Show me a practice run" | Runs made-up prices through the strategy | `run_sample` |
+| "Show my practice runs" / "What happened in that practice run?" | Lists them, or explains one | `list_runs`, `get_run` |
+| "Connect my Robinhood" | Gives you a Robinhood link and waits for your approval | `connect_robinhood`, `wait_for_robinhood` |
+| "Is Robinhood connected?" | Reports the connection and what it can read | `get_broker_status` |
+| "Can you watch CRWV, HPE, SMCI?" | Checks each ticker has a price and the options it needs | `check_symbols` |
+| "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
+| "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
+| "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
+| "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
+| "Why didn't it buy HPE?" / "What happened this morning?" | Explains each decision from the journal | `get_paper_events` |
+| "How am I doing today?" | The day's paper P&L | `get_daily_pnl` |
+| "Trim 25% of CRWV" / "Close everything" | Proposes the sale; you approve it in your browser | `propose_position_change` |
+| "Did my trim go through?" | Reports whether you approved and what sold | `get_position_review` |
+| "Stop watching" | Stops monitoring and keeps positions (their exits pause) | `stop_paper_run` |
+| "Show my paper runs" / "Where were we?" | Lists runs and any that need resuming | `list_paper_runs` |
+| "Resume" | Manages existing positions again; no new entries | `resume_paper_run` |
+
+## Advanced
+
+### Install through your coding agent
+
+[INSTALL.md](INSTALL.md) is the agent-facing runbook: prerequisites,
 verification, client registration, preservation of existing settings, and
 Robinhood onboarding. The agent performs the mechanics; the user handles any
 required permissions and browser consent. A chat client without local execution
@@ -47,6 +262,10 @@ Astra entries require explicit review. Client permission/reload and Robinhood
 browser consent are not bypassed. See the [acceptance criteria](docs/INSTALLATION-ACCEPTANCE.md)
 for exactly what has and has not been tested; ordinary Claude web chat does not
 become a local installer merely by receiving a URL.
+
+The Quick start replies were produced by `node scripts/quickstart-session.ts`,
+which drives every tool through a simulated day with a fake Robinhood login and
+invented prices. It needs no network or credentials.
 
 ### Manual installation
 
@@ -68,7 +287,7 @@ It invents option bids for the targets but not for the stop, so P&L is unavailab
 not zero. The sample
 date is fixed to September 8, 2026; symbols are labels, not fetched market data.
 
-## Connect a local MCP client
+### Connect a local MCP client
 
 Use your client's local stdio MCP configuration. Substitute absolute paths on
 your machine; the command must point to Node.js 24+.
@@ -85,17 +304,16 @@ your machine; the command must point to Node.js 24+.
 }
 ```
 
-Ask naturally: “Which strategies are available?”, “What needs connecting?”,
-“Preview an opening-range sample for DEMOA and DEMOB”, “Run that sample”, or
-“Explain the decisions in my last run.” The connected model translates these
-requests into MCP calls. The server itself is not an embedded LLM or a fixed
-question router. Client access, configuration and model permissions vary.
+Ask naturally, as in the [Quick start](#2-talk-to-astra). The connected model
+translates these requests into MCP calls. The server itself is not an embedded
+LLM or a fixed question router. Client access, configuration and model
+permissions vary.
 
 Start stdio directly with `npm start` (waiting silently for MCP input is normal).
 For client configurations, invoke Node directly rather than npm so npm banners
 cannot contaminate protocol stdout.
 
-### Local HTTP development
+#### Local HTTP development
 
 Streamable HTTP is also available on loopback only. Set
 `TRADING_AGENT_MCP_TOKEN` to a randomly generated secret of at least 32 characters
@@ -115,7 +333,7 @@ data directory, paper controls and broker read connection: this release is
 single-owner, not multi-tenant. Keep the HTTP process running independently of
 the chat client if strategies need to continue after the chat disconnects.
 
-## Tools
+### Tools
 
 | Tool | Purpose |
 | --- | --- |
@@ -147,7 +365,7 @@ No tools execute shell commands, accept arbitrary filesystem paths, read account
 positions or submit brokerage orders. The upstream client enforces a runtime
 allowlist of market-data reads even if Robinhood advertises order tools.
 
-## Connect Robinhood independently
+### Connect Robinhood independently
 
 Ask your connected MCP client to connect Robinhood. Open the returned Robinhood
 authorization link in a **desktop browser on the machine running Astra**. Review
@@ -174,7 +392,7 @@ Implementation references: [Robinhood onboarding](https://robinhood.com/us/en/su
 Public metadata was checked on September 9, 2026. No authenticated production
 session is claimed by the mocked OAuth tests.
 
-## Complete paper workflow
+### Complete paper workflow
 
 Use the running MCP server, not the short-lived `connect` diagnostic. Follow the
 [end-to-end walkthrough](docs/PAPER-WORKFLOW.md) for exact inputs and expected
@@ -257,7 +475,7 @@ backstop and the close-out keep working. An outage of option prices alone never
 halts either: exits wait for a fresh bid (never an invented one), the status shows
 `dataGapSince`, and contracts still unsold at the close are written off.
 
-## Replay a past session
+### Replay a past session
 
 `npm run replay -- <date> --fixtures DIR` runs a past session through Astra's own
 paper service on a simulated clock. Real minute bars, which you keep privately
@@ -275,7 +493,7 @@ first, and how the exits must end, each claim labeled when modeled prices decide
 it, plus late-bar, all-day-window and volatility variants. Journals go to
 `DIR/<date>/replay-output` (a new folder per run) unless `--out` says otherwise.
 
-## Persistence and stopping
+### Persistence and stopping
 
 Default data directory: `~/.trading-agent`, overridable with
 `TRADING_AGENT_DATA_DIR` or `--data-dir`. Keep it private and outside the checkout.
@@ -315,7 +533,7 @@ A crash during ownership acquisition can leave an `acquiring` guard. It blocks
 automatic recovery for offline inspection. Never repair ownership while another
 server might still be running.
 
-## Extension and release roadmap
+### Extension and release roadmap
 
 See [architecture](docs/ARCHITECTURE.md), [security](SECURITY.md) and
 [readiness](docs/READINESS.md). Strategy source and historical run records remain

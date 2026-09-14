@@ -105,7 +105,7 @@ function strategyLines(p: Plan, s: SessionInfo): string[] {
   return [
     `Here is what Astra does on ${s.day}, on paper only: simulated trades on real Robinhood prices, no real orders.`,
     `The first ${OPENING_RANGE_MINUTES} minutes after the ${s.opens} open set each stock's opening high and low.`,
-    `If a stock then trades above that high before ${s.entriesUntil}, Astra buys call options on it. If it trades below the low first, that stock is done for the day.`,
+    `If a stock then trades above that high before ${s.entriesUntil}, Astra buys call options on it; if the price is back at or below the high when it goes to buy, it waits for the next breakout. If it trades below the low first, that stock is done for the day.`,
     `Limits: at most ${count(p.positions, "stock")} entered per day, ${dollars(p.perTradeCents)} of option premium per trade and ${dollars(p.perDayCents)} per day.`,
     `Which option: the strike closest to the stock price where at least ${count(p.minimumContracts, "contract")} fit under the per-trade limit, ` +
       (expiry ? `expiring ${expiry} (${rule}).` : `with ${rule}.`),

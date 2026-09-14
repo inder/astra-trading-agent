@@ -217,8 +217,8 @@ quoted. Strikes the exchange adds during the day are not in that morning catalog
 configuring a run (`maxPremiumPerTradeDollars`, `maxPremiumPerDayDollars`,
 `minimumContracts`, `maximumContractsPerTrade`, `maximumPositions`,
 `maxOptionSpreadPercent`, `feeReserveCentsPerContract`, `entryWindowMinutes`,
-`maxEntryQuoteBatches`, and the exit settings below); a run keeps the settings it
-started with.
+`maxEntryQuoteBatches`, `maxEntryAttempts`, and the exit settings below); a run
+keeps the settings it started with.
 The expiry is the first week-ending expiration with at least three trading
 sessions counting the trade day. In a normal week that means Monday–Wednesday
 trades use that week's Friday and Thursday/Friday trades use the following Friday.
@@ -291,8 +291,13 @@ one run reserves each strategy/date. Do not edit journals or reservations to
 reset budgets. The journal records decisions as they happen (each with the
 observation behind it) plus a heartbeat every `heartbeatSeconds` (default 60)
 with the latest prices, the price range seen, marks and read failures, so a
-session is a few hundred revisions, not one per second. No automatic deletion
-policy exists.
+session is a few hundred revisions, not one per second. An entry attempt that
+stops is journaled as `entry_aborted` when the stock is watched again and
+`entry_skipped` when it is done for the day. Both carry the breakout quote that
+started the attempt and the entry's own quote, each with its price, trade time and
+retrieval time. A run is pinned to the strategy version it was configured under: a
+newer version refuses to resume it or configure its run ID again, so configure a
+new run ID after upgrading. No automatic deletion policy exists.
 
 The HTTP timer continues after chat disconnection while its process/computer
 stay running. **Stdio follows its client's process lifetime.** No launch daemon

@@ -43,8 +43,11 @@ allowed, not a fresh allowance every time the program restarts.
 Before 9:32 a.m. New York time, explicitly request `start_paper_run` with
 `{"runId":"my-paper-20260910"}`. Starting earlier is recommended: it waits for
 the first completed two-minute opening candle. Late data, missing history, stale
-options, gaps and unmet conditions can all cause skips. The built-in sample is
-not this authenticated market-data acceptance check.
+options, gaps and unmet conditions can all cause skips. A breakout whose own entry
+quote is back at or below the opening high is not a skip: the stock is watched
+again for a later breakout while its low holds, up to `maxEntryAttempts` (default
+3), and the journal shows it as `entry_aborted`. The built-in sample is not this
+authenticated market-data acceptance check.
 
 ## Inspect and control
 

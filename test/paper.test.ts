@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -334,7 +334,8 @@ test("prefetch failures retry and close at 9:32; a no-expiry catalog is a decisi
   failing = false; f.setTime(open + 120000); journal.push(...await runtime.step());
   assert.deepEqual(journal.filter(e => e.type === "data_gap_ended").map(e => [e.data.source, e.data.reason]), [["catalog", "prefetch_window_closed"]]);
   f.advance(); f.prices.DEMOA = 106; f.prices.DEMOB = 106; journal.push(...await runtime.step());
-  assert.deepEqual(journal.filter(e => e.type === "entry_skipped").map(e => e.data), [{ symbol: "DEMOB", reason: "no_qualifying_expiry" }]);
+  assert.deepEqual(journal.filter(e => e.type === "entry_skipped").map(e => e.data),
+    [{ symbol: "DEMOB", reason: "no_qualifying_expiry", triggerPrice: 106, triggerTradeAt: new Date(open + 121000).toISOString(), triggerRetrievedAt: new Date(open + 121000).toISOString(), attempt: 1, maxEntryAttempts: 3 }]);
   assert.equal(demob, 1, "the decision is reused, not reloaded");
   assert.equal(runtime.view().positions[0]?.symbol, "DEMOA", "DEMOA's catalog loaded at its entry");
 });
@@ -359,7 +360,8 @@ test("an entry quotes the nearest strikes first and widens only while nothing qu
   capped.setTime(open + 120000); await capped.service.paper.tick(setup.runId);
   capped.advance(); capped.prices.DEMOA = 106; await capped.service.paper.tick(setup.runId);
   assert.deepEqual(capped.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
-    { symbol: "DEMOA", reason: "no_qualifying_call_within_quote_batches", quotedContracts: 20, batches: 1 });
+    { symbol: "DEMOA", reason: "no_qualifying_call_within_quote_batches", quotedContracts: 20, batches: 1,
+      triggerPrice: 106, triggerTradeAt: new Date(open + 121000).toISOString(), triggerRetrievedAt: new Date(open + 121000).toISOString(), attempt: 1, maxEntryAttempts: 3 });
 });
 test("a stop that cannot fill during an option outage is journaled once, and each tick asks for option prices once", async t => {
   const f = fixture(t, ["DEMOA"]); await entered(f, ["DEMOA"]);
@@ -398,19 +400,83 @@ test("a failed read during an entry counts in the heartbeat like any other", asy
   f.advance(5000); const later = await runtime.step();
   assert.equal((later.find(e => e.type === "heartbeat")!.data as any).readFailures.quotes, 1);
 });
-test("a breakout with every position slot taken, or one that reverses before the entry quote, is a skip with its evidence", async t => {
+test("a breakout with every position slot taken is a skip with its evidence", async t => {
   const f = fixture(t); await entered(f);
   f.advance(); f.prices.DEMOB = 106; await f.service.paper.tick(setup.runId);
   f.advance(); f.prices.DEMOC = 106.5; await f.service.paper.tick(setup.runId);
   assert.deepEqual(f.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
     { symbol: "DEMOC", reason: "maximum_positions_reached", price: 106.5, tradeAt: new Date(open + 123000).toISOString() });
-  const r = fixture(t, ["DEMOA"]); const quotes = r.market.quotes; let reads = 0;
-  r.market.quotes = async s => { reads++; const got = await quotes(s); return reads === 3 ? got.map(q => ({ ...q, price: 104.5 })) : got; };
-  r.service.paper.configure({ ...setup, symbols: ["DEMOA"] }); await r.service.paper.start(setup.runId);
+});
+/** A one-stock run (range 100–105). Each tick reads one quote batch; a tick that sees a breakout reads the entry's own
+ *  quote next. That quote takes entry[i].price, as a later trade (300 ms on), the same trade time, or an older trade. */
+type EntryQuote = { price: number; trade?: "later" | "same" | "older" };
+async function reversing(t: TestContext, entry: EntryQuote[], settings: Record<string, unknown> = {}) {
+  const r = fixture(t, ["DEMOA"]); const quotes = r.market.quotes; let entries = 0, entryNext = false;
+  r.market.quotes = async s => {
+    if (entryNext) {
+      entryNext = false; const e = entry[entries++];
+      if (!e) return quotes(s);
+      if ((e.trade ?? "later") === "later") r.advance(300);
+      const got = await quotes(s);
+      return got.map(q => ({ ...q, price: e.price, ...(e.trade === "older" ? { tradeAt: new Date(Date.parse(q.retrievedAt) - 2000).toISOString() } : {}) }));
+    }
+    const got = await quotes(s); entryNext = r.prices.DEMOA! > 105; return got;
+  };
+  r.service.paper.configure({ ...setup, symbols: ["DEMOA"], ...settings }); await r.service.paper.start(setup.runId);
   r.setTime(open + 120000); await r.service.paper.tick(setup.runId);
-  r.advance(); r.prices.DEMOA = 106; await r.service.paper.tick(setup.runId);   // observed above the high; the entry's own quote is back inside
-  assert.deepEqual(r.service.paper.status(setup.runId).events.find(e => e.type === "entry_skipped")?.data,
-    { symbol: "DEMOA", reason: "breakout_reversed", price: 104.5, tradeAt: new Date(open + 121000).toISOString() });
+  const journal = () => r.service.paper.events(setup.runId, -1, 100).flatMap(p => p.events);
+  const of = (type: string) => journal().filter(e => e.type === type).map(e => e.data as any);
+  return { r, journal, of, breakout: async (price: number) => { r.advance(); r.prices.DEMOA = price; await r.service.paper.tick(setup.runId); } };
+}
+const at = (ms: number) => new Date(open + ms).toISOString();
+test("a breakout that reverses before the entry quote returns to watching while the low holds, and a later breakout enters once (CRWV, 2026-09-14)", async t => {
+  const { r, of, breakout } = await reversing(t, [{ price: 104.5 }]);
+  await breakout(106);   // observed above the high at 121 s; the entry's own quote, a later trade, is back inside the range
+  assert.deepEqual(of("entry_aborted"), [{ symbol: "DEMOA", reason: "breakout_reversed", price: 104.5, tradeAt: at(121300), retrievedAt: at(121300),
+    triggerPrice: 106, triggerTradeAt: at(121000), triggerRetrievedAt: at(121000), attempt: 1, maxEntryAttempts: 3 }]);
+  assert.deepEqual([of("entry_skipped").length, r.service.paper.status(setup.runId).view.positions.length, r.service.paper.status(setup.runId).view.committedCents],
+    [0, 0, 0], "no terminal skip, no position, no premium committed");
+  await breakout(106.5);   // the low held; the next breakout confirms on its own quote and enters
+  await breakout(107);
+  assert.equal(of("paper_entry").length, 1, "enters once");
+  const view = r.service.paper.status(setup.runId).view;
+  assert.deepEqual([view.positions[0]?.symbol, view.committedCents > 0], ["DEMOA", true]);
+});
+test("attempts are a setting: at one, a reversal ends the day; at the default three, the third reversal does", async t => {
+  const one = await reversing(t, [{ price: 104.5 }], { maxEntryAttempts: 1 });
+  await one.breakout(106); await one.breakout(106.5);
+  assert.deepEqual([one.of("entry_aborted").length, one.of("entry_skipped").map(d => [d.reason, d.attempt, d.maxEntryAttempts])], [0, [["breakout_reversed", 1, 1]]]);
+  assert.equal(one.of("paper_entry").length, 0);
+  const three = await reversing(t, [{ price: 104.5 }, { price: 104.6 }, { price: 104.7 }]);
+  for (const price of [106, 106.1, 106.2, 106.3]) await three.breakout(price);
+  assert.deepEqual([three.of("entry_aborted").map(d => d.attempt), three.of("entry_skipped").map(d => d.attempt)], [[1, 2], [3]]);
+  assert.equal(three.of("paper_entry").length, 0, "no fourth attempt");
+  assert.equal(three.r.service.paper.status(setup.runId).view.committedCents, 0);
+});
+test("a later entry quote beneath the opening low ends the day for the stock, journaled as the low failing", async t => {
+  const { of, breakout } = await reversing(t, [{ price: 99.5 }]);
+  await breakout(106); await breakout(106.5);
+  assert.deepEqual(of("setup_disqualified").map(d => [d.reason, d.during, d.price, d.attempt]), [["opening_low_failed", "breakout_reversed", 99.5, 1]]);
+  assert.deepEqual([of("entry_aborted").length, of("entry_skipped").length, of("paper_entry").length], [0, 0, 0]);
+});
+test("an entry quote no newer than the breakout trade is not a reversal: it stops the attempt without judging its price", async t => {
+  // Same trade time, then an older trade beneath the low: neither is a later market move, so neither reverses or ends the day.
+  const { of, breakout } = await reversing(t, [{ price: 104.5, trade: "same" }, { price: 99.5, trade: "older" }]);
+  await breakout(106); await breakout(106.5); await breakout(106.8);
+  assert.deepEqual(of("entry_aborted").map(d => [d.reason, d.price, d.tradeAt < d.triggerTradeAt || d.tradeAt === d.triggerTradeAt]),
+    [["entry_quote_not_newer", 104.5, true], ["entry_quote_not_newer", 99.5, true]]);
+  assert.deepEqual([of("setup_disqualified").length, of("paper_entry").length], [0, 1], "the third breakout confirms and enters");
+});
+test("after a reversal the entry window and the observation-gap rule still apply", async t => {
+  const window = await reversing(t, [{ price: 104.5 }], { entryWindowMinutes: 5 });
+  await window.breakout(106);
+  window.r.setTime(open + 300000); window.r.prices.DEMOA = 106.5; await window.r.service.paper.tick(setup.runId);
+  assert.deepEqual([window.of("entry_aborted").length, window.of("setup_disqualified").map(d => d.reason), window.of("paper_entry").length],
+    [1, ["entry_window_closed"], 0]);
+  const gap = await reversing(t, [{ price: 104.5 }]);
+  await gap.breakout(106);
+  gap.r.advance(6000); gap.r.prices.DEMOA = 106.5; await gap.r.service.paper.tick(setup.runId);   // unseen for 6 s: over the 5 s allowed
+  assert.deepEqual([gap.of("setup_disqualified").map(d => d.reason), gap.of("paper_entry").length], [["observation_gap"], 0]);
 });
 test("a full session journals changes and a heartbeat a minute: under 1,000 revisions through a flapping provider and an option outage", async t => {
   const f = fixture(t);
@@ -663,8 +729,15 @@ test("the close-out lead is a setting: ten minutes flattens at 3:50 and refuses 
   f.setTime(close - 600001); assert.deepEqual((await runtime.step()).filter(e => e.type === "paper_sale"), []);
   f.setTime(close - 600000); f.prices.DEMOB = 106;
   const events = await runtime.step();
-  assert.deepEqual(events.filter(e => e.type === "entry_skipped").map(e => e.data), [{ symbol: "DEMOB", reason: "too_close_to_session_end" }]);
+  assert.deepEqual(events.filter(e => e.type === "entry_skipped").map(e => e.data),
+    [{ symbol: "DEMOB", reason: "too_close_to_session_end", triggerPrice: 106, triggerTradeAt: new Date(close - 600000).toISOString(), triggerRetrievedAt: new Date(close - 600000).toISOString(), attempt: 1, maxEntryAttempts: 3 }]);
   assert.deepEqual(events.filter(e => e.type === "paper_sale").map(e => [(e.data as any).symbol, (e.data as any).reason]), [["DEMOA", "session_close"]]);
+});
+test("a run from an earlier strategy version says so when configured again, rather than claiming different settings", t => {
+  const f = fixture(t); f.service.paper.configure(setup);
+  const path = join(f.directory, "paper", setup.runId, String(f.service.paper.status(setup.runId).revision).padStart(8, "0") + ".json");
+  const value = JSON.parse(readFileSync(path, "utf8")); value.version = "0.8.0"; writeFileSync(path, JSON.stringify(value));
+  assert.throws(() => f.service.paper.configure(setup), /strategy version 0\.8\.0; configure a new run ID/);
 });
 test("corrupt checkpoint cannot resume a fabricated reservation", async t => {
   const f = fixture(t); await entered(f); await f.service.paper.stop(setup.runId);

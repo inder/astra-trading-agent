@@ -187,7 +187,12 @@ Stopping monitoring retains positions; request closes first if that is intended.
 The first strategy trades the opening-range breakout: the first two-minute
 candle's high and low (optionally including the last two premarket minutes). A
 trade above the high buys; a trade below the low first ends the day for that stock,
-even if it later rallies. New entries stop after a configurable window
+even if it later rallies. Each entry re-reads the stock first. If that quote is a
+later trade back at or below the high, the attempt stops and the stock is watched
+again, so a later breakout can still buy while the low holds (`maxEntryAttempts`,
+default 3). A quote no newer than the breakout trade stops the attempt the same way
+and uses an attempt, but is not counted as a reversal and its price is not judged.
+A later quote beneath the low ends the day. New entries stop after a configurable window
 (`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
 positions are managed all day. Prices are polled about once a second
 (`pollSeconds`), so a dip below the low that reverses between polls can be missed.

@@ -9,7 +9,7 @@ const config: OrbOptionsConfig = {
   stopBufferFraction: .001, budgetCentsPerPosition: 200000, budgetCentsPerDay: 400000, minimumContracts: 2, maximumContractsPerTrade: null,
   maximumPositions: 2, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopFraction: .5,
   feeReserveCentsPerContract: 100, maxOptionSpreadFraction: .2, maxQuoteAgeMs: 5000, maxObservationGapMs: 5000, pollMs: 1000,
-  rangeDeadlineMs: 60000, readFailureHaltMs: 60000, maxEntryQuoteBatches: 3, heartbeatMs: 60000,
+  rangeDeadlineMs: 60000, readFailureHaltMs: 60000, maxEntryQuoteBatches: 3, maxEntryAttempts: 3, heartbeatMs: 60000,
   includePremarketLeadMinutes: 0, entryWindowMinutes: 90, flattenLeadMinutes: 1,
 };
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
@@ -75,6 +75,43 @@ test("while a range's bars are pending, observations keep the lowest later trade
   assert.throws(() => e.setRange("MU", real), /finalized/, "a stock already out cannot take a range");
   assert.equal(e.observe("CRWV", 106, rangeEnd + 2000)[0]?.kind, "enter_calls", "the first live observation above the high enters");
   assert.equal(s.CRWV!.lowAfterRangeEnd, null, "judged and cleared by setRange");
+});
+test("a reversed entry frees its slot and returns to watching until attempts run out; saved plans and checkpoints from before still load", () => {
+  const rangeEnd = sessionTimes(config.date).open + 120000, real = { high: 105, low: 100, startMs: rangeEnd - 120000, endMs: rangeEnd };
+  const e = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], maximumPositions: 1, maxEntryAttempts: 2 });
+  e.setRange("CRWV", real); e.setRange("MU", real);
+  assert.equal(e.observe("CRWV", 106, rangeEnd + 1000)[0]?.kind, "enter_calls");
+  assert.equal(e.failEntry("CRWV", { newerPrice: 104.5 }), "watching");
+  assert.deepEqual([e.snapshot().reservedPositions, e.snapshot().symbols.CRWV!.entryAttempts], [0, 1], "the slot is free again");
+  assert.equal(e.observe("MU", 106, rangeEnd + 1500)[0]?.kind, "enter_calls", "another stock can take the freed slot");
+  e.failEntry("MU");   // any other failure ends the day, as before
+  assert.equal(e.snapshot().symbols.MU!.status, "skipped");
+  assert.equal(e.observe("CRWV", 106.5, rangeEnd + 2000)[0]?.kind, "enter_calls", "a later breakout is a second attempt");
+  assert.equal(e.failEntry("CRWV", { newerPrice: 104 }), "skipped", "the last attempt ends the day");
+  assert.deepEqual(e.observe("CRWV", 107, rangeEnd + 3000), []);
+  // A reversal quote beneath the low is an observed trade there: the day ends as the low failing.
+  const low = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); low.setRange("CRWV", real);
+  low.observe("CRWV", 106, rangeEnd + 1000);
+  assert.equal(low.failEntry("CRWV", { newerPrice: 99.9 }), "disqualified");
+  assert.equal(low.snapshot().symbols.CRWV!.endReason, "opening_low_failed");
+  // A quote no newer than the trigger says nothing new: back to watching, its price not judged against the low.
+  const stale = new OrbOptionsEngine({ ...config, symbols: ["CRWV"] }); stale.setRange("CRWV", real);
+  stale.observe("CRWV", 106, rangeEnd + 1000);
+  assert.equal(stale.failEntry("CRWV", { newerPrice: null }), "watching");
+  assert.deepEqual([1, 10].map(n => parseOrbOptionsConfig({ ...config, maxEntryAttempts: n }).maxEntryAttempts), [1, 10]);
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryAttempts: 0 }));
+  assert.throws(() => parseOrbOptionsConfig({ ...config, maxEntryAttempts: 11 }));
+  const { maxEntryAttempts: _, ...missing } = config;
+  assert.throws(() => parseOrbOptionsConfig(missing), "required, like every setting: a plan from an earlier strategy version never resumes");
+  // Attempts are part of the checkpoint: they round-trip, and counts the engine could not produce are refused.
+  const saved = e.snapshot(), resumed = new OrbOptionsEngine({ ...config, symbols: ["CRWV", "MU"], maximumPositions: 1, maxEntryAttempts: 2 });
+  resumed.restore(saved);
+  assert.deepEqual(Object.values(resumed.snapshot().symbols).map(s => s.entryAttempts), [2, 1]);
+  const altered = (entryAttempts: unknown, status = saved.symbols.CRWV!.status) =>
+    ({ ...saved, symbols: { ...saved.symbols, CRWV: { ...saved.symbols.CRWV!, status, entryAttempts } } }) as typeof saved;
+  for (const [n, status] of [[3, "skipped"], [undefined, "skipped"], [2, "watching"]] as const)
+    assert.throws(() => resumed.restore(altered(n, status)), /entry attempts/, `${n} ${status}`);
+  resumed.restore(altered(1, "watching"));   // one of two used: still watching is possible
 });
 test("two exact regular one-minute bars form the opening range", () => {
   const raw = { data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "regular", bars: [

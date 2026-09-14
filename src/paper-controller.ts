@@ -47,7 +47,11 @@ export class PaperController {
     const { runId: _r, strategyId: _s, date, symbols, includePremarket, ...settings } = input;
     const config = s.preview({ ...settings, date, symbols, includePremarketLeadMinutes: includePremarket ? 2 : 0 });
     const configHash = createHash("sha256").update(JSON.stringify({ strategy: s.id, version: s.version, config })).digest("hex");
-    try { const old = this.get(input.runId); if (old.configHash !== configHash) throw new Error("Run ID already has different settings"); return old; }
+    try {
+      const old = this.get(input.runId);
+      if (old.version !== s.version) throw new Error(`Run ID was configured under strategy version ${old.version}; configure a new run ID`);
+      if (old.configHash !== configHash) throw new Error("Run ID already has different settings"); return old;
+    }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
     mkdirSync(this.#root, { recursive: true, mode: 0o700 }); mkdirSync(this.#dir(input.runId), { mode: 0o700 });
     const runtime = s.paperFactory!(config, this.#market, this.#clock);

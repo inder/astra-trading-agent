@@ -46,9 +46,12 @@ export class TradingAgentService {
     for (const id of this.paper.ids()) {
       try {
         const r = this.paper.status(id);
+        // Stocks that can still enter, from the strategy's own state when it reports one (a resumed run has none).
+        const symbols = (r.view.detail as { symbols?: Record<string, { status?: string }> } | undefined)?.symbols;
+        const watching = symbols ? Object.values(symbols).filter(s => s.status === "watching" || s.status === "forming").length : undefined;
         // Completed runs are history; only the others need their saved plan.
         runs.push({ runId: id, strategyId: r.strategyId, date: r.date, status: r.status, attached: r.attached, needsSettlement: r.needsSettlement,
-          positions: r.view.positions.length, ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
+          positions: r.view.positions.length, ...(watching === undefined ? {} : { watching }), ...(r.status === "completed" ? {} : { at: r.at, config: r.config }) });
       } catch { unreadable.push(id); }
     }
     return setupGuide({ now: this.#clock(), strategyId: this.strategies.find(s => s.paperFactory)?.id ?? "", runs, unreadable,

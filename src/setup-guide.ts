@@ -20,6 +20,8 @@ type BrokerState = "not_connected" | "preparing" | "awaiting_authorization" | "v
 export interface GuideRun {
   runId: string; strategyId: string; date: string; status: "configured" | "running" | "stopped" | "completed" | "error";
   attached: boolean; needsSettlement: boolean; positions: number;
+  /** Stocks that can still enter (watching, or waiting for their range), when the strategy reports it. */
+  watching?: number;
   /** When the plan was saved, and its pinned settings: needed only for runs that are not completed. */
   at?: string; config?: unknown;
 }
@@ -194,8 +196,10 @@ export function setupGuide(input: GuideInput): Guide {
   if (live) {
     const plan = planOf(live.config) ?? DEFAULT_PLAN, s = describeSession(live.date, now, plan), { open } = sessionTimes(live.date);
     const phase = now < open ? `It waits for the ${s.opens} open; each stock's opening range is set by ${s.latestStart}.`
-      : now < open + plan.entryWindowMinutes * 60000 ? `New entries are possible until ${s.entriesUntil}; open positions are managed until ${s.closeOut}.`
-      : `The entry window is over; open positions are managed until ${s.closeOut}.`;
+      : now >= open + plan.entryWindowMinutes * 60000 ? `The entry window is over; open positions are managed until ${s.closeOut}.`
+      // A resumed run, or one whose stocks have all entered or dropped out, can't enter again even inside the window.
+      : live.watching === 0 ? `No more entries today: every stock has entered or is done for the day. Open positions are managed until ${s.closeOut}.`
+      : `New entries are possible until ${s.entriesUntil}; open positions are managed until ${s.closeOut}.`;
     return make({ stage: "monitoring", runId: live.runId, session: s,
       status: `Paper run ${live.runId} is running for ${s.day}${plan.symbols.length ? `, watching ${plan.symbols.join(", ")}` : ""}.`,
       explain: [phase, keepOpen(s)],

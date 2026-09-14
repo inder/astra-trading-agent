@@ -151,6 +151,12 @@ test("a running run reports what it is doing now, and that the app must stay ope
     assert.match(text(g), /Keep the app running Astra open until 4:00 PM ET/);
     assert.deepEqual(g.next, { tool: "get_paper_run", when: "after_user_yes", args: { runId: "plan-one" } });
   }
+  // Inside the window with no stock left that can enter (all entered or out, or resumed after a gap): say so.
+  const done = guide({ now: at("2026-09-14T10:00:00-04:00"), broker: connected, runs: [run({ status: "running", attached: true, watching: 0 })] });
+  assert.match(done.explain[0]!, /No more entries today: every stock has entered or is done for the day/);
+  assert.doesNotMatch(text(done), /New entries are possible/);
+  const some = guide({ now: at("2026-09-14T10:00:00-04:00"), broker: connected, runs: [run({ status: "running", attached: true, watching: 1 })] });
+  assert.match(some.explain[0]!, /New entries are possible until 11:00 AM ET/);
 });
 test("near the calendar's end the expiry is described by its rule, and the guide still answers", () => {
   const g = guide({ now: at("2027-12-29T17:00:00-05:00"), broker: connected });

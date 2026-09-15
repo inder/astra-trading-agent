@@ -1,0 +1,1547 @@
+{
+ "prototype": "astra-levels-prototype/levels.py at claude-config e5d2e6f",
+ "series": {
+  "uptrend": {
+   "lastDate": "2026-09-09",
+   "close": 127.45,
+   "timeframes": {
+    "qtd": {
+     "label": "QTD",
+     "start": "2026-07-01",
+     "from": 207,
+     "sessions": 51,
+     "sinceListing": false,
+     "atr": 1.84,
+     "atrPct": 1.4,
+     "width": 0.92,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 128.15,
+       "hi": 128.95,
+       "tests": 12,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 128.45,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 128.7,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-07",
+         "price": 128.95,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-31",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-30",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-29",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-15",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-14",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-13",
+         "price": 128.15,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 135.8,
+       "hi": 135.8,
+       "tests": 1,
+       "last": "2026-08-26",
+       "members": [
+        {
+         "date": "2026-08-26",
+         "price": 135.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 126.95,
+       "hi": 127.2,
+       "tests": 9,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 126.95,
+         "kind": "low"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 127.2,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S2",
+       "lo": 125.7,
+       "hi": 125.7,
+       "tests": 0,
+       "last": "2026-07-22",
+       "members": [
+        {
+         "date": "2026-07-22",
+         "price": 125.7,
+         "kind": "broken resistance"
+        },
+        {
+         "date": "2026-07-06",
+         "price": 125.7,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S3",
+       "lo": 122.1,
+       "hi": 122.5,
+       "tests": 13,
+       "last": "2026-08-06",
+       "members": [
+        {
+         "date": "2026-08-06",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-28",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-21",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-10",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-03",
+         "price": 122.1,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [
+      {
+       "side": "support",
+       "from": "2026-08-11",
+       "lo": 125.3,
+       "hi": 126.95
+      },
+      {
+       "side": "resistance",
+       "from": "2026-08-27",
+       "lo": 130.7,
+       "hi": 134.3
+      }
+     ],
+     "trend": {
+      "resistance": null,
+      "support": {
+       "from": "2026-07-03",
+       "to": "2026-09-09",
+       "fromValue": 122.1,
+       "toValue": 123.23,
+       "nextValue": 123.25,
+       "touches": [
+        {
+         "time": "2026-07-03",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-10",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.024
+      },
+      "resistanceNear": null,
+      "supportNear": {
+       "from": "2026-07-21",
+       "to": "2026-09-09",
+       "fromValue": 122.1,
+       "toValue": 124.98,
+       "nextValue": 125.06,
+       "touches": [
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.08
+      }
+     }
+    },
+    "ytd": {
+     "label": "YTD",
+     "start": "2026-01-01",
+     "from": 78,
+     "sessions": 180,
+     "sinceListing": false,
+     "atr": 1.84,
+     "atrPct": 1.4,
+     "width": 0.92,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 128.15,
+       "hi": 128.95,
+       "tests": 27,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 128.45,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 128.7,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-07",
+         "price": 128.95,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-31",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-30",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-29",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-15",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-14",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-13",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-29",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-26",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-25",
+         "price": 128.15,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 129.1,
+       "hi": 129.1,
+       "tests": 11,
+       "last": "2026-03-30",
+       "members": [
+        {
+         "date": "2026-03-30",
+         "price": 129.1,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R3",
+       "lo": 131.1,
+       "hi": 131.1,
+       "tests": 4,
+       "last": "2026-05-25",
+       "members": [
+        {
+         "date": "2026-05-25",
+         "price": 131.1,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R4",
+       "lo": 135.8,
+       "hi": 135.8,
+       "tests": 1,
+       "last": "2026-08-26",
+       "members": [
+        {
+         "date": "2026-08-26",
+         "price": 135.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 126.95,
+       "hi": 127.2,
+       "tests": 24,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 126.95,
+         "kind": "low"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 127.2,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S2",
+       "lo": 124.9,
+       "hi": 125.7,
+       "tests": 20,
+       "last": "2026-07-22",
+       "members": [
+        {
+         "date": "2026-07-22",
+         "price": 125.7,
+         "kind": "broken resistance"
+        },
+        {
+         "date": "2026-07-06",
+         "price": 125.7,
+         "kind": "broken resistance"
+        },
+        {
+         "date": "2026-06-22",
+         "price": 124.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S3",
+       "lo": 122.1,
+       "hi": 122.5,
+       "tests": 28,
+       "last": "2026-08-06",
+       "members": [
+        {
+         "date": "2026-08-06",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-28",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-21",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-10",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-03",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-06-24",
+         "price": 122.5,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S4",
+       "lo": 117.9,
+       "hi": 118.75,
+       "tests": 12,
+       "last": "2026-06-19",
+       "members": [
+        {
+         "date": "2026-06-19",
+         "price": 118.75,
+         "kind": "low"
+        },
+        {
+         "date": "2026-02-02",
+         "price": 117.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S5",
+       "lo": 116.2,
+       "hi": 116.2,
+       "tests": 6,
+       "last": "2026-04-27",
+       "members": [
+        {
+         "date": "2026-04-27",
+         "price": 116.2,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S6",
+       "lo": 105.45,
+       "hi": 105.45,
+       "tests": 4,
+       "last": "2026-02-27",
+       "members": [
+        {
+         "date": "2026-02-27",
+         "price": 105.45,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S7",
+       "lo": 102.9,
+       "hi": 102.9,
+       "tests": 1,
+       "last": "2026-01-05",
+       "members": [
+        {
+         "date": "2026-01-05",
+         "price": 102.9,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [
+      {
+       "side": "support",
+       "from": "2026-03-02",
+       "lo": 107.45,
+       "hi": 114.2
+      },
+      {
+       "side": "support",
+       "from": "2026-06-22",
+       "lo": 120.65,
+       "hi": 122.1
+      },
+      {
+       "side": "support",
+       "from": "2026-08-11",
+       "lo": 125.3,
+       "hi": 126.95
+      },
+      {
+       "side": "resistance",
+       "from": "2026-08-27",
+       "lo": 130.7,
+       "hi": 134.3
+      }
+     ],
+     "trend": {
+      "resistance": null,
+      "support": {
+       "from": "2026-04-27",
+       "to": "2026-09-09",
+       "fromValue": 116.2,
+       "toValue": 125.46,
+       "nextValue": 125.55,
+       "touches": [
+        {
+         "time": "2026-04-27",
+         "value": 116.2,
+         "recent": false
+        },
+        {
+         "time": "2026-06-19",
+         "value": 118.75,
+         "recent": false
+        },
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.095
+      },
+      "resistanceNear": null,
+      "supportNear": {
+       "from": "2026-04-27",
+       "to": "2026-09-09",
+       "fromValue": 116.2,
+       "toValue": 125.58,
+       "nextValue": 125.68,
+       "touches": [
+        {
+         "time": "2026-04-27",
+         "value": 116.2,
+         "recent": false
+        },
+        {
+         "time": "2026-06-19",
+         "value": 118.75,
+         "recent": false
+        },
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.097
+      }
+     }
+    },
+    "2y": {
+     "label": "2 years",
+     "start": "2025-09-15",
+     "from": 0,
+     "sessions": 258,
+     "sinceListing": true,
+     "atr": 1.84,
+     "atrPct": 1.4,
+     "width": 0.92,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 128.15,
+       "hi": 128.95,
+       "tests": 27,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 128.45,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 128.7,
+         "kind": "high"
+        },
+        {
+         "date": "2026-09-07",
+         "price": 128.95,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-31",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-30",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-29",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-15",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-14",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-07-13",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-29",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-26",
+         "price": 128.15,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-25",
+         "price": 128.15,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 129.1,
+       "hi": 129.1,
+       "tests": 11,
+       "last": "2026-03-30",
+       "members": [
+        {
+         "date": "2026-03-30",
+         "price": 129.1,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R3",
+       "lo": 131.1,
+       "hi": 131.1,
+       "tests": 4,
+       "last": "2026-05-25",
+       "members": [
+        {
+         "date": "2026-05-25",
+         "price": 131.1,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R4",
+       "lo": 135.8,
+       "hi": 135.8,
+       "tests": 1,
+       "last": "2026-08-26",
+       "members": [
+        {
+         "date": "2026-08-26",
+         "price": 135.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 126.95,
+       "hi": 127.2,
+       "tests": 24,
+       "last": "2026-09-09",
+       "members": [
+        {
+         "date": "2026-09-09",
+         "price": 126.95,
+         "kind": "low"
+        },
+        {
+         "date": "2026-09-08",
+         "price": 127.2,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S2",
+       "lo": 124.9,
+       "hi": 125.7,
+       "tests": 20,
+       "last": "2026-07-22",
+       "members": [
+        {
+         "date": "2026-07-22",
+         "price": 125.7,
+         "kind": "broken resistance"
+        },
+        {
+         "date": "2026-07-06",
+         "price": 125.7,
+         "kind": "broken resistance"
+        },
+        {
+         "date": "2026-06-22",
+         "price": 124.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S3",
+       "lo": 122.1,
+       "hi": 122.5,
+       "tests": 28,
+       "last": "2026-08-06",
+       "members": [
+        {
+         "date": "2026-08-06",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-28",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-21",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-10",
+         "price": 122.5,
+         "kind": "low"
+        },
+        {
+         "date": "2026-07-03",
+         "price": 122.1,
+         "kind": "low"
+        },
+        {
+         "date": "2026-06-24",
+         "price": 122.5,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S4",
+       "lo": 117.9,
+       "hi": 118.75,
+       "tests": 12,
+       "last": "2026-06-19",
+       "members": [
+        {
+         "date": "2026-06-19",
+         "price": 118.75,
+         "kind": "low"
+        },
+        {
+         "date": "2026-02-02",
+         "price": 117.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S5",
+       "lo": 115.9,
+       "hi": 116.2,
+       "tests": 8,
+       "last": "2026-04-27",
+       "members": [
+        {
+         "date": "2026-04-27",
+         "price": 116.2,
+         "kind": "low"
+        },
+        {
+         "date": "2025-12-08",
+         "price": 115.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S6",
+       "lo": 113.9,
+       "hi": 113.9,
+       "tests": 11,
+       "last": "2025-10-13",
+       "members": [
+        {
+         "date": "2025-10-13",
+         "price": 113.9,
+         "kind": "broken resistance"
+        }
+       ]
+      },
+      {
+       "id": "S7",
+       "lo": 105.45,
+       "hi": 105.45,
+       "tests": 15,
+       "last": "2026-02-27",
+       "members": [
+        {
+         "date": "2026-02-27",
+         "price": 105.45,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S8",
+       "lo": 102.9,
+       "hi": 102.9,
+       "tests": 8,
+       "last": "2026-01-05",
+       "members": [
+        {
+         "date": "2026-01-05",
+         "price": 102.9,
+         "kind": "low"
+        }
+       ]
+      },
+      {
+       "id": "S9",
+       "lo": 100.9,
+       "hi": 100.9,
+       "tests": 3,
+       "last": "2025-11-10",
+       "members": [
+        {
+         "date": "2025-11-10",
+         "price": 100.9,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [
+      {
+       "side": "support",
+       "from": "2026-03-02",
+       "lo": 107.45,
+       "hi": 114.2
+      },
+      {
+       "side": "support",
+       "from": "2026-06-22",
+       "lo": 120.65,
+       "hi": 122.1
+      },
+      {
+       "side": "support",
+       "from": "2026-08-11",
+       "lo": 125.3,
+       "hi": 126.95
+      },
+      {
+       "side": "resistance",
+       "from": "2026-08-27",
+       "lo": 130.7,
+       "hi": 134.3
+      }
+     ],
+     "trend": {
+      "resistance": null,
+      "support": {
+       "from": "2026-04-27",
+       "to": "2026-09-09",
+       "fromValue": 116.2,
+       "toValue": 125.46,
+       "nextValue": 125.55,
+       "touches": [
+        {
+         "time": "2026-04-27",
+         "value": 116.2,
+         "recent": false
+        },
+        {
+         "time": "2026-06-19",
+         "value": 118.75,
+         "recent": false
+        },
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.095
+      },
+      "resistanceNear": null,
+      "supportNear": {
+       "from": "2026-04-27",
+       "to": "2026-09-09",
+       "fromValue": 116.2,
+       "toValue": 125.58,
+       "nextValue": 125.68,
+       "touches": [
+        {
+         "time": "2026-04-27",
+         "value": 116.2,
+         "recent": false
+        },
+        {
+         "time": "2026-06-19",
+         "value": 118.75,
+         "recent": false
+        },
+        {
+         "time": "2026-07-21",
+         "value": 122.1,
+         "recent": false
+        },
+        {
+         "time": "2026-07-28",
+         "value": 122.5,
+         "recent": false
+        },
+        {
+         "time": "2026-08-06",
+         "value": 122.1,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": 0.097
+      }
+     }
+    }
+   }
+  },
+  "downtrend": {
+   "lastDate": "2026-08-14",
+   "close": 176.5,
+   "timeframes": {
+    "qtd": {
+     "label": "QTD",
+     "start": "2026-07-01",
+     "from": 207,
+     "sessions": 33,
+     "sinceListing": false,
+     "atr": 2.0,
+     "atrPct": 1.1,
+     "width": 1.0,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 177.4,
+       "hi": 178,
+       "tests": 3,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 177.4,
+         "kind": "high"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 178,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 178.6,
+       "hi": 178.6,
+       "tests": 2,
+       "last": "2026-08-12",
+       "members": [
+        {
+         "date": "2026-08-12",
+         "price": 178.6,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R3",
+       "lo": 188.8,
+       "hi": 188.8,
+       "tests": 2,
+       "last": "2026-07-20",
+       "members": [
+        {
+         "date": "2026-07-20",
+         "price": 188.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 175.4,
+       "hi": 176,
+       "tests": 2,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 175.4,
+         "kind": "low"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 176,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [],
+     "trend": {
+      "resistance": null,
+      "support": null,
+      "resistanceNear": null,
+      "supportNear": null
+     }
+    },
+    "ytd": {
+     "label": "YTD",
+     "start": "2026-01-01",
+     "from": 78,
+     "sessions": 162,
+     "sinceListing": false,
+     "atr": 2.0,
+     "atrPct": 1.1,
+     "width": 1.0,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 177.4,
+       "hi": 178,
+       "tests": 3,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 177.4,
+         "kind": "high"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 178,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 178.6,
+       "hi": 178.8,
+       "tests": 2,
+       "last": "2026-08-12",
+       "members": [
+        {
+         "date": "2026-08-12",
+         "price": 178.6,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-22",
+         "price": 178.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R3",
+       "lo": 182.8,
+       "hi": 182.8,
+       "tests": 8,
+       "last": "2026-04-27",
+       "members": [
+        {
+         "date": "2026-04-27",
+         "price": 182.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R4",
+       "lo": 186.8,
+       "hi": 186.8,
+       "tests": 15,
+       "last": "2026-03-02",
+       "members": [
+        {
+         "date": "2026-03-02",
+         "price": 186.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R5",
+       "lo": 188.8,
+       "hi": 188.8,
+       "tests": 15,
+       "last": "2026-07-20",
+       "members": [
+        {
+         "date": "2026-07-20",
+         "price": 188.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R6",
+       "lo": 190.8,
+       "hi": 190.8,
+       "tests": 15,
+       "last": "2026-01-05",
+       "members": [
+        {
+         "date": "2026-01-05",
+         "price": 190.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R7",
+       "lo": 192.8,
+       "hi": 192.8,
+       "tests": 15,
+       "last": "2026-05-25",
+       "members": [
+        {
+         "date": "2026-05-25",
+         "price": 192.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R8",
+       "lo": 196.8,
+       "hi": 196.8,
+       "tests": 8,
+       "last": "2026-03-30",
+       "members": [
+        {
+         "date": "2026-03-30",
+         "price": 196.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R9",
+       "lo": 200.8,
+       "hi": 200.8,
+       "tests": 2,
+       "last": "2026-02-02",
+       "members": [
+        {
+         "date": "2026-02-02",
+         "price": 200.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 175.4,
+       "hi": 176,
+       "tests": 2,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 175.4,
+         "kind": "low"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 176,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [],
+     "trend": {
+      "resistance": {
+       "from": "2026-02-02",
+       "to": "2026-08-14",
+       "fromValue": 200.8,
+       "toValue": 186.9,
+       "nextValue": 186.8,
+       "touches": [
+        {
+         "time": "2026-02-02",
+         "value": 200.8,
+         "recent": false
+        },
+        {
+         "time": "2026-03-30",
+         "value": 196.8,
+         "recent": false
+        },
+        {
+         "time": "2026-05-25",
+         "value": 192.8,
+         "recent": false
+        },
+        {
+         "time": "2026-07-20",
+         "value": 188.8,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": -0.1
+      },
+      "support": null,
+      "resistanceNear": null,
+      "supportNear": null
+     }
+    },
+    "2y": {
+     "label": "2 years",
+     "start": "2025-09-15",
+     "from": 0,
+     "sessions": 240,
+     "sinceListing": true,
+     "atr": 2.0,
+     "atrPct": 1.1,
+     "width": 1.0,
+     "resistance": [
+      {
+       "id": "R1",
+       "lo": 177.4,
+       "hi": 178,
+       "tests": 3,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 177.4,
+         "kind": "high"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 178,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R2",
+       "lo": 178.6,
+       "hi": 178.8,
+       "tests": 2,
+       "last": "2026-08-12",
+       "members": [
+        {
+         "date": "2026-08-12",
+         "price": 178.6,
+         "kind": "high"
+        },
+        {
+         "date": "2026-06-22",
+         "price": 178.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R3",
+       "lo": 182.8,
+       "hi": 182.8,
+       "tests": 8,
+       "last": "2026-04-27",
+       "members": [
+        {
+         "date": "2026-04-27",
+         "price": 182.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R4",
+       "lo": 186.8,
+       "hi": 186.8,
+       "tests": 15,
+       "last": "2026-03-02",
+       "members": [
+        {
+         "date": "2026-03-02",
+         "price": 186.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R5",
+       "lo": 188.8,
+       "hi": 188.8,
+       "tests": 15,
+       "last": "2026-07-20",
+       "members": [
+        {
+         "date": "2026-07-20",
+         "price": 188.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R6",
+       "lo": 190.8,
+       "hi": 190.8,
+       "tests": 15,
+       "last": "2026-01-05",
+       "members": [
+        {
+         "date": "2026-01-05",
+         "price": 190.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R7",
+       "lo": 192.8,
+       "hi": 192.8,
+       "tests": 15,
+       "last": "2026-05-25",
+       "members": [
+        {
+         "date": "2026-05-25",
+         "price": 192.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R8",
+       "lo": 194.8,
+       "hi": 194.8,
+       "tests": 15,
+       "last": "2025-11-10",
+       "members": [
+        {
+         "date": "2025-11-10",
+         "price": 194.8,
+         "kind": "broken support"
+        }
+       ]
+      },
+      {
+       "id": "R9",
+       "lo": 196.8,
+       "hi": 196.8,
+       "tests": 15,
+       "last": "2026-03-30",
+       "members": [
+        {
+         "date": "2026-03-30",
+         "price": 196.8,
+         "kind": "high"
+        }
+       ]
+      },
+      {
+       "id": "R10",
+       "lo": 200.8,
+       "hi": 200.8,
+       "tests": 14,
+       "last": "2026-02-02",
+       "members": [
+        {
+         "date": "2026-02-02",
+         "price": 200.8,
+         "kind": "high"
+        }
+       ]
+      }
+     ],
+     "support": [
+      {
+       "id": "S1",
+       "lo": 175.4,
+       "hi": 176,
+       "tests": 2,
+       "last": "2026-08-14",
+       "members": [
+        {
+         "date": "2026-08-14",
+         "price": 175.4,
+         "kind": "low"
+        },
+        {
+         "date": "2026-08-13",
+         "price": 176,
+         "kind": "low"
+        }
+       ]
+      }
+     ],
+     "gaps": [],
+     "trend": {
+      "resistance": {
+       "from": "2025-10-13",
+       "to": "2026-08-14",
+       "fromValue": 208.8,
+       "toValue": 186.9,
+       "nextValue": 186.8,
+       "touches": [
+        {
+         "time": "2025-10-13",
+         "value": 208.8,
+         "recent": false
+        },
+        {
+         "time": "2025-12-08",
+         "value": 204.8,
+         "recent": false
+        },
+        {
+         "time": "2026-02-02",
+         "value": 200.8,
+         "recent": false
+        },
+        {
+         "time": "2026-03-30",
+         "value": 196.8,
+         "recent": false
+        },
+        {
+         "time": "2026-05-25",
+         "value": 192.8,
+         "recent": false
+        },
+        {
+         "time": "2026-07-20",
+         "value": 188.8,
+         "recent": false
+        }
+       ],
+       "confirmed": true,
+       "slopePerBar": -0.1
+      },
+      "support": null,
+      "resistanceNear": null,
+      "supportNear": null
+     }
+    }
+   }
+  }
+ }
+}

@@ -63,6 +63,23 @@ test("levels come from daily bars and a live quote, and each stock's bars are re
   assert.deepEqual(f.reads.filter(r => r.startsWith("get_equity_historicals")).length, 1, "the day's bars are reused");
   assert.equal(f.reads.filter(r => r.startsWith("get_equity_quotes")).length, 2, "the price is not");
 });
+test("the weekly window is answered when it is asked for, and left out when it is not", async t => {
+  const f = fixture(t);
+  const [plain] = await f.service.levels(["FIXA"]);
+  assert.deepEqual(usable(plain!).frames.map(x => x.timeframe), ["qtd", "ytd", "2y"], "a written answer stays daily");
+  const [weekly] = await f.service.levels(["FIXA"], "5y");
+  const got = usable(weekly!);
+  assert.equal(got.requested, "5y");
+  const frame = got.frames.find(x => x.timeframe === "5y")!;
+  assert.equal(frame.bar, "week");
+  assert.ok(frame.sessions > 0 && frame.sessions < got.sessions / 4, "weeks, not sessions");
+  assert.equal(got.defaultTimeframe, "2y", "asking for weekly does not make it the default");
+  assert.equal(f.reads.filter(r => r.startsWith("get_equity_historicals")).length, 1, "and it needs no second bar read");
+  // The clock is Thursday 10 September 2026, 8:00 a.m. ET, so the settled session is Wednesday the 9th and the week
+  // of the 7th is still forming. The service must hand that settled date down, or the part-week would be measured.
+  const lastWeek = frame.support!.concat(frame.resistance!).flatMap(z => z.members.map(m => m.date)).sort().at(-1)!;
+  assert.ok(lastWeek < "2026-09-07", `the forming week is not measured: newest member ${lastWeek}`);
+});
 test("a stale quote falls back to the last close, and says so", async t => {
   const f = fixture(t, { quoteAt: Date.now() - 600000 });
   const got = usable((await f.service.levels(["FIXA"]))[0]!);
@@ -143,8 +160,11 @@ test("get_levels refuses unknown timeframes and leads a disconnected user to the
     const r = await m.call(args);
     assert.equal(r.isError, true); assert.match(r.content[0]!.text, expected);
   };
-  await refused({ symbols: ["FIXA"], timeframe: "5y" }, /timeframe/i);
+  await refused({ symbols: ["FIXA"], timeframe: "10y" }, /timeframe/i);
   await refused({ symbols: ["FIXA"], adjustment: "split" }, /adjustment/i);   // no unknown knobs, so a wrong one is never silently ignored
+  const weekly = await m.call({ symbols: ["FIXA"], timeframe: "5y" });
+  assert.ok(!weekly.isError, "but the weekly window is a timeframe the tool accepts");
+  assert.equal(JSON.parse(weekly.content[0]!.text).levels[0].requested, "5y");
   const off = await overMcp(t, { ready: false });
   const failed = await off.call({ symbols: ["FIXA"] });
   assert.equal(failed.isError, true);

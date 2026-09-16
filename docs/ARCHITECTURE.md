@@ -50,6 +50,15 @@ fixture in `test/fixtures/levels-golden.json`.
 Every number it uses is a validated setting with a default and bounds
 (`LEVELS_SETTINGS`), on the same rule as strategy configuration: no magic numbers.
 
+Weekly is the same code over different bars, not a second implementation:
+`aggregateWeekly` folds daily bars into weeks dated by their Monday, and the
+window runs through `analyzeWindow` unchanged. Two consequences are deliberate.
+A weekly frame's ATR, zone width and trend tolerance are weekly quantities, so
+`Frame.bar` says which bars a frame measured and `sessions` counts weeks. And a
+week still trading is dropped, exactly as the session still trading is: a
+provisional bar never becomes a level. Weekly is never the default timeframe —
+it would win by being the longest — and is returned only when asked for.
+
 The service owns everything the engine refuses to: fetching bars split-adjusted,
 rejecting a history that is incomplete, interpolated, duplicated or out of order,
 and caching one read per stock per settled session. Bars are kept only through the

@@ -175,6 +175,7 @@ await a.call("broker-status", "get_broker_status");
 await a.call("check", "check_symbols", { symbols: ["CRWV", "HPE", "SMCI", "CRVW"] });
 await a.call("quotes", "get_market_quotes", { symbols: ["CRWV", "HPE", "SMCI"] });
 await a.call("levels", "get_levels", { symbols: ["HPE"] });
+await a.call("levels-weekly", "get_levels", { symbols: ["HPE"], timeframe: "5y" });
 await a.call("plan", "configure_paper_strategy", { runId, strategyId: "opening-range-options", date: DATE, symbols: ["CRWV", "HPE", "SMCI"], includePremarket: false,
   maxPremiumPerTradeDollars: 1000, maxPremiumPerDayDollars: 2000 });
 await a.call("plan-readiness", "get_readiness");

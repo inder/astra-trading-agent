@@ -110,7 +110,18 @@ than a tool, and are marked.
 > - **Open gaps below:** June 23 at $56.39–$57.74, and January 6 at $48.96–$50.00. Neither has been filled.
 > - **Moving averages:** 10-day $59.84, 21-day $60.36, 50-day $60.04, 200-day $54.40.
 >
-> This is what the rules found on the chart, not a suggestion to buy or sell. Ask for the quarter or the year instead of two years, and I'll recompute.
+> This is what the rules found on the chart, not a suggestion to buy or sell. Ask for the quarter or the year instead of two years, and I'll recompute. For the long view, ask for five years and I'll measure weekly bars instead.
+
+**You:** Give me the long view on HPE.
+
+> **Astra:** Five years of HPE, on weekly bars — a different picture from the daily one, so these are weekly levels and shouldn't be read as daily ones. A week moves $1.12 on average (1.9%), which makes these zones wider.
+>
+> - **Above:** $60.56, touched 3 times, most recently the week of September 7. Then $61.73, once, the week of August 24.
+> - **Below:** $59.13–$59.41, touched 7 times, the last the week of September 7. Then a shelf far beneath the price: $48.30–$48.46 (6) and $47.34–$47.87, which held 25 separate weeks into late November 2025.
+> - **Rising weekly support line** since July 2025, still unbroken, with 5 touches. It passes near $49.11 next week — a long way under the price.
+> - **No unfilled weekly gaps.**
+>
+> One caveat: I only have price history back to September 2024, so this is 104 weeks, not five years. I'd rather tell you that than show you a short window labelled five years.
 
 **You:** Use CRWV, HPE and SMCI, with $1,000 per trade and $2,000 for the day.
 
@@ -253,7 +264,7 @@ than a tool, and are marked.
 | "Is Robinhood connected?" | Reports the connection and what it can read | `get_broker_status` |
 | "Can you watch CRWV, HPE, SMCI?" | Checks each ticker has a price and the options it needs | `check_symbols` |
 | "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
-| "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" | Price zones with how often they held, open gaps, trend lines and moving averages | `get_levels` |
+| "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" / "Show me NVDA's five-year weekly levels" | Price zones with how often they held, open gaps, trend lines and moving averages, daily or weekly | `get_levels` |
 | "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
@@ -373,7 +384,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `get_broker_status` | Check authorization and available read capabilities |
 | `check_symbols` | Check proposed tickers: a price and the week-ending expiry the entry rule needs |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
-| `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. Advisory; market data only |
+| `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. `timeframe: "5y"` measures weekly bars instead. Advisory; market data only |
 | `configure_paper_strategy` | Save session settings without starting |
 | `start_paper_run` | Start continuous simulation after authorization |
 | `resume_paper_run` | Recover existing positions only, no new entries |

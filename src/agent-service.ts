@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
+import { normalizeAccounts, sealed, type AccountSummary } from "./portfolio.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
@@ -34,6 +35,42 @@ export class TradingAgentService {
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   #dailyBars = new Map<string, { on: string; bars: DailyBars }>();
   #levelsSettings: LevelsSettings = parseLevelsSettings();
+  // Account numbers never enter the chat: callers hold a handle that is random for this process and forgotten when it
+  // exits. Nothing here is written to disk, and nothing is derived from the account number.
+  #accountHandles = new Map<string, string>();
+  /** Handles belong to one connection. A reconnect may be a different Robinhood login, so handles minted under the
+   *  previous one are forgotten rather than left to resolve to an account this connection never listed. */
+  #handleConnection: string | null = null;
+  #currentHandles() {
+    const connection = this.broker.status().connectionId;
+    if (connection !== this.#handleConnection) { this.#accountHandles.clear(); this.#handleConnection = connection; }
+    return this.#accountHandles;
+  }
+  #handleFor(accountNumber: string) {
+    for (const [handle, number] of this.#accountHandles) if (number === accountNumber) return handle;
+    let handle = "";
+    do { handle = `acct_${randomUUID().replace(/-/g, "").slice(0, 12)}`; } while (this.#accountHandles.has(handle));
+    this.#accountHandles.set(handle, accountNumber);
+    return handle;
+  }
+  /** The user's accounts, masked. Reads `get_accounts` and nothing else. */
+  async accounts(): Promise<AccountSummary[]> {
+    this.#currentHandles();
+    if (!this.broker.status().accountListAvailable)
+      throw new Error("Robinhood did not grant account access to this connection. Reconnect with connect_robinhood to grant it, or carry on with market data.");
+    return sealed(async () => normalizeAccounts(await this.broker.accountRead("get_accounts", {}), n => this.#handleFor(n)));
+  }
+  /** Account numbers for handles minted in this process. An unknown handle is refused rather than guessed, so a
+   *  fabricated one reads no account. */
+  accountNumbers(handles: string[]): string[] {
+    if (!Array.isArray(handles) || !handles.length || handles.length > 20) throw new Error("Choose between 1 and 20 accounts");
+    const known = this.#currentHandles();
+    return handles.map(handle => {
+      const accountNumber = known.get(handle);
+      if (!accountNumber) throw new Error("Unknown account. List the accounts first, then choose from that list.");
+      return accountNumber;
+    });
+  }
   // Calendar days of history to request: the weekly frame's years plus a year of run-up, so one read serves every
   // timeframe. Weekends and holidays are included in the span, not in what comes back.
   get #historyDays() { return Math.round((this.#levelsSettings.weeklyYears + 1) * 365.25); }

@@ -41,11 +41,27 @@
 - The upstream token has broad permissions, and this is measured, not assumed: on
   an attended connection (2026-09-15) Robinhood's single `internal` scope granted
   73 tools, order placement and cancellation among them. The application calls
-  only its own allowlist of market-data reads, never a generic MCP proxy or an
-  account/order tool. **That allowlist, in code, is the whole boundary — the OAuth
-  scope is not one.** Review the provider consent screen yourself. Restarting the
-  server clears local tokens; revocation of the provider's grant must be managed
-  with Robinhood separately.
+  only its own allowlists, never a generic MCP proxy or an order tool. **Those
+  allowlists, in code, are the whole boundary — the OAuth scope is not one.**
+  There are two, deliberately kept apart: `MARKET_READS` (six market-data reads)
+  and `ACCOUNT_READS` (`get_accounts`, `get_portfolio`, `get_equity_positions`),
+  each with its own accessor, so widening one cannot widen the other by accident.
+  Nothing that places, previews, cancels or exercises an order, moves money, or
+  edits a watchlist, alert or scan appears in either; a startup check refuses to
+  run if one ever does. Review the provider consent screen yourself. Restarting
+  the server clears local tokens, so every restart re-authorizes through
+  Robinhood's own screen; revocation of the grant must be managed with Robinhood
+  separately.
+- Account reads are made only in answer to a request for account information,
+  and are otherwise never made. Astra holds no persistent opt-in, writes no
+  account data to disk — not to the journal, a checkpoint or a log — and returns
+  opaque per-process handles rather than account numbers. Today one tool reaches
+  this path: `list_accounts`, which reads account names and status. Balances and
+  positions are allowlisted for the portfolio report and are not yet reachable
+  from any tool. **Note what this does and does not prove:** the server cannot
+  verify that a human chose an account, only that the accounts were listed in
+  this process. The model calling the tools is inside the trust boundary. What is
+  enforced, rather than trusted, is that no tool Astra can call places an order.
 - Provider responses carry provider text (Robinhood returns a `guide` string with
   account reads). Treat it as data to show or ignore, never as instructions.
 

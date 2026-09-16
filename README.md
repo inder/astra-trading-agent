@@ -235,13 +235,9 @@ than a tool, and are marked.
 
 *(These follow Astra's rules; no tool is involved.)*
 
-**You:** Buy 100 shares of NVDA for me.
+**You:** Buy 100 shares of NVDA in my IRA.
 
-> **Astra:** I can't. Astra is paper only: it simulates option trades and never places real orders. I can add NVDA to a paper plan instead.
-
-**You:** What's in my Robinhood account?
-
-> **Astra:** I can't see your account. I only read market prices, and my code blocks account and order tools.
+> **Astra:** I can't place an order, in any account. My code allows nine Robinhood calls: six for market data, and three for reading your accounts, balances and positions when you ask about them. Nothing that places, changes or cancels an order is reachable, whatever Robinhood's consent screen grants. I can add NVDA to a paper plan instead, which simulates the trade and moves no money.
 
 **You:** HPE is sitting on support. Should I buy it here?
 
@@ -265,6 +261,7 @@ than a tool, and are marked.
 | "Can you watch CRWV, HPE, SMCI?" | Checks each ticker has a price and the options it needs | `check_symbols` |
 | "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
 | "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" / "Show me NVDA's five-year weekly levels" | Price zones with how often they held, open gaps, trend lines and moving averages, daily or weekly | `get_levels` |
+| "Which accounts can you see?" | Lists your Robinhood accounts, masked, so you can pick | `list_accounts` |
 | "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
@@ -385,6 +382,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `check_symbols` | Check proposed tickers: a price and the week-ending expiry the entry rule needs |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
 | `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. `timeframe: "5y"` measures weekly bars instead. Advisory; market data only |
+| `list_accounts` | List your Robinhood accounts as masked labels with opaque handles, so you can choose which to report on. Reads names and status only — no balances, no positions |
 | `configure_paper_strategy` | Save session settings without starting |
 | `start_paper_run` | Start continuous simulation after authorization |
 | `resume_paper_run` | Recover existing positions only, no new entries |
@@ -398,9 +396,13 @@ the chat client if strategies need to continue after the chat disconnects.
 
 `trading-agent://readiness` is also available as an MCP resource.
 
-No tools execute shell commands, accept arbitrary filesystem paths, read account
-positions or submit brokerage orders. The upstream client enforces a runtime
-allowlist of market-data reads even if Robinhood advertises order tools.
+No tools execute shell commands, accept arbitrary filesystem paths or submit
+brokerage orders. The upstream client enforces two runtime allowlists — six
+market-data reads, and the three account reads the portfolio report needs — even
+though Robinhood's single scope also advertises order tools. Account reads are
+made only when you ask about your accounts, return masked labels rather than
+account numbers, and are never written to disk. `list_accounts` is the only tool
+reaching that path today; the balances and positions reads land with the report.
 
 ### Connect Robinhood independently
 

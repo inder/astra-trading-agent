@@ -62,12 +62,22 @@ export const LEVELS_SETTINGS = {
   /** How far back the weekly frame looks, and the fewest weeks it will draw levels from. */
   weeklyYears: { default: 5, min: 1, max: 20 },
   weeklyMinSessions: { default: 30, min: 5, max: 250 },
+  /** The weekly frame's own trend-line rules. A week's ATR is several times a day's, so the daily allowances are far
+   *  too generous over weekly bars: at 10 ATR a five-year line can sit 80% below the price and still be "near" it,
+   *  and five bars is a five-week anchor for a five-year line. Found on a real DELL chart, 2026-09-15.
+   *
+   *  The distance default was swept against real HPE and DELL history: 3 and 4 behave identically on both, and 5 is
+   *  a cliff — it starts admitting lines 61% to 85% below the price. 3 keeps the margin. A stock that has run too far
+   *  for any line to be near, as DELL had, correctly gets no weekly line rather than a meaningless one. */
+  weeklyTrendMaxDistanceAtr: { default: 3, min: 0.5, max: 50 },
+  weeklyTrendMinBars: { default: 12, min: 2, max: 100 },
 } as const;
 export interface LevelsSettings {
   swingBars: number; atrBars: number; zoneWidthAtr: number; testReachZone: number; recentBars: number;
   maxZonesPerSide: number; trendToleranceAtr: number; trendMinBars: number; trendConfirmTouches: number;
   trendMaxDistanceAtr: number; trendWickAtr: number; listingSlackDays: number; minSessions: number;
   weeklyYears: number; weeklyMinSessions: number;
+  weeklyTrendMaxDistanceAtr: number; weeklyTrendMinBars: number;
   movingAverages: number[]; timeframes: Timeframe[];
 }
 export const MOVING_AVERAGES = [10, 21, 50, 200];
@@ -80,7 +90,7 @@ const LABELS: Record<Timeframe, string> = { qtd: "QTD", ytd: "YTD", "2y": "2 yea
 const whole = (v: unknown, r: { min: number; max: number }) => typeof v === "number" && Number.isSafeInteger(v) && v >= r.min && v <= r.max;
 const real = (v: unknown, r: { min: number; max: number }) => typeof v === "number" && Number.isFinite(v) && v >= r.min && v <= r.max;
 const INTEGER_SETTINGS = ["swingBars", "atrBars", "recentBars", "maxZonesPerSide", "trendMinBars", "trendConfirmTouches",
-  "listingSlackDays", "minSessions", "weeklyYears", "weeklyMinSessions"] as const;
+  "listingSlackDays", "minSessions", "weeklyYears", "weeklyMinSessions", "weeklyTrendMinBars"] as const;
 /** Every rule is a setting with the founder's default (constants are configuration); anything out of range is refused. */
 export function parseLevelsSettings(raw: Partial<LevelsSettings> = {}): LevelsSettings {
   const keys = [...Object.keys(LEVELS_SETTINGS), "movingAverages", "timeframes"];
@@ -105,6 +115,7 @@ export function parseLevelsSettings(raw: Partial<LevelsSettings> = {}): LevelsSe
   // A window must be long enough to average the ATR over, or its zones are sized by a handful of bars. The weekly
   // frame counts weeks, so it needs the same check against its own minimum.
   if (out.atrBars > out.minSessions || out.atrBars > out.weeklyMinSessions) throw new Error("Invalid levels setting: atrBars");
+  if (out.weeklyTrendMinBars <= out.swingBars) throw new Error("Invalid levels setting: weeklyTrendMinBars");
   return out;
 }
 
@@ -361,9 +372,14 @@ export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsS
     if (sessions < minimum) return { ...base, unavailable: `only ${sessions} ${unit} in this window; needs ${minimum}` };
     const window: DailyBars = { time: times.slice(first - lead), open: source.open.slice(first - lead), high: source.high.slice(first - lead),
       low: source.low.slice(first - lead), close: source.close.slice(first - lead) };
+    // The weekly frame swaps in its own trend-line rules. A week's ATR is several times a day's, so the daily
+    // allowance would call a line 80% below the price "near" it, and a five-bar anchor is five weeks.
+    const rules = isWeekly
+      ? { ...settings, trendMaxDistanceAtr: settings.weeklyTrendMaxDistanceAtr, trendMinBars: settings.weeklyTrendMinBars }
+      : settings;
     // Every frame is measured against the one price this answer reports. A weekly window's own last close is the
     // last complete week's, so without this a weekly zone could sit on the wrong side of the price shown.
-    return { ...base, ...analyzeWindow(window, settings, lead, price) };
+    return { ...base, ...analyzeWindow(window, rules, lead, price) };
   });
   // The longest DAILY timeframe that has levels, so early in January a portfolio still shows the 2-year picture.
   // Weekly is never the default: it answers a different question, and it would otherwise win by being the longest.

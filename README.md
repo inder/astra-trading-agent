@@ -53,8 +53,10 @@ The app needs to be able to run commands on your computer. Chat apps that can't
 
 Below is a replayed session. The replies come from Astra's real tools, run on a
 simulated trading day (Tuesday, September 15, 2026) with **invented prices** for
-CRWV, HPE and SMCI. The accounts and holdings in "See what you own" are invented
-too — no real account was read to write this page. Your session uses live
+CRWV, HPE and SMCI. No real account was read to write this page. Everything in
+"See what you own" is deliberately unmistakable as a mock: account numbers ending
+0000 and 1234, a round $100,000 balance, a round $1,000 day, and gains at exactly
+10, 20 and 30 percent. No portfolio looks like that. Your session uses live
 Robinhood prices and your own accounts, and the wording depends on your AI app.
 Two answers come from Astra's rules and settings rather than a tool, and are
 marked.
@@ -103,13 +105,13 @@ marked.
 
 **You:** Which accounts can you see?
 
-> **Astra:** Two: ••••3312 individual and ••••6777 roth ira. I've read their names and status only — no balances, no positions. Which should I report on?
+> **Astra:** Two: ••••0000 individual and ••••1234 roth ira. I've read their names and status only — no balances, no positions. Which should I report on?
 
 **You:** Both.
 
-> **Astra:** Here's the report: http://127.0.0.1:52431/r/8fQ2xBd1Zv0p — it opens in your browser and prints.
+> **Astra:** Here's the report: http://127.0.0.1:50000/r/EXAMPLEONLY1 — it opens in your browser and prints.
 >
-> The two accounts hold $371,380 together, down $2,480 today. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+58.1%), HPE (+31.4%) and DELL (+12.9%); worst is INTC (−8.2%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
+> The two accounts hold $100,000 together, down $1,000 today. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+30.0%), HPE (+20.0%) and DELL (+10.0%); worst is INTC (−10.0%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
 
 The page shows a row per holding with shares, average cost, last close, market
 value, unrealized P&L, and the nearest support below and resistance above.

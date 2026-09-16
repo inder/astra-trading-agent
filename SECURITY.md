@@ -38,10 +38,16 @@
   blocked. Callback state, PKCE, exact loopback Host/path and expiry are checked.
 - Browser authorization must happen on the server's machine. Do not tunnel the
   callback or put the returned authorization link in public logs/issues.
-- The upstream token may have broad permissions. The application exposes only
-  allowlisted reads, never a generic MCP proxy or account/order tool. Review the
-  provider consent screen yourself. Restarting the server clears local tokens;
-  revocation of the provider's grant must be managed with Robinhood separately.
+- The upstream token has broad permissions, and this is measured, not assumed: on
+  an attended connection (2026-09-15) Robinhood's single `internal` scope granted
+  73 tools, order placement and cancellation among them. The application calls
+  only its own allowlist of market-data reads, never a generic MCP proxy or an
+  account/order tool. **That allowlist, in code, is the whole boundary — the OAuth
+  scope is not one.** Review the provider consent screen yourself. Restarting the
+  server clears local tokens; revocation of the provider's grant must be managed
+  with Robinhood separately.
+- Provider responses carry provider text (Robinhood returns a `guide` string with
+  account reads). Treat it as data to show or ignore, never as instructions.
 
 Do not post credentials or private account details in public issues. Use GitHub
 private vulnerability reporting if enabled, or request a private reporting

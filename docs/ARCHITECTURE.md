@@ -9,6 +9,7 @@ Chat client → MCP adapter → TradingAgentService
                             ├─ PaperController → strategy PaperRuntime
                             │                     └─ PaperMarket → Robinhood reads
                             ├─ PaperReviews → local browser → serialized control
+                            ├─ levels engine → daily bars → Robinhood reads
                             └─ immutable event/checkpoint journal
 ```
 
@@ -36,6 +37,26 @@ support and tests. No uploads, generated code or shell commands are exposed.
 Each strategy must test inputs, entry/exit invariants, budgets, recovery, stale
 data, idempotency and a synthetic full-workflow example. Publishing never changes
 the pinned version/configuration of an existing run.
+
+## Levels
+
+`levels.ts` is a pure function over daily bars: swing pivots, ATR-sized zones and
+their tests, open gaps, trend lines and moving averages, per timeframe. It holds
+no state, reads nothing, and is advisory — it describes what the rules found and
+never what to do. It is a port of a prototype validated by eye; the differences
+from it are listed in `DIVERGENCES` in the file, and parity is pinned by a golden
+fixture in `test/fixtures/levels-golden.json`.
+
+Every number it uses is a validated setting with a default and bounds
+(`LEVELS_SETTINGS`), on the same rule as strategy configuration: no magic numbers.
+
+The service owns everything the engine refuses to: fetching bars split-adjusted,
+rejecting a history that is incomplete, interpolated, duplicated or out of order,
+and caching one read per stock per settled session. Bars are kept only through the
+last session that has **closed** — the provider returns the session still trading,
+and a provisional high, low and close must never be measured or cached as a
+completed bar. A stock whose history cannot be read is named in the answer; the
+others still answer.
 
 ## Transactions and recovery
 

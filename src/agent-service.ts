@@ -34,6 +34,9 @@ export class TradingAgentService {
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   #dailyBars = new Map<string, { on: string; bars: DailyBars }>();
   #levelsSettings: LevelsSettings = parseLevelsSettings();
+  // Calendar days of history to request: the weekly frame's years plus a year of run-up, so one read serves every
+  // timeframe. Weekends and holidays are included in the span, not in what comes back.
+  get #historyDays() { return Math.round((this.#levelsSettings.weeklyYears + 1) * 365.25); }
   constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection(),
     testing: { market?: PaperMarket; symbols?: SymbolSource; ready?: () => boolean; clock?: () => number; auto?: boolean } = {}) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
@@ -83,6 +86,10 @@ export class TradingAgentService {
     validateSymbols(symbols);
     if (!this.#ready()) throw new Error("Connect Robinhood market data first");
     const now = this.#clock(), settled = this.#settledThrough(now);
+    // A timeframe nobody configured is still answerable when it is asked for by name — that is how the weekly frame,
+    // which is deliberately absent from a written answer, is reached.
+    const settings = timeframe && !this.#levelsSettings.timeframes.includes(timeframe)
+      ? { ...this.#levelsSettings, timeframes: [...this.#levelsSettings.timeframes, timeframe] } : this.#levelsSettings;
     for (const [key, held] of this.#dailyBars) if (held.on !== settled) this.#dailyBars.delete(key);   // yesterday's bars are dead weight
     const quotes = await this.market.quotes(symbols).catch(() => [] as { symbol: string; price: number | null; fresh: boolean }[]);
     const out: SymbolLevels[] = [];
@@ -91,9 +98,11 @@ export class TradingAgentService {
       let bars = cached?.on === settled ? cached.bars : undefined;
       if (!bars) {
         try {
-          // Two years for the longest window, plus a run-up for the 200-day average and for swing points at its edge.
+          // Enough for the longest window anyone can ask for — the weekly frame's years, plus a run-up for the
+          // 200-day average and for swing points at the window's edge. One span for every caller, so a request that
+          // only needs two years cannot poison the cache for one that needs five.
           // Today's forming bar is dropped rather than measured: its high, low and close are all still provisional.
-          bars = sessionsBefore(await this.market.dailyBars(symbol, now - 1000 * 86400000, now), addDays(settled, 1));
+          bars = sessionsBefore(await this.market.dailyBars(symbol, now - this.#historyDays * 86400000, now), addDays(settled, 1));
           this.#dailyBars.set(symbol, { on: settled, bars });
         } catch (error) {
           out.push({ symbol, unavailable: error instanceof DailyBarsError
@@ -102,7 +111,7 @@ export class TradingAgentService {
         }
       }
       const quote = quotes.find(q => q.symbol === symbol);
-      const computed = levels(bars, this.#levelsSettings, quote?.fresh && quote.price ? quote.price : undefined);
+      const computed = levels(bars, settings, quote?.fresh && quote.price ? quote.price : undefined);
       out.push({ symbol, ...computed, requested: timeframe ?? computed.defaultTimeframe ?? undefined });
     }
     return out;

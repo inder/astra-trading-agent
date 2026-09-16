@@ -67,7 +67,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     a => asyncGuarded(async () => ({ ...await service.checkSymbols(a.symbols), problems: SYMBOL_PROBLEMS }), "always"));
   server.registerTool("get_levels", { description: "Support and resistance for stocks, computed from daily Robinhood bars: price zones with how often they were tested, open gaps, trend lines and moving averages, for the quarter, the year and two years. Reads market data only, never an account. Advisory: it describes what the rules found, never what to buy or sell.",
     inputSchema: z.object({ symbols: configSchema.symbols,
-      timeframe: z.enum(["qtd", "ytd", "2y"]).optional().describe("Which window to lead with; the others are returned too. Defaults to the longest one with enough history.") }).strict(),
+      timeframe: z.enum(["qtd", "ytd", "2y", "5y"]).optional()
+        .describe("Which window to lead with; the daily ones are returned too. Defaults to the longest daily window with enough history. \"5y\" is five years of WEEKLY bars, included only when asked for: its zones, ATR and trend lines are weekly, so never describe them as daily levels.") }).strict(),
     annotations: { ...readOnly, openWorldHint: true } },
     a => asyncGuarded(async () => ({ levels: await service.levels(a.symbols, a.timeframe), advisory: true, ordersSubmitted: 0 }), "on_error"));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",

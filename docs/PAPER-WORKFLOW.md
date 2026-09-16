@@ -25,7 +25,9 @@ Quotes alone do not establish option/history availability or market-hours freshn
 `get_levels` answers where a stock's support and resistance sit, from daily bars:
 zones with how often they held, open gaps, trend lines and moving averages, for
 the quarter, the year and two years. `timeframe` chooses which to lead with; the
-others come back too. It reads market data only, never an account, and it is
+daily ones come back too. `"5y"` is a fifth window measured on WEEKLY bars and is
+returned only when asked for — its zones, ATR and trend lines are weekly
+quantities, and a weekly zone must never be described as a daily one. It reads market data only, never an account, and it is
 advisory — it reports what the rules found, never what to buy or sell.
 
 Bars end at the last session that has closed, so during market hours the answer

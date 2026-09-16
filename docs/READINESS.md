@@ -1,4 +1,4 @@
-# Paper-workflow readiness — version 0.3
+# Readiness — version 0.4
 
 The local end-to-end PAPER workflow is implemented: credential-free discovery,
 configuration, independent browser authorization, continuously scheduled runs,

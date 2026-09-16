@@ -8,7 +8,7 @@ import { timestamp } from "./validation.ts";
 export interface DailyBars { time: string[]; open: number[]; high: number[]; low: number[]; close: number[] }
 export interface ZoneMember { date: string; price: number; kind: "high" | "low" | "broken support" | "broken resistance" }
 export interface Zone { id: string; lo: number; hi: number; tests: number; last: string; members: ZoneMember[] }
-export interface Gap { side: "resistance" | "support"; from: string; lo: number; hi: number }
+export interface Gap { side: "resistance" | "support"; from: string; lo: number; hi: number; filling?: true }
 export interface TrendTouch { time: string; value: number; recent: boolean }
 export interface TrendLine { from: string; to: string; fromValue: number; toValue: number; nextValue: number;
   touches: TrendTouch[]; confirmed: boolean; slopePerBar: number }
@@ -87,6 +87,8 @@ export function parseLevelsSettings(raw: Partial<LevelsSettings> = {}): LevelsSe
   if (!Array.isArray(out.timeframes) || !out.timeframes.length || out.timeframes.some(t => !TIMEFRAMES.includes(t)) ||
     new Set(out.timeframes).size !== out.timeframes.length) throw new Error("Invalid levels setting: timeframes");
   if (out.trendMinBars <= out.swingBars) throw new Error("Invalid levels setting: trendMinBars");
+  // A window must be long enough to average the ATR over, or its zones are sized by a handful of bars.
+  if (out.atrBars > out.minSessions) throw new Error("Invalid levels setting: atrBars");
   return out;
 }
 
@@ -109,7 +111,10 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
   const tr = [h[0]! - l[0]!, ...Array.from({ length: n - 1 }, (_, x) => {
     const i = x + 1; return Math.max(h[i]! - l[i]!, Math.abs(h[i]! - c[i - 1]!), Math.abs(l[i]! - c[i - 1]!));
   })];
-  const atr = tr.slice(-settings.atrBars).reduce((a, b) => a + b, 0) / settings.atrBars;
+  // Averaged over the true ranges there actually are: dividing by the setting when the window is shorter would
+  // deflate the ATR, and every zone width and trend tolerance downstream with it.
+  const recentRanges = tr.slice(-settings.atrBars);
+  const atr = recentRanges.reduce((a, b) => a + b, 0) / recentRanges.length;
   if (!(atr > 0)) return { unavailable: "no price movement in this window" };
   const width = settings.zoneWidthAtr * atr, k = settings.swingBars;
   const pivots = (series: number[], keep: (a: number, b: number) => boolean) => {
@@ -159,11 +164,15 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
   // Open gaps: a range a bar skipped that price never traded back through. Above the price a drop left it
   // (resistance); below the price a jump left it (support).
   const gaps: Gap[] = [];
+  // A gap whose range still contains the price is being filled right now; saying so keeps it from reading as a level
+  // wholly above or below the stock.
+  const gap = (side: Gap["side"], from: string, lo: number, hi: number): Gap =>
+    ({ side, from, lo, hi, ...(price > lo && price < hi ? { filling: true as const } : {}) });
   for (let i = lead + 1; i < n; i++) {
     if (h[i]! < l[i - 1]! && !h.slice(i + 1).some(x => x >= l[i - 1]!) && l[i - 1]! > price)
-      gaps.push({ side: "resistance", from: t[i]!, lo: Math.max(...h.slice(i)), hi: l[i - 1]! });
+      gaps.push(gap("resistance", t[i]!, Math.max(...h.slice(i)), l[i - 1]!));
     if (l[i]! > h[i - 1]! && !l.slice(i + 1).some(x => x <= h[i - 1]!) && h[i - 1]! < price)
-      gaps.push({ side: "support", from: t[i]!, lo: h[i - 1]!, hi: Math.min(...l.slice(i)) });
+      gaps.push(gap("support", t[i]!, h[i - 1]!, Math.min(...l.slice(i))));
   }
 
   // Trend lines on bar index. Two confirmed swing points anchor a line, which holds on closes: no close beyond it by
@@ -266,8 +275,7 @@ export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsS
     if (sessions < settings.minSessions) return { ...base, unavailable: `only ${sessions} sessions in this window; needs ${settings.minSessions}` };
     const window: DailyBars = { time: t.slice(first - lead), open: daily.open.slice(first - lead), high: daily.high.slice(first - lead),
       low: daily.low.slice(first - lead), close: daily.close.slice(first - lead) };
-    const analysis = analyzeWindow(window, settings, lead, quote);
-    return "unavailable" in analysis ? { ...base, ...analysis } : { ...base, ...analysis };
+    return { ...base, ...analyzeWindow(window, settings, lead, quote) };
   });
   // The longest timeframe that has levels, so early in January a portfolio still shows the 2-year picture.
   const usable = frames.filter(f => !f.unavailable);

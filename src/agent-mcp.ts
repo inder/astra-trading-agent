@@ -13,18 +13,21 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
   // The guided next step rides on setup results too, for clients that don't pass server instructions to their model.
   const next = () => { try { return service.guide(); } catch { return null; } };
-  // lead: true leads every reply with the next step; "on_error" leads only failures, for tools whose success is
-  // an answer rather than a setup step (an advisory reading must not read as a nudge into the paper flow).
-  const guarded = (action: () => unknown, lead: boolean | "on_error" = false) => {
-    try { return reply(lead === true ? { ...action() as object, next: next() } : action()); }
+  // Whether a reply carries the guided next step. "always" is for setup tools; "on_error" is for tools whose success
+  // is an answer rather than a setup step (an advisory reading must not read as a nudge into the paper flow) but
+  // whose failure still has to lead somewhere. Three named modes, not a boolean: a truthiness test would silently
+  // start attaching the guide to answers.
+  type Lead = "always" | "on_error" | "never";
+  const guarded = (action: () => unknown, lead: Lead = "never") => {
+    try { return reply(lead === "always" ? { ...action() as object, next: next() } : action()); }
     catch (error) {
       // Filesystem errors must not leak paths, machine details or stored contents.
       const code = (error as NodeJS.ErrnoException).code;
       return { ...reply({ error: error instanceof SyntaxError ? "Saved run is unreadable" : code ? (code === "ENOENT" ? "Run not found" : "Run storage unavailable") :
-        error instanceof Error ? error.message : "Request failed", ...(lead ? { next: next() } : {}) }), isError: true };
+        error instanceof Error ? error.message : "Request failed", ...(lead === "never" ? {} : { next: next() }) }), isError: true };
     }
   };
-  const asyncGuarded = async (action: () => Promise<unknown>, lead: boolean | "on_error" = false) => {
+  const asyncGuarded = async (action: () => Promise<unknown>, lead: Lead = "never") => {
     try { const result = await action(); return guarded(() => result, lead); }
     catch (error) { return guarded(() => { throw error; }, lead); }
   };
@@ -61,10 +64,10 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     inputSchema: z.object({}).strict(), annotations: readOnly }, () => reply({ ...service.broker.status(), next: next() }));
   server.registerTool("check_symbols", { description: "Check tickers the user proposes before saving a paper plan: each one's latest Robinhood price and whether it lists the week-ending call expiry Astra's entry rule needs for the next session. Read-only: one quote batch and one option-chain read per ticker. Strikes and option prices are judged at entry, not here.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } },
-    a => asyncGuarded(async () => ({ ...await service.checkSymbols(a.symbols), problems: SYMBOL_PROBLEMS }), true));
+    a => asyncGuarded(async () => ({ ...await service.checkSymbols(a.symbols), problems: SYMBOL_PROBLEMS }), "always"));
   server.registerTool("get_levels", { description: "Support and resistance for stocks, computed from daily Robinhood bars: price zones with how often they were tested, open gaps, trend lines and moving averages, for the quarter, the year and two years. Reads market data only, never an account. Advisory: it describes what the rules found, never what to buy or sell.",
     inputSchema: z.object({ symbols: configSchema.symbols,
-      timeframe: z.enum(["qtd", "ytd", "2y"]).optional().describe("Which window to show; by default the longest one with enough history.") }).strict(),
+      timeframe: z.enum(["qtd", "ytd", "2y"]).optional().describe("Which window to lead with; the others are returned too. Defaults to the longest one with enough history.") }).strict(),
     annotations: { ...readOnly, openWorldHint: true } },
     a => asyncGuarded(async () => ({ levels: await service.levels(a.symbols, a.timeframe), advisory: true, ordersSubmitted: 0 }), "on_error"));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
@@ -120,15 +123,15 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
       rangeDeadlineMs: ms(rangeDeadlineSeconds), readFailureHaltMs: ms(readFailureHaltSeconds),
       budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
       budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) }), true));
+      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) }), "always"));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data, only after the user says yes to the plan. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId), true));
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId), "always"));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting, only after the user says yes. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true), true));
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true), "always"));
   server.registerTool("stop_paper_run", { description: "Stop monitoring a PAPER run. Retains open simulated positions and disables their automated exits. This does NOT close them; use a reviewed position close first if desired.",
-    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId), true));
+    inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.stop(a.runId), "always"));
   server.registerTool("list_paper_runs", { description: "List paper runs and identify detached runs needing explicit recovery.",
-    inputSchema: z.object({}).strict(), annotations: readOnly }, () => guarded(() => ({ runs: service.paper.list() }), true));
+    inputSchema: z.object({}).strict(), annotations: readOnly }, () => guarded(() => ({ runs: service.paper.list() }), "always"));
   server.registerTool("get_paper_run", { description: "Read PAPER positions, configuration, latest events, committed budget and estimated option P&L. Stale marks are null, not current prices. P&L excludes fees and is not brokerage P&L.",
     inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.paper.status(a.runId)));
   server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",

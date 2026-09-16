@@ -36,25 +36,36 @@ export function normalizeMarketQuotes(raw: any, symbols: string[], now = Date.no
 }
 /** Split-adjusted, so a 4-for-1 does not read as a crash. Dividends are left in, matching the charts levels came from. */
 export const DAILY_ADJUSTMENT = "split";
+/** The provider answered, but its bars are not a usable price history. Distinct from a read that failed, so a user
+ *  is never told a stock has no history when it was the connection that broke. */
+export class DailyBarsError extends Error { name = "DailyBarsError"; }
+/** Bars up to, but not including, `from`. Today's bar is still forming while the market is open: its high, low and
+ *  close are all provisional, and a provisional bar must never be measured, cached or counted as a session. */
+export function sessionsBefore(bars: DailyBars, from: string): DailyBars {
+  const cut = bars.time.findIndex(t => t >= from);
+  if (cut < 0) return bars;
+  return { time: bars.time.slice(0, cut), open: bars.open.slice(0, cut), high: bars.high.slice(0, cut),
+    low: bars.low.slice(0, cut), close: bars.close.slice(0, cut) };
+}
 /** Regular-session daily bars for one stock, oldest first, as the levels engine takes them. Prices that are missing,
  *  unparsable, interpolated or out of order are refused rather than quietly turned into a level. */
 export function normalizeDailyBars(raw: unknown, symbol: string): DailyBars {
   const results = (raw as any)?.data?.results;
   const matches = Array.isArray(results) ? results.filter((r: any) => r?.symbol === symbol) : [];
-  if (matches.length !== 1 || matches[0]?.interval !== "day" || !Array.isArray(matches[0]?.bars)) throw new Error("Daily bars unavailable");
+  if (matches.length !== 1 || matches[0]?.interval !== "day" || !Array.isArray(matches[0]?.bars)) throw new DailyBarsError("Daily bars unavailable");
   const out: DailyBars = { time: [], open: [], high: [], low: [], close: [] };
   const seen = new Set<string>();
   for (const bar of matches[0].bars) {
     const at = typeof bar?.begins_at === "string" ? bar.begins_at.slice(0, 10) : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(at) || !Number.isFinite(timestamp(bar.begins_at))) throw new Error("Invalid daily bar date");
-    if (bar.interpolated === true) throw new Error("Invalid daily bars");
-    if (seen.has(at)) throw new Error("Duplicate daily bar");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(at) || !Number.isFinite(timestamp(bar.begins_at))) throw new DailyBarsError("Invalid daily bar date");
+    if (bar.interpolated === true) throw new DailyBarsError("Interpolated daily bar");
+    if (seen.has(at)) throw new DailyBarsError("Duplicate daily bar");
     seen.add(at);
     const prices = [bar.open_price, bar.high_price, bar.low_price, bar.close_price].map(Number);
-    if (!prices.every(v => Number.isFinite(v) && v > 0) || prices[1]! < prices[2]!) throw new Error("Invalid daily bar prices");
+    if (!prices.every(v => Number.isFinite(v) && v > 0) || prices[1]! < prices[2]!) throw new DailyBarsError("Invalid daily bar prices");
     out.time.push(at); out.open.push(prices[0]!); out.high.push(prices[1]!); out.low.push(prices[2]!); out.close.push(prices[3]!);
   }
-  if (out.time.some((t, i) => i > 0 && t <= out.time[i - 1]!)) throw new Error("Daily bars are out of order");
+  if (out.time.some((t, i) => i > 0 && t <= out.time[i - 1]!)) throw new DailyBarsError("Daily bars are out of order");
   return out;
 }
 export class RobinhoodMarketData {

@@ -4,12 +4,13 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
-import { RobinhoodMarketData, validateSymbols } from "./market-data.ts";
+import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
+import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
-import { entryCapacity, setupGuide, type GuideRun } from "./setup-guide.ts";
+import { entryCapacity, etDate, setupGuide, type GuideRun } from "./setup-guide.ts";
 import { checkSymbols, type SymbolSource } from "./symbol-check.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
@@ -68,24 +69,34 @@ export class TradingAgentService {
     if (!date) throw new Error("No supported session to check against");
     return checkSymbols(this.#symbols, symbols, date);
   }
+  /** The last session whose bar is final: today's, once it has closed, and otherwise the day before. A day still
+   *  trading has a half-formed bar. An uncovered calendar year is treated as still trading, so a provisional bar is
+   *  never mistaken for a settled one. */
+  #settledThrough(now: number) {
+    const today = etDate(now);
+    try { return !isTradingDay(today) || now >= sessionTimes(today).close ? today : addDays(today, -1); }
+    catch { return addDays(today, -1); }
+  }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
-   *  stock per day is kept in memory, pinned to the split adjustment it was fetched with. */
+   *  stock per settled session is kept in memory, pinned to the split adjustment it was fetched with. */
   async levels(symbols: string[], timeframe?: Timeframe): Promise<SymbolLevels[]> {
     validateSymbols(symbols);
     if (!this.#ready()) throw new Error("Connect Robinhood market data first");
-    const now = this.#clock(), today = new Date(now).toISOString().slice(0, 10);
+    const now = this.#clock(), settled = this.#settledThrough(now);
+    for (const [key, held] of this.#dailyBars) if (held.on !== settled) this.#dailyBars.delete(key);   // yesterday's bars are dead weight
     const quotes = await this.market.quotes(symbols).catch(() => [] as { symbol: string; price: number | null; fresh: boolean }[]);
     const out: SymbolLevels[] = [];
     for (const symbol of symbols) {
       const cached = this.#dailyBars.get(symbol);
-      let bars = cached?.on === today ? cached.bars : undefined;
+      let bars = cached?.on === settled ? cached.bars : undefined;
       if (!bars) {
         try {
           // Two years for the longest window, plus a run-up for the 200-day average and for swing points at its edge.
-          bars = await this.market.dailyBars(symbol, now - 1000 * 86400000, now);
-          this.#dailyBars.set(symbol, { on: today, bars });
+          // Today's forming bar is dropped rather than measured: its high, low and close are all still provisional.
+          bars = sessionsBefore(await this.market.dailyBars(symbol, now - 1000 * 86400000, now), addDays(settled, 1));
+          this.#dailyBars.set(symbol, { on: settled, bars });
         } catch (error) {
-          out.push({ symbol, unavailable: error instanceof Error && /unavailable|Invalid|Duplicate|order/.test(error.message)
+          out.push({ symbol, unavailable: error instanceof DailyBarsError
             ? "no usable daily price history from Robinhood" : "daily price history could not be read" });
           continue;
         }

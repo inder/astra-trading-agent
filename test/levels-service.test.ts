@@ -9,9 +9,15 @@ import { TradingAgentService, type SymbolLevels } from "../src/agent-service.ts"
 import { createAgentMcpServer } from "../src/agent-mcp.ts";
 import type { RobinhoodConnection } from "../src/broker-connection.ts";
 import type { DailyBars } from "../src/levels.ts";
+import { DailyBarsError, normalizeDailyBars } from "../src/market-data.ts";
 import { syntheticBars } from "./levels-fixture.ts";
 
+// The settled history ends Wednesday 9 September 2026. Robinhood also returns the current session while it trades,
+// so the fixture appends Thursday the 10th: a bar the service must drop until that session closes.
 const bars = syntheticBars();
+const forming = { time: "2026-09-10", open: 131.2, high: 133.4, low: 130.9, close: 132.8 };
+const withToday = (series: DailyBars): DailyBars => ({ time: [...series.time, forming.time], open: [...series.open, forming.open],
+  high: [...series.high, forming.high], low: [...series.low, forming.low], close: [...series.close, forming.close] });
 const barPayload = (symbol: string, series: DailyBars) => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
   bars: series.time.map((t, i) => ({ begins_at: `${t}T13:30:00Z`, open_price: String(series.open[i]), high_price: String(series.high[i]),
     low_price: String(series.low[i]), close_price: String(series.close[i]), volume: "1000", session: "reg" })) }] } });
@@ -21,19 +27,21 @@ const quotePayload = (symbols: string[], price: number, tradeAt: number) => ({ d
   bid_price: String(price - 0.01), ask_price: String(price + 0.01), venue_bid_time: new Date(tradeAt).toISOString(),
   venue_ask_time: new Date(tradeAt).toISOString() } })) } });
 
-function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; barsFail?: boolean; ready?: boolean } = {}) {
+function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; barsFail?: boolean | "malformed"; ready?: boolean; now?: number } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "astra-levels-"));
   const reads: string[] = [];
   const broker = { read: async (tool: string, args: Record<string, unknown>) => {
       reads.push(`${tool}:${(args.symbols as string[]).join(",")}`);
       if (tool === "get_equity_quotes") return quotePayload(args.symbols as string[], 131.5, options.quoteAt ?? Date.now() - 1000);
       if (tool === "get_equity_historicals") {
-        if (options.barsFail) throw new Error("test-only outage");
-        return barPayload((args.symbols as string[])[0]!, bars);
+        if (options.barsFail === "malformed") return { data: { results: [{ symbol: "FIXA", interval: "day", bars: "not bars" }] } };
+        if (options.barsFail) throw new Error("Robinhood market-data read failed; check connection status. No order was submitted.");
+        return barPayload((args.symbols as string[])[0]!, withToday(bars));
       }
       throw new Error("unexpected tool");
     }, status: () => ({ state: options.ready === false ? "disconnected" : "connected" }), close: async () => {} } as unknown as RobinhoodConnection;
-  const service = new TradingAgentService(directory, undefined, broker, { ready: () => options.ready !== false, clock: () => Date.parse("2026-09-10T12:00:00Z"), auto: false });
+  const service = new TradingAgentService(directory, undefined, broker,
+    { ready: () => options.ready !== false, clock: () => options.now ?? Date.parse("2026-09-10T12:00:00Z"), auto: false });
   t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }); });
   return { service, reads };
 }
@@ -60,10 +68,13 @@ test("a stale quote falls back to the last close, and says so", async t => {
   const got = usable((await f.service.levels(["FIXA"]))[0]!);
   assert.equal(got.priceSource, "close"); assert.equal(got.price, bars.close.at(-1));
 });
-test("a stock whose history cannot be read is named, and the others still answer", async t => {
+test("a stock whose history cannot be read is named, and a broken read is not called a missing history", async t => {
   const f = fixture(t, { barsFail: true });
   const [only] = await f.service.levels(["FIXA"]);
+  // The broker's own failure text mentions "no order was submitted"; that must not be read as unusable bars.
   assert.deepEqual(only, { symbol: "FIXA", unavailable: "daily price history could not be read" });
+  const g = fixture(t, { barsFail: "malformed" });
+  assert.deepEqual((await g.service.levels(["FIXA"]))[0], { symbol: "FIXA", unavailable: "no usable daily price history from Robinhood" });
 });
 test("levels need the market-data connection, and refuse bad ticker lists", async t => {
   const f = fixture(t, { ready: false });
@@ -73,6 +84,38 @@ test("levels need the market-data connection, and refuse bad ticker lists", asyn
   await assert.rejects(g.service.levels([]), /Invalid ticker list/);
 });
 
+test("bars Robinhood cannot vouch for are refused, never turned into a level", () => {
+  const one = (bar: Record<string, unknown>, symbol = "FIXA") => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
+    bars: [{ begins_at: "2026-09-08T13:30:00Z", open_price: "10", high_price: "11", low_price: "9", close_price: "10.5" }, bar] }] } });
+  const good = { begins_at: "2026-09-09T13:30:00Z", open_price: "10.5", high_price: "12", low_price: "10", close_price: "11.75" };
+  assert.deepEqual(normalizeDailyBars(one(good), "FIXA").close, [10.5, 11.75]);
+  const refused: [string, unknown][] = [
+    // An interpolated bar is the dangerous one: it looks like a session and nothing downstream can tell it was invented.
+    ["Interpolated daily bar", one({ ...good, interpolated: true })],
+    ["Duplicate daily bar", one({ ...good, begins_at: "2026-09-08T13:30:00Z" })],
+    ["Daily bars are out of order", one({ ...good, begins_at: "2026-09-05T13:30:00Z" })],
+    ["Invalid daily bar date", one({ ...good, begins_at: "2026-09-09" })],
+    ["Invalid daily bar prices", one({ ...good, high_price: "9" })],
+    ["Invalid daily bar prices", one({ ...good, close_price: "0" })],
+    ["Invalid daily bar prices", one({ ...good, open_price: "n/a" })],
+    ["Daily bars unavailable", one(good, "OTHER")],
+    ["Daily bars unavailable", { data: { results: [{ symbol: "FIXA", interval: "5minute", bars: [good] }] } }],
+    ["Daily bars unavailable", { data: { results: [] } }],
+    ["Daily bars unavailable", { data: {} }],
+  ];
+  for (const [message, raw] of refused) {
+    assert.throws(() => normalizeDailyBars(raw, "FIXA"), (e: Error) => e instanceof DailyBarsError && e.message === message, message);
+  }
+});
+test("a half-formed bar is never measured or cached: today counts only once its session has closed", async t => {
+  const duringTheDay = fixture(t, { now: Date.parse("2026-09-10T15:00:00Z") });       // 11:00 a.m. ET, still trading
+  const mid = usable((await duringTheDay.service.levels(["FIXA"]))[0]!);
+  assert.equal(mid.asOf, "2026-09-09", "today's forming bar is left out");
+  const afterTheClose = fixture(t, { now: Date.parse("2026-09-10T20:30:00Z") });      // 4:30 p.m. ET, the session is final
+  const done = usable((await afterTheClose.service.levels(["FIXA"]))[0]!);
+  assert.equal(done.asOf, "2026-09-10", "once closed, today is a session like any other");
+  assert.equal(done.sessions, mid.sessions + 1);
+});
 async function overMcp(t: { after: (fn: () => unknown) => void }, options: Parameters<typeof fixture>[1] = {}) {
   const f = fixture(t, options);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

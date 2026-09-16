@@ -101,12 +101,12 @@ than a tool, and are marked.
 
 **You:** Where is support and resistance for HPE?
 
-> **Astra:** HPE, from two years of daily bars through Monday, September 14. Last close $60.20; a day's range averages $0.72 (1.2%), which sets how wide these zones are.
+> **Astra:** HPE, from two years of daily bars through Monday, September 14. Last close $60.20; a day's swing, overnight gaps included, averages $0.72 (1.2%), and that sets how wide these zones are.
 >
 > - **Just above:** $60.24–$60.59, touched 17 times, most recently Monday.
 > - **Just below:** $59.80–$60.12, also 17 touches, the last one Monday. Then $59.38–$59.63 (16) and $58.93–$59.13 (14).
-> - **Rising support line:** up since January 8 and still unbroken; it sits near $56.88 tomorrow, well under the price.
-> - **Falling line since August 26:** touched four times, the last two this month. It sat at $60.35 on Monday and reaches about $60.24 tomorrow — the same shelf as the zone above.
+> - **Rising support line:** up since January 8, with no close dropping through it since; it reaches about $56.88 tomorrow, well under the price.
+> - **Falling line since August 26:** touched four times, three of them this month. It sat at $60.35 on Monday and reaches about $60.24 tomorrow — the same shelf as the zone above.
 > - **Open gaps below:** June 23 at $56.39–$57.74, and January 6 at $48.96–$50.00. Neither has been filled.
 > - **Moving averages:** 10-day $59.84, 21-day $60.36, 50-day $60.04, 200-day $54.40.
 >

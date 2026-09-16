@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { analyzeWindow, levels, parseLevelsSettings, windowStart, type DailyBars, type Frame, type TrendLine } from "../src/levels.ts";
+import { analyzeWindow, levels, parseLevelsSettings, windowStart, type Analysis, type DailyBars, type Frame, type TrendLine } from "../src/levels.ts";
 import { syntheticBars, syntheticDowntrendBars } from "./levels-fixture.ts";
 
 const bars = syntheticBars();
@@ -96,7 +96,7 @@ test("settings are validated, and changing one changes the answer in the directi
   assert.deepEqual(parseLevelsSettings().movingAverages, [10, 21, 50, 200]);
   for (const bad of [{ swingBars: 0 }, { swingBars: 2.5 }, { atrBars: 1 }, { zoneWidthAtr: 0 }, { trendConfirmTouches: 1 },
     { minSessions: 4 }, { movingAverages: [10, 10] }, { movingAverages: [1] }, { timeframes: [] }, { timeframes: ["decade"] },
-    { trendMinBars: 2, swingBars: 2 }, { nonsense: 1 }] as any[]) assert.throws(() => parseLevelsSettings(bad), `${JSON.stringify(bad)}`);
+    { trendMinBars: 2, swingBars: 2 }, { atrBars: 50, minSessions: 20 }, { nonsense: 1 }] as any[]) assert.throws(() => parseLevelsSettings(bad), `${JSON.stringify(bad)}`);
   const strict = levels(bars, parseLevelsSettings({ trendConfirmTouches: 6 }));
   assert.equal(strict.frames.find(f => f.timeframe === "2y")!.trend!.support!.confirmed, false, "a higher bar leaves the same line unconfirmed");
   const wide = levels(bars, parseLevelsSettings({ zoneWidthAtr: 2 })), narrow = levels(bars, parseLevelsSettings({ zoneWidthAtr: 0.1 }));
@@ -156,6 +156,26 @@ test("the zone boundary is exact: levels a zone width apart share a zone, a cent
   };
   assert.equal(zonesFor(111).length, 1, "exactly one width apart: one zone");
   assert.equal(zonesFor(111.01).length, 2, "a cent wider apart: two zones");
+});
+test("prices that are not round numbers group the same way, and the ATR is averaged over the bars there are", () => {
+  // Real quotes carry cents tails; a fixture of clean two-decimal prices would never exercise the comparison's edge.
+  const odd = (i: number) => Math.round((100 + Math.sin(i * 1.7) * 3 + i * 0.0137) * 10000) / 10000;
+  const time: string[] = [], open: number[] = [], high: number[] = [], low: number[] = [], closes: number[] = [];
+  for (let i = 0; i < 60; i++) {
+    time.push(new Date(Date.parse("2026-01-05T00:00:00Z") + i * 86400000 * 1.4).toISOString().slice(0, 10));
+    const c = odd(i); open.push(c); closes.push(c); high.push(Math.round((c + 1.0033) * 10000) / 10000); low.push(Math.round((c - 0.9967) * 10000) / 10000);
+  }
+  const uneven: DailyBars = { time, open, high, low, close: closes };
+  const got = analyzeWindow(uneven, settings, 0);
+  assert.ok(!("unavailable" in got), "irregular prices still compute");
+  const { atr, width, resistance, support } = got as Required<Analysis>;
+  assert.ok(atr > 0 && Number.isFinite(atr));
+  for (const z of [...resistance, ...support]) assert.ok(z.hi - z.lo <= width + 1e-9, `${z.id} respects the width on uneven prices`);
+  // Fewer bars than atrBars: the average is over the ranges that exist, not deflated by dividing by the setting.
+  const eight: DailyBars = { time: time.slice(0, 8), open: open.slice(0, 8), high: high.slice(0, 8), low: low.slice(0, 8), close: closes.slice(0, 8) };
+  const short = analyzeWindow(eight, parseLevelsSettings({ atrBars: 14, minSessions: 14 }), 0) as Required<Analysis>;
+  const ranges = [high[0]! - low[0]!, ...Array.from({ length: 7 }, (_, x) => Math.max(high[x + 1]! - low[x + 1]!, Math.abs(high[x + 1]! - closes[x]!), Math.abs(low[x + 1]! - closes[x]!)))];
+  close(short.atr, ranges.reduce((a, b) => a + b, 0) / ranges.length, 1e-9, "ATR over 8 bars, not 14");
 });
 test("windows start where the calendar says", () => {
   assert.equal(windowStart("2026-09-09", "qtd"), "2026-07-01");

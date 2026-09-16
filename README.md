@@ -237,7 +237,7 @@ than a tool, and are marked.
 
 **You:** Buy 100 shares of NVDA in my IRA.
 
-> **Astra:** I can't place an order, in any account. My code allows nine Robinhood calls: six market-data reads, and — when you ask for a portfolio — your accounts, balances and positions. Nothing that places, changes or cancels an order is reachable, whatever Robinhood's consent screen grants. I can add NVDA to a paper plan instead, which simulates the trade and moves no money.
+> **Astra:** I can't place an order, in any account. My code allows nine Robinhood calls: six for market data, and three for reading your accounts, balances and positions when you ask about them. Nothing that places, changes or cancels an order is reachable, whatever Robinhood's consent screen grants. I can add NVDA to a paper plan instead, which simulates the trade and moves no money.
 
 **You:** HPE is sitting on support. Should I buy it here?
 
@@ -397,11 +397,12 @@ the chat client if strategies need to continue after the chat disconnects.
 `trading-agent://readiness` is also available as an MCP resource.
 
 No tools execute shell commands, accept arbitrary filesystem paths or submit
-brokerage orders. The upstream client enforces two runtime allowlists — market
-data, and the three account reads a portfolio needs — even though Robinhood's
-single scope also advertises order tools. Account reads happen only when you ask
-for a portfolio, return masked labels rather than account numbers, and are never
-written to disk.
+brokerage orders. The upstream client enforces two runtime allowlists — six
+market-data reads, and the three account reads the portfolio report needs — even
+though Robinhood's single scope also advertises order tools. Account reads are
+made only when you ask about your accounts, return masked labels rather than
+account numbers, and are never written to disk. `list_accounts` is the only tool
+reaching that path today; the balances and positions reads land with the report.
 
 ### Connect Robinhood independently
 

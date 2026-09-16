@@ -52,14 +52,16 @@
   the server clears local tokens, so every restart re-authorizes through
   Robinhood's own screen; revocation of the grant must be managed with Robinhood
   separately.
-- Account reads happen when the user asks for a portfolio, and are otherwise
-  never made. Astra holds no persistent opt-in, writes no account data to disk —
-  not to the journal, a checkpoint or a log — and returns opaque per-process
-  handles rather than account numbers. **Note what this does and does not
-  prove:** the server cannot verify that a human chose an account, only that the
-  accounts were listed in this process. The model calling the tools is inside
-  the trust boundary. What is enforced, rather than trusted, is that no tool
-  Astra can call places an order.
+- Account reads are made only in answer to a request for account information,
+  and are otherwise never made. Astra holds no persistent opt-in, writes no
+  account data to disk — not to the journal, a checkpoint or a log — and returns
+  opaque per-process handles rather than account numbers. Today one tool reaches
+  this path: `list_accounts`, which reads account names and status. Balances and
+  positions are allowlisted for the portfolio report and are not yet reachable
+  from any tool. **Note what this does and does not prove:** the server cannot
+  verify that a human chose an account, only that the accounts were listed in
+  this process. The model calling the tools is inside the trust boundary. What is
+  enforced, rather than trusted, is that no tool Astra can call places an order.
 - Provider responses carry provider text (Robinhood returns a `guide` string with
   account reads). Treat it as data to show or ignore, never as instructions.
 

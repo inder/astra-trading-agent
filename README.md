@@ -106,7 +106,7 @@ than a tool, and are marked.
 > - **Just above:** $60.24–$60.59, touched 17 times, most recently Monday.
 > - **Just below:** $59.80–$60.12, also 17 touches, the last one Monday. Then $59.38–$59.63 (16) and $58.93–$59.13 (14).
 > - **Rising support line:** up since January 8 and still unbroken; it sits near $56.88 tomorrow, well under the price.
-> - **Falling line since August 26:** touched four times, the last two this month, and it passes through today near $60.24 — the same shelf as the zone above.
+> - **Falling line since August 26:** touched four times, the last two this month. It sat at $60.35 on Monday and reaches about $60.24 tomorrow — the same shelf as the zone above.
 > - **Open gaps below:** June 23 at $56.39–$57.74, and January 6 at $48.96–$50.00. Neither has been filled.
 > - **Moving averages:** 10-day $59.84, 21-day $60.36, 50-day $60.04, 200-day $54.40.
 >

@@ -8,8 +8,21 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { VERSION } from "./version.ts";
 
 export const ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading";
-export const MARKET_READS = ["get_equity_quotes", "get_equity_technical_indicators", "get_equity_historicals", "get_option_chains", "get_option_instruments", "get_option_quotes"] as const;
+export const MARKET_READS = Object.freeze(["get_equity_quotes", "get_equity_technical_indicators", "get_equity_historicals", "get_option_chains", "get_option_instruments", "get_option_quotes"] as const);
 export type MarketRead = typeof MARKET_READS[number];
+/** Account reads live in their own list, with their own accessor, deliberately. Robinhood's single `internal` scope
+ *  grants 73 tools including order placement, so these two arrays are the whole boundary — and keeping them apart
+ *  means a change that widens market data cannot widen account access by accident, and any diff that touches what
+ *  Astra can see of an account is visibly a diff to ACCOUNT_READS. */
+export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
+export type AccountRead = typeof ACCOUNT_READS[number];
+/** Nothing that places, previews, cancels or exercises an order, moves money, or edits a watchlist, alert or scan may
+ *  ever appear in either list. Checked here rather than trusted, because the lists are the only thing stopping it. */
+const FORBIDDEN = /^(place|preview|review|cancel|exercise|create|update|delete|add|remove|follow|unfollow|mark|run)_/;
+for (const tool of [...MARKET_READS, ...ACCOUNT_READS]) {
+  if (FORBIDDEN.test(tool)) throw new Error(`Refusing to allow a mutating tool: ${tool}`);
+}
+if (MARKET_READS.some(t => (ACCOUNT_READS as readonly string[]).includes(t))) throw new Error("Read allowlists must not overlap");
 const allowedURLs = new Set([
   ROBINHOOD_MCP_URL,
   "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading",
@@ -112,16 +125,20 @@ export class RobinhoodConnection {
   #generation = 0;
   #tools = new Set<string>();
   #lastVerifiedAt: string | null = null;
+  #lastAccountReadAt: string | null = null;
   #beginning: Promise<unknown> | undefined;
   constructor(deps: Partial<ConnectionDependencies> = {}) { this.#deps = { ...defaults, ...deps }; }
   status() {
     return { state: this.#state, orderSubmissionEnabled: false, credentialStorage: "memory_only",
       lastMarketReadAt: this.#lastVerifiedAt,
+      lastAccountReadAt: this.#lastAccountReadAt,
+      // Account reads are an optional capability: market data must still connect when the provider does not grant them.
+      accountToolsAvailable: this.#state === "connected" && ACCOUNT_READS.every(t => this.#tools.has(t)),
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),
       authorizationExpiresAt: this.#state === "awaiting_authorization" && this.#expiresAt ? new Date(this.#expiresAt).toISOString() : null,
-      note: "Robinhood may authorize broader access. This adapter only allows market-data reads. Restart requires authorization again." };
+      note: "Robinhood authorizes broader access than this adapter uses. Astra allows market-data reads, and reads of your accounts, balances and positions when you ask for them. It never places, changes or cancels an order. Restart requires authorization again." };
   }
   /** Wait up to ms for a pending browser approval to settle. Never starts one; the checks are in memory only. */
   async waitForAuthorization(ms: number, signal?: AbortSignal) {
@@ -173,7 +190,7 @@ export class RobinhoodConnection {
         }
         if (generation !== this.#generation) throw new Error("Connection cancelled");
         this.#client = candidate; candidate = undefined; this.#tools = new Set(listing.tools.map(t => t.name)); this.#state = "connected";
-        this.#stopCallback(); res.end("Connected for market-data reads. Return to your agent. Real orders are disabled.");
+        this.#stopCallback(); res.end("Connected for market data, and for reading your accounts and positions when you ask. Return to your agent. Real orders are disabled.");
       } catch {
         await candidate?.close().catch(() => {}); provider.invalidateCredentials("all");
         if (generation === this.#generation) { this.#state = "failed"; this.#stopCallback(); }
@@ -206,13 +223,27 @@ export class RobinhoodConnection {
   async read(tool: MarketRead, args: Record<string, unknown>): Promise<unknown> {
     // Runtime allowlist, not just a TypeScript annotation.
     if (!(MARKET_READS as readonly string[]).includes(tool)) throw new Error("Broker mutation or unsupported tool blocked");
+    const payload = await this.#call(tool, args, "Robinhood market-data read failed; check connection status. No order was submitted.");
+    this.#lastVerifiedAt = new Date().toISOString();
+    return payload;
+  }
+  /** An account read. Separate from `read` so the two allowlists can never be confused for one another, and so status
+   *  reports account access separately from market access. The error text is fixed: an account payload or an account
+   *  number must never reach the chat through an error message. */
+  async accountRead(tool: AccountRead, args: Record<string, unknown>): Promise<unknown> {
+    if (!(ACCOUNT_READS as readonly string[]).includes(tool)) throw new Error("Broker mutation or unsupported tool blocked");
+    const payload = await this.#call(tool, args, "Robinhood account read failed; check connection status. No order was submitted.");
+    this.#lastAccountReadAt = new Date().toISOString();
+    return payload;
+  }
+  async #call(tool: string, args: Record<string, unknown>, failure: string): Promise<any> {
     if (this.#state !== "connected" || !this.#client || !this.#tools.has(tool)) throw new Error("Connect Robinhood market data first");
     try {
       const result = await this.#client.callTool({ name: tool, arguments: args });
       if (result.isError) throw new Error("Read failed");
       const payload = result.structuredContent ?? JSON.parse(result.content?.find((c: any) => c.type === "text")?.text ?? "null");
       if (!payload || !payload.data) throw new Error("Invalid provider response");
-      this.#lastVerifiedAt = new Date().toISOString(); return payload;
-    } catch { throw new Error("Robinhood market-data read failed; check connection status. No order was submitted."); }
+      return payload;
+    } catch { throw new Error(failure); }
   }
 }

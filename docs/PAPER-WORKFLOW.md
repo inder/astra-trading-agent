@@ -80,7 +80,7 @@ only way to name an account, they are opaque and per-process, and there is no
 "all" shortcut, so an account is read because someone named it.
 
 ```json
-{ "accounts": ["acct_4f2a91c07b3e"] }
+{ "accounts": ["acct_000000001234"] }
 ```
 
 The reply is a `url` on `127.0.0.1` to open, the `path` it was written to, and an

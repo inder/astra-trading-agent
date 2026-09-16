@@ -14,7 +14,7 @@ const bars = syntheticBars();
 const computed = levels(bars, parseLevelsSettings());
 const series = bars.time.map((time, i) => ({ time, value: bars.close[i]! }));
 const account = (over: Partial<ReportAccount> = {}): ReportAccount => ({
-  label: "••••3312 individual",
+  label: "••••0000 individual",
   totals: { value: 125340.55, cash: 2200, dayChange: -812.4, totalReturn: 18430.22 },
   holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: computed, series: { daily: series } }],
   skipped: 0, truncated: false, ...over,
@@ -23,7 +23,7 @@ const account = (over: Partial<ReportAccount> = {}): ReportAccount => ({
 test("the report states the figures a holder needs, and marks a stock sitting on a level", () => {
   const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /••••3312 individual/);
+  assert.match(html, /••••0000 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
   assert.match(html, /−\$812/, "a loss is shown with a minus, not a bracket");
   assert.match(html, /FIXA/);
@@ -105,7 +105,7 @@ test("what a provider or an issuer wrote cannot become markup", () => {
   assert.match(html, /A&amp;B&lt;C/);
 });
 test("the same stock in two accounts gets two independent sets of tabs, and a total nobody could read is not a total", () => {
-  const two = { accounts: [account(), account({ label: "••••6777 roth ira" })], generatedAt: "2026-09-16T12:00:00.000Z" };
+  const two = { accounts: [account(), account({ label: "••••1234 roth ira" })], generatedAt: "2026-09-16T12:00:00.000Z" };
   const html = portfolioReport(two);
   // Radio groups are document-scoped. Sharing a name would fuse the two tab sets into one group: both would parse as
   // checked, the last would win, and the first account's panes would every one be hidden — an empty drawer.
@@ -118,11 +118,11 @@ test("the same stock in two accounts gets two independent sets of tabs, and a to
 
   // A total is every account or it is nothing. One unreadable account used to be summed as zero, producing a figure
   // that looked like the whole portfolio and was short by an account — and the chat is told to read it out.
-  const partial = overview({ ...two, accounts: [two.accounts[0]!, account({ label: "••••6777 roth ira",
+  const partial = overview({ ...two, accounts: [two.accounts[0]!, account({ label: "••••1234 roth ira",
     totals: { value: null, cash: null, dayChange: null, totalReturn: null } })] });
   assert.equal(partial.totalValue, null, "a total that cannot be complete is not reported");
   assert.equal(partial.totalDayChange, null);
-  assert.deepEqual(partial.unreadableAccounts, ["••••6777 roth ira"], "and the account that could not be read is named");
+  assert.deepEqual(partial.unreadableAccounts, ["••••1234 roth ira"], "and the account that could not be read is named");
   assert.equal(overview(two).totalValue, 125340.55 * 2, "two readable accounts still add up");
 });
 test("the report lands under the data directory, readable by nobody else, and a second one is a second file", async t => {
@@ -134,7 +134,7 @@ test("the report lands under the data directory, readable by nobody else, and a 
   const broker = {
     accountRead: async (tool: string) => {
       reads.push(tool);
-      if (tool === "get_accounts") return { data: { accounts: [{ account_number: "112233312", brokerage_account_type: "individual", is_default: true }] } };
+      if (tool === "get_accounts") return { data: { accounts: [{ account_number: "100000000", brokerage_account_type: "individual", is_default: true }] } };
       if (tool === "get_portfolio") return { data: { portfolio: { total_market_value: "51000", cash: "1000" } } };
       return { data: { positions: [{ symbol: "FIXA", quantity: "120", average_buy_price: "41.22" }], next_cursor: null } };
     },
@@ -155,7 +155,7 @@ test("the report lands under the data directory, readable by nobody else, and a 
   assert.equal(statSync(written.path).mode & 0o777, 0o600, "readable only by its owner");
   assert.equal(statSync(join(dataDirectory, "reports")).mode & 0o777, 0o700);
   const html = readFileSync(written.path, "utf8");
-  assert.match(html, /FIXA/); assert.match(html, /••••3312 individual/); assert.match(html, /\$51,000/);
+  assert.match(html, /FIXA/); assert.match(html, /••••0000 individual/); assert.match(html, /\$51,000/);
   assert.ok(reads.includes("get_portfolio") && reads.includes("get_equity_positions"), "it reads totals and positions");
   assert.ok(!reads.some(r => /order|cancel|place/.test(r)), "and nothing else");
   // The journal, the checkpoints and the saved runs are the data directory's own files; an account is in none of them.
@@ -174,7 +174,7 @@ test("past the charting cap the largest positions keep their charts, and the res
   const charted: string[] = [];
   const broker = {
     accountRead: async (tool: string) => {
-      if (tool === "get_accounts") return { data: { accounts: [{ account_number: "112233312", brokerage_account_type: "individual", is_default: true }] } };
+      if (tool === "get_accounts") return { data: { accounts: [{ account_number: "100000000", brokerage_account_type: "individual", is_default: true }] } };
       if (tool === "get_portfolio") return { data: { portfolio: { total_market_value: "51000", cash: "1000" } } };
       return { data: { positions, next_cursor: null } };
     },
@@ -247,7 +247,7 @@ test("the report is reachable on loopback, and that link serves only reports thi
   assert.match(sent, /frame-ancestors 'none'/);
   assert.equal(page.headers.get("cache-control"), "no-store");
   const body = await page.text();
-  assert.match(body, /••••3312 individual/);
+  assert.match(body, /••••0000 individual/);
 
   // A browser enforces every policy it is given, so the header must permit exactly what the page pins. A header that
   // named no script-src would fall back to default-src 'none' and silently kill the print button — the page would
@@ -280,7 +280,7 @@ test("the report is reachable on loopback, and that link serves only reports thi
   assert.equal((await fetch(url)).status, 410);
 });
 test("the overview says enough for the chat to summarize, and leaves the detail in the report", () => {
-  const input = { accounts: [account(), account({ label: "••••6777 roth ira",
+  const input = { accounts: [account(), account({ label: "••••1234 roth ira",
     totals: { value: 40000, cash: 0, dayChange: 120, totalReturn: 900 },
     holdings: [
       { holding: { symbol: "FIXA", shares: 10, averageCost: 200 }, levels: computed, series: { daily: series } },
@@ -288,7 +288,7 @@ test("the overview says enough for the chat to summarize, and leaves the detail 
     ] })], generatedAt: "2026-09-16T12:00:00.000Z" };
   const summary = overview(input);
   assert.equal(summary.asOf, "2026-09-16");
-  assert.deepEqual(summary.accounts.map(a => [a.label, a.holdings]), [["••••3312 individual", 1], ["••••6777 roth ira", 2]]);
+  assert.deepEqual(summary.accounts.map(a => [a.label, a.holdings]), [["••••0000 individual", 1], ["••••1234 roth ira", 2]]);
   assert.equal(summary.totalValue, 165340.55, "totals add up across the accounts");
   assert.equal(summary.totalDayChange, -692.4);
   assert.deepEqual(summary.unreadable, ["QUIET"], "and it names what could not be read");

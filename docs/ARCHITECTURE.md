@@ -67,6 +67,48 @@ and a provisional high, low and close must never be measured or cached as a
 completed bar. A stock whose history cannot be read is named in the answer; the
 others still answer.
 
+## Accounts and the portfolio report
+
+Account reads are a second allowlist, not an extension of the first. `ACCOUNT_READS`
+(`get_accounts`, `get_portfolio`, `get_equity_positions`) has its own accessor
+beside `MARKET_READS`, so widening the market-data path cannot widen the account
+path by accident, and a startup check refuses to run if either list ever names a
+mutation. Robinhood's single scope grants 73 tools, order placement included;
+these nine are the whole boundary.
+
+`portfolio.ts` is the trust edge. Every account response is rebuilt field by field
+from an allowlist rather than filtered, so provider text nobody asked for — the
+`guide` string Robinhood returns with account reads among it — never reaches the
+model or the page. An account's type must match a closed vocabulary of ordinary
+words, because a free-text field beside a masked account number is an injection
+channel. A holding whose symbol or share count cannot be read is dropped and
+counted, never guessed: a made-up holding is worse than a missing one. Errors leave
+this path through `sealed()`, which replaces any message not on a short list, so a
+message interpolating an account number cannot reach a transcript by being written
+carelessly.
+
+Account numbers never enter the chat. Callers hold a handle that is random for this
+process, forgotten when it exits, and invalidated on reconnect — a reconnect may be
+a different Robinhood login, so handles minted under the previous one must not
+resolve. There is no "all accounts" shortcut: an account is read because someone
+named it.
+
+`report.ts` is a pure function from accounts to one self-contained HTML page: no
+network, no fonts, no library, one inline script pinned by hash in the page's own
+policy. Charts are SVG drawn from the same `levels` output the table quotes, so
+the drawn line and the stated number cannot disagree. `report-server.ts` serves
+written reports on loopback, because a file path is readable by a chat client only
+inside its own working directory and that directory moves; a URL has no such rule.
+It is not a file server — a name it did not mint is not served, so a traversal has
+nothing to traverse to — and its policy is the page's own, because a browser
+enforces every policy it is given and a stricter header would silently forbid the
+script the page pins.
+
+The report file is the one place account data is written down: one file, mode
+`0600`, under the data directory, at a path settled at construction rather than
+passed per call. It is never journalled, logged or checkpointed. Bars are cached
+because they are market data; nothing about an account is.
+
 ## Transactions and recovery
 
 Configuration does not start itself. An explicit start reserves the strategy/date
@@ -97,6 +139,12 @@ out-of-band channel.
 ## Outside this release
 
 Remote HTTPS/client OAuth, durable credential storage, process supervision,
-multi-tenancy, account-wide reporting and real-order execution are not implemented.
+multi-tenancy and real-order execution are not implemented. Account reporting
+covers what is held now — cost basis, market value and unrealized profit and loss,
+with levels around each holding. Realized profit and loss, transaction history,
+time-weighted return, options and crypto positions, and anything cross-account are
+not read: the page says how much of an account's value its equities table does not
+cover rather than implying the two reconcile.
+
 A real Robinhood login, market-hours freshness and the user's chat-client setup
 remain attended acceptance gates; mock tests do not establish those facts.

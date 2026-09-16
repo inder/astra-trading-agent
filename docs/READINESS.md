@@ -5,6 +5,12 @@ configuration, independent browser authorization, continuously scheduled runs,
 option selection, assumed fills, positions and estimated P&L, reviewed trims/
 closes, durable history, stop and explicit management-only recovery.
 
+Two read-only surfaces sit beside it. `get_levels` answers where a stock's support
+and resistance are, from daily or weekly bars. `get_portfolio_report` reads the
+accounts the user names — balances and equity positions — and writes a printable
+report of what they hold with those levels around each holding, served on loopback.
+Both are advisory, and neither can reach a tool that places an order.
+
 ## Evidence
 
 Agent-guided installation is documented in the root INSTALL.md, linked from the
@@ -27,6 +33,17 @@ failure, revisions, recovery, session/early-close handling, and write-off of
 contracts that cannot be sold before the close. A timer test verifies progress without a chat
 client driving each tick. CI repeats typecheck and tests on Node 24 and 26.
 
+For the account path, tests assert that every one of the 73 tools Robinhood's scope
+granted is refused except the nine on the allowlists, that provider text and hostile
+account-type strings cannot reach the model or the page, that a malformed holding is
+dropped and counted rather than guessed, and that an error names no account. For the
+report: that it lands only under the data directory at mode `0600`, that a second
+report is a second file, that one stock held in two accounts gets independent
+charts, that the loopback server serves only names it minted and refuses a
+cross-origin or non-GET request, that two concurrent reports share one listener, and
+that the policy the server sends admits the script the page pins. Account data in
+these tests is invented; no real account is read by the suite.
+
 ## Attended acceptance gate
 
 After installation, follow [the full walkthrough](PAPER-WORKFLOW.md). The owner
@@ -38,7 +55,10 @@ No real-account readiness or trading performance is claimed.
 
 ## Known limits
 
-- PAPER only: no real orders, live flag, account holdings or account-wide P&L.
+- Trading is PAPER only: no real orders and no live flag. Real accounts are read,
+  but only read — balances and equity positions, when asked, for the portfolio
+  report. Its profit and loss is unrealized and covers equities held now; realized
+  P&L, transaction history and account-wide return are not read.
 - Assumed ask/bid fills, no execution guarantees, partial fills or actual fees.
   P&L excludes fees; missing marks are unavailable, never zero-valued marks.
 - Polling (default one second) is not streaming. Latency and the freshness/gap

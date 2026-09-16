@@ -14,18 +14,25 @@ model-agnostic; its name does not require a particular model or provider.
 **Version 0.3: the end-to-end PAPER workflow is implemented and tested with mocked
 market data.** Configure and start continuous strategies, inspect positions and
 option P&L, review trims/closes in your browser, and recover saved positions.
+Astra also reads your real accounts when you ask it to, and writes a printable
+portfolio report — cost basis, profit and loss, and the support and resistance
+around each holding on an expandable chart. Reading is all it does: the same code
+allowlist that blocks order tools governs every account call.
 Independent browser authorization is mock-tested; successful Robinhood login and
-market-hours delivery still need an attended acceptance test. No real orders or
-real-account P&L are supported. There is no live flag. Installing it does not
+market-hours delivery still need an attended acceptance test. No real orders are
+supported, and no P&L from trading: the report's profit and loss is what holdings
+are worth against what was paid for them, never a record of trades, and simulated
+P&L is always labelled as such. There is no live flag. Installing it does not
 start a strategy. This is not a
 production trading system or a claim of strategy profitability.
 
 ## Quick start
 
 Astra works inside the AI app you already use, such as Codex or Claude Code. You
-talk to it in plain English. It watches the stocks you pick at the market open and
-simulates option trades on real Robinhood prices. **Paper only: it never places
-real orders, and no money moves.**
+talk to it in plain English. It shows you what you already own, with the support
+and resistance around each holding, and it watches the stocks you pick at the
+market open and simulates option trades on real Robinhood prices. **Paper only:
+it never places real orders, and no money moves.**
 
 ### 1. Install it with one prompt
 
@@ -45,9 +52,11 @@ The app needs to be able to run commands on your computer. Chat apps that can't
 
 Below is a replayed session. The replies come from Astra's real tools, run on a
 simulated trading day (Tuesday, September 15, 2026) with **invented prices** for
-CRWV, HPE and SMCI. Your session uses live Robinhood prices, and the wording
-depends on your AI app. Two answers come from Astra's rules and settings rather
-than a tool, and are marked.
+CRWV, HPE and SMCI. The accounts and holdings in "See what you own" are invented
+too — no real account was read to write this page. Your session uses live
+Robinhood prices and your own accounts, and the wording depends on your AI app.
+Two answers come from Astra's rules and settings rather than a tool, and are
+marked.
 
 #### Get started
 
@@ -88,6 +97,30 @@ than a tool, and are marked.
 **You:** Is Robinhood still connected?
 
 > **Astra:** Yes. Quotes and price history are available, and order submission is off. The approval lasts until this app restarts.
+
+#### See what you own
+
+**You:** Which accounts can you see?
+
+> **Astra:** Two: ••••3312 individual and ••••6777 roth ira. I've read their names and status only — no balances, no positions. Which should I report on?
+
+**You:** Both.
+
+> **Astra:** Here's the report: http://127.0.0.1:52431/r/8fQ2xBd1Zv0p — it opens in your browser and prints.
+>
+> The two accounts hold $371,380 together, down $2,480 today. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+58.1%), HPE (+31.4%) and DELL (+12.9%); worst is INTC (−8.2%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
+
+The page shows a row per holding with shares, average cost, last close, market
+value, unrealized P&L, and the nearest support below and resistance above.
+Holdings closest to a level come first. **Technicals** under any row expands to a
+full chart with QTD, YTD, 2-year daily and 5-year weekly tabs, the zones drawn as
+bands, and a dashed line at your cost. **Print or save as PDF** from the page;
+only the charts you opened print, in the timeframe you chose.
+
+Reading your accounts happens only when you ask about them. The report is the one
+place Astra writes any of it down — a single file under its data directory,
+readable only by you — and the link dies when Astra restarts. Nothing on the page
+is a recommendation: it reports what the rules found.
 
 #### Plan the day
 

@@ -11,6 +11,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { REPORT_CSP } from "./report.ts";
 
 export class ReportServer {
   #server: Server | undefined;
@@ -38,8 +39,11 @@ export class ReportServer {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
         "referrer-policy": "no-referrer",
-        // The page is self-contained, so nothing needs to be fetched, and nothing may be.
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        // The page is self-contained, so nothing needs to be fetched, and nothing may be. This is the page's own
+        // policy, not a second one: a browser enforces every policy it is given, so a header stricter than the page
+        // would forbid the script the page pins by hash and quietly break the print button. Framing is refused here
+        // rather than in the page, because a meta policy cannot say it.
+        "content-security-policy": `${REPORT_CSP}; frame-ancestors 'none'`,
         "x-content-type-options": "nosniff",
       };
       const url = new URL(request.url ?? "/", "http://127.0.0.1");

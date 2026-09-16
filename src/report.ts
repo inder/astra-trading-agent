@@ -261,21 +261,29 @@ export function overview(input: ReportInput): PortfolioOverview {
     near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable };
 }
 
+// The page's only script: the print button, and pointing "save" at the page itself. Its hash is named in the policy
+// below, so this exact text may run and nothing else — including anything that reached the markup.
+const SCRIPT = `document.getElementById("print").addEventListener("click",function(){window.print()});` +
+  `document.getElementById("save").setAttribute("href",window.location.href);`;
+/** The report's policy — the page's own, and the one the server sends with it.
+ *
+ *  Both must say the same thing. A browser given two policies enforces both, so a served page is held to their
+ *  intersection: a header that says `default-src 'none'` and names no `script-src` forbids the very script the page
+ *  pins by hash, and the print button silently stops working. One exported policy is why that cannot drift. */
+export const REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; " +
+  `script-src 'sha256-${createHash("sha256").update(SCRIPT).digest("base64")}'; base-uri 'none'; form-action 'none'`;
+
 /** The whole report. Self-contained: no network, no fonts to fetch, and one small script for the print button whose
  *  hash is named in the page's own policy, so nothing else can run even if something got into the markup. */
 export function portfolioReport(input: ReportInput): string {
   const accounts = input.accounts.map(account).join("\n");
   const holdings = input.accounts.reduce((n, a) => n + a.holdings.length, 0);
-  // The page's only script: the print button, and pointing "save" at the page itself. Its hash is named in the
-  // policy below, so this exact text may run and nothing else — including anything that reached the markup.
-  const script = `document.getElementById("print").addEventListener("click",function(){window.print()});` +
-    `document.getElementById("save").setAttribute("href",window.location.href);`;
-  const hash = createHash("sha256").update(script).digest("base64");
+  const script = SCRIPT;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Portfolio levels — ${escape(day(input.generatedAt.slice(0, 10)))}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="content-security-policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="content-security-policy" content="${REPORT_CSP}">
 <style>
   :root { color-scheme: light dark;
     --ink: #10171c; --muted: #5a6b70; --rule: #d6dedc; --ground: #fbfcfc; --panel: #fff;

@@ -187,9 +187,22 @@ test("the report is reachable on loopback, and that link serves only reports thi
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/r\/[\w-]{12}$/, "loopback only, and an unguessable name");
   const page = await fetch(url);
   assert.equal(page.status, 200);
-  assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  const sent = page.headers.get("content-security-policy") ?? "";
+  assert.match(sent, /default-src 'none'/);
+  assert.match(sent, /frame-ancestors 'none'/);
   assert.equal(page.headers.get("cache-control"), "no-store");
-  assert.match(await page.text(), /••••3312 individual/);
+  const body = await page.text();
+  assert.match(body, /••••3312 individual/);
+
+  // A browser enforces every policy it is given, so the header must permit exactly what the page pins. A header that
+  // named no script-src would fall back to default-src 'none' and silently kill the print button — the page would
+  // look right and the one control on it would do nothing.
+  const pinned = body.match(/content="([^"]*script-src [^"]*)"/)?.[1] ?? "";
+  assert.ok(pinned.includes("script-src 'sha256-"), "the page pins its script by hash");
+  const hashOf = (policy: string) => policy.match(/script-src '(sha256-[^']+)'/)?.[1];
+  assert.equal(hashOf(sent), hashOf(pinned), "and the header sends that same hash, not a stricter policy");
+  assert.equal(hashOf(sent), `sha256-${createHash("sha256").update(body.match(/<script>([^<]*)<\/script>/)![1]!).digest("base64")}`,
+    "which is the hash of the script actually in the page");
 
   // A name nobody minted is not a file path, so there is nothing to traverse to.
   assert.equal((await fetch(`${new URL(url).origin}/r/${encodeURIComponent("../../etc/passwd")}`)).status, 404);

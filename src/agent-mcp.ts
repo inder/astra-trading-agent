@@ -13,8 +13,10 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const reply = (result: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(result) }] });
   // The guided next step rides on setup results too, for clients that don't pass server instructions to their model.
   const next = () => { try { return service.guide(); } catch { return null; } };
-  const guarded = (action: () => unknown, lead = false) => {
-    try { return reply(lead ? { ...action() as object, next: next() } : action()); }
+  // lead: true leads every reply with the next step; "on_error" leads only failures, for tools whose success is
+  // an answer rather than a setup step (an advisory reading must not read as a nudge into the paper flow).
+  const guarded = (action: () => unknown, lead: boolean | "on_error" = false) => {
+    try { return reply(lead === true ? { ...action() as object, next: next() } : action()); }
     catch (error) {
       // Filesystem errors must not leak paths, machine details or stored contents.
       const code = (error as NodeJS.ErrnoException).code;
@@ -22,7 +24,7 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
         error instanceof Error ? error.message : "Request failed", ...(lead ? { next: next() } : {}) }), isError: true };
     }
   };
-  const asyncGuarded = async (action: () => Promise<unknown>, lead = false) => {
+  const asyncGuarded = async (action: () => Promise<unknown>, lead: boolean | "on_error" = false) => {
     try { const result = await action(); return guarded(() => result, lead); }
     catch (error) { return guarded(() => { throw error; }, lead); }
   };
@@ -60,6 +62,11 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("check_symbols", { description: "Check tickers the user proposes before saving a paper plan: each one's latest Robinhood price and whether it lists the week-ending call expiry Astra's entry rule needs for the next session. Read-only: one quote batch and one option-chain read per ticker. Strikes and option prices are judged at entry, not here.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } },
     a => asyncGuarded(async () => ({ ...await service.checkSymbols(a.symbols), problems: SYMBOL_PROBLEMS }), true));
+  server.registerTool("get_levels", { description: "Support and resistance for stocks, computed from daily Robinhood bars: price zones with how often they were tested, open gaps, trend lines and moving averages, for the quarter, the year and two years. Reads market data only, never an account. Advisory: it describes what the rules found, never what to buy or sell.",
+    inputSchema: z.object({ symbols: configSchema.symbols,
+      timeframe: z.enum(["qtd", "ytd", "2y"]).optional().describe("Which window to show; by default the longest one with enough history.") }).strict(),
+    annotations: { ...readOnly, openWorldHint: true } },
+    a => asyncGuarded(async () => ({ levels: await service.levels(a.symbols, a.timeframe), advisory: true, ordersSubmitted: 0 }), "on_error"));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } }, async a => {
       try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }

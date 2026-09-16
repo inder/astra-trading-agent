@@ -47,6 +47,35 @@ const contracts = (symbol: string) => strikesFor(symbol).map(strike => ({ id: co
   tickBelow: .01, tickAbove: .05, tickCutoff: 3, selloutAt: `${EXPIRY}T19:30:00Z` }));
 const byId = new Map([...known].flatMap(s => contracts(s).map(k => [k.id, k] as const)));
 
+// Two years of invented daily bars per stock, ending at the prior close: a long rise, two earnings gaps and a
+// pullback, so the sample levels have zones, an open gap and a trend line to show. Weekdays only, oldest first.
+const dailyBars = (symbol: string) => {
+  const sessions = 520, base = priorClose[symbol]!, seed = symbol.charCodeAt(0) + symbol.length;
+  const jitter = (i: number) => { const x = Math.sin(seed * (i + 1) * 12.9898) * 43758.5453; return x - Math.floor(x); };
+  // The continuous drift, and separately the jumps: a jump belongs to the open, so it prints as a real gap
+  // (the day's low above the day before's high) rather than one very wide bar.
+  const drift = (i: number) => {
+    const t = i / (sessions - 1);
+    return 1 + 0.55 * t + 0.07 * Math.sin(t * 7 + seed) + 0.012 * (jitter(i) - 0.5) - (i >= sessions - 12 ? 0.06 : 0);
+  };
+  const jump = (i: number) => (i >= sessions - 180 ? 0.04 : 0) + (i >= sessions - 60 ? 0.05 : 0);
+  const shape = (i: number) => drift(i) + jump(i);
+  const scale = base / shape(sessions - 1);
+  const cents = (v: number) => Math.round(v * 100) / 100;
+  const out: { begins_at: string; open_price: string; high_price: string; low_price: string; close_price: string; volume: string; session: string }[] = [];
+  let day = Date.parse(`${DATE}T13:30:00Z`);
+  const dates: number[] = [];
+  while (dates.length < sessions) { day -= 86400000; const d = new Date(day).getUTCDay(); if (d !== 0 && d !== 6) dates.unshift(day); }
+  for (let i = 0; i < sessions; i++) {
+    const close = cents(shape(i) * scale);
+    const open = cents(i === 0 ? close * 0.995 : (drift(i - 1) + jump(i)) * scale * (1 + 0.002 * (jitter(i + 7) - 0.5)));
+    const high = cents(Math.max(open, close) * (1 + 0.006 * jitter(i + 3))), low = cents(Math.min(open, close) * (1 - 0.006 * jitter(i + 5)));
+    out.push({ begins_at: iso(dates[i]!), open_price: String(open), high_price: String(high), low_price: String(low),
+      close_price: String(close), volume: String(1200000 + Math.round(jitter(i + 11) * 800000)), session: "reg" });
+  }
+  return out;
+};
+
 const market: PaperMarket = {
   async quotes(requested) {
     if (requested.length === 1 && recheck[requested[0]!] !== undefined) {   // the entry re-reads one stock: a slightly later trade
@@ -86,8 +115,12 @@ function fakeBroker() {
   const client: BrokerToolClient = {
     listTools: async () => ({ tools: MARKET_READS.map(name => ({ name })) }),
     callTool: async ({ name, arguments: args }) => {
-      if (name !== "get_equity_quotes") throw new Error("not in this sample");
       const symbols = (args as { symbols: string[] }).symbols;
+      if (name === "get_equity_historicals") {
+        if ((args as { interval?: string }).interval !== "day") throw new Error("not in this sample");
+        return { structuredContent: { data: { results: symbols.map(symbol => ({ symbol, interval: "day", bounds: "regular", bars: dailyBars(symbol) })) } } };
+      }
+      if (name !== "get_equity_quotes") throw new Error("not in this sample");
       return { structuredContent: { data: { results: symbols.map(symbol => ({ quote: { symbol, state: "active", has_traded: true,
         last_trade_price: String(priorClose[symbol]), venue_last_trade_time: iso(at("16:00:00") - 86400000 + 0),
         last_non_reg_trade_price: String(premarket[symbol]), venue_last_non_reg_trade_time: iso(now - 30000),
@@ -141,6 +174,7 @@ await a.call("connect-wait", "wait_for_robinhood", { seconds: 20 });   // report
 await a.call("broker-status", "get_broker_status");
 await a.call("check", "check_symbols", { symbols: ["CRWV", "HPE", "SMCI", "CRVW"] });
 await a.call("quotes", "get_market_quotes", { symbols: ["CRWV", "HPE", "SMCI"] });
+await a.call("levels", "get_levels", { symbols: ["HPE"] });
 await a.call("plan", "configure_paper_strategy", { runId, strategyId: "opening-range-options", date: DATE, symbols: ["CRWV", "HPE", "SMCI"], includePremarket: false,
   maxPremiumPerTradeDollars: 1000, maxPremiumPerDayDollars: 2000 });
 await a.call("plan-readiness", "get_readiness");

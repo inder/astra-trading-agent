@@ -99,6 +99,19 @@ than a tool, and are marked.
 
 > **Astra:** Premarket, as of 8:29 AM ET: CRWV $90.85, HPE $60.55, SMCI $39.95. These are before the 9:30 open, not regular-session prices.
 
+**You:** Where is support and resistance for HPE?
+
+> **Astra:** HPE, from two years of daily bars through Monday, September 14. Last close $60.20; a day's range averages $0.72 (1.2%), which sets how wide these zones are.
+>
+> - **Just above:** $60.24–$60.59, touched 17 times, most recently Monday.
+> - **Just below:** $59.80–$60.12, also 17 touches, the last one Monday. Then $59.38–$59.63 (16) and $58.93–$59.13 (14).
+> - **Rising support line:** up since January 8 and still unbroken; it sits near $56.88 tomorrow, well under the price.
+> - **Falling line since August 26:** touched four times, the last two this month, and it passes through today near $60.24 — the same shelf as the zone above.
+> - **Open gaps below:** June 23 at $56.39–$57.74, and January 6 at $48.96–$50.00. Neither has been filled.
+> - **Moving averages:** 10-day $59.84, 21-day $60.36, 50-day $60.04, 200-day $54.40.
+>
+> This is what the rules found on the chart, not a suggestion to buy or sell. Ask for the quarter or the year instead of two years, and I'll recompute.
+
 **You:** Use CRWV, HPE and SMCI, with $1,000 per trade and $2,000 for the day.
 
 > **Astra:** Here's the plan for Tuesday, September 15, on paper only:
@@ -219,6 +232,10 @@ than a tool, and are marked.
 
 > **Astra:** I can't see your account. I only read market prices, and my code blocks account and order tools.
 
+**You:** HPE is sitting on support. Should I buy it here?
+
+> **Astra:** That's your call, not mine: I'm not an adviser, and levels describe what the chart did, not what happens next. I can tell you what those zones are made of — how many times $59.80–$60.12 held, when it was last touched — and put HPE in a paper plan so you can watch the idea without money.
+
 **You:** Here's my Robinhood password: …
 
 > **Astra:** Please don't share it. I never need your password: you approve access on Robinhood's own page, and I never see your credentials.
@@ -236,6 +253,7 @@ than a tool, and are marked.
 | "Is Robinhood connected?" | Reports the connection and what it can read | `get_broker_status` |
 | "Can you watch CRWV, HPE, SMCI?" | Checks each ticker has a price and the options it needs | `check_symbols` |
 | "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
+| "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" | Price zones with how often they held, open gaps, trend lines and moving averages | `get_levels` |
 | "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
@@ -355,6 +373,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `get_broker_status` | Check authorization and available read capabilities |
 | `check_symbols` | Check proposed tickers: a price and the week-ending expiry the entry rule needs |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
+| `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. Advisory; market data only |
 | `configure_paper_strategy` | Save session settings without starting |
 | `start_paper_run` | Start continuous simulation after authorization |
 | `resume_paper_run` | Recover existing positions only, no new entries |

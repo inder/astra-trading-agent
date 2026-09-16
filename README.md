@@ -406,7 +406,8 @@ made only when you ask about your accounts, and return masked labels rather than
 account numbers. `list_accounts` reads names and status; `get_portfolio_report`
 additionally reads balances and equity positions, and is the only tool that
 writes any of it down — into the report file itself, created readable only by
-you, under `reports/` in Astra's data directory unless you name another folder.
+you, under `reports/` in Astra's data directory. There is no way to ask for it
+somewhere else: a chosen path is how account data ends up in a synced folder.
 
 The report is served on `127.0.0.1` under a name that is minted per report and
 not guessable. It is GET-only, serves nothing but reports this process wrote, and

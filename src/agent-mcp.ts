@@ -78,10 +78,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     inputSchema: z.object({
       accounts: z.array(z.string().regex(/^acct_[0-9a-f]{12}$/)).min(1).max(20)
         .describe("Handles from list_accounts. There is no \"all\" shortcut: name each account the user chose."),
-      directory: z.string().min(1).max(400).optional()
-        .describe("Where to write the file. Defaults to a reports folder in Astra's data directory; the localhost URL works either way."),
     }).strict(), annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } },
-    a => asyncGuarded(async () => ({ ...await service.portfolioReport(a.accounts, a.directory), advisory: true, ordersSubmitted: 0 })));
+    a => asyncGuarded(async () => ({ ...await service.portfolioReport(a.accounts), advisory: true, ordersSubmitted: 0 })));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } }, async a => {
       try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }

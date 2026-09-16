@@ -92,9 +92,12 @@ with QTD, YTD, two-year daily and five-year weekly views. It prints as it reads;
 only the charts the user opened, and only in the timeframe selected, go on paper.
 
 The report reads balances and equity positions, which nothing else in Astra does.
-It reads at most twenty holdings per account and says so when it truncated, and
-a holding whose bars cannot be read is listed with the reason rather than
-silently dropped. The equities in the table rarely add up to the account value —
+Every holding is listed; the twenty largest in each account get charts, and the
+rest say so rather than reading as unreadable. A holding whose bars cannot be
+read is listed with the reason instead of being dropped, and an account with
+more holdings than one report can page through says that too. The file is
+written under Astra's data directory and nowhere else — a caller cannot choose
+the path. The equities in the table rarely add up to the account value —
 the account counts options, crypto and cash too — so the page shows both figures
 and explains the gap rather than implying a reconciliation that is not there.
 

@@ -77,6 +77,20 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   assert.equal(readiness.brokerage, "not_connected"); assert.equal(typeof readiness.guide.stage, "string");
   const bad = await client.callTool({ name: "run_sample", arguments: { requestId: "../x" } });
   assert.equal(bad.isError, true);
+  // The report's own contract, at the boundary a model actually reaches it through. Account handles are the only way
+  // to name an account, and there is no way to ask for the file to be written somewhere of the model's choosing.
+  const report = tools.find(t => t.name === "get_portfolio_report")!;
+  assert.deepEqual(Object.keys(report.inputSchema.properties ?? {}), ["accounts"], "accounts, and nothing else");
+  assert.match(report.description!, /never what to buy or sell/, "and it says it is advisory");
+  for (const args of [{}, { accounts: [] }, { accounts: ["not-a-handle"] }, { accounts: ["acct_0123456789ab"], directory: "/tmp" },
+    { accounts: Array.from({ length: 21 }, () => "acct_0123456789ab") }]) {
+    assert.equal((await client.callTool({ name: "get_portfolio_report", arguments: args })).isError, true,
+      `refused: ${JSON.stringify(args)}`);
+  }
+  // A well-formed handle this process never minted is refused too, and the refusal names no account.
+  const unknown = await client.callTool({ name: "get_portfolio_report", arguments: { accounts: ["acct_0123456789ab"] } });
+  assert.equal(unknown.isError, true);
+  assert.ok(!/0123456789ab|account_number/.test(JSON.stringify(unknown)), "and says nothing about the account asked for");
   const result = unpack(await client.callTool({ name: "run_sample", arguments: {
     strategyId: "opening-range-options", symbols: ["DEMOA", "DEMOB"], requestId: "stdio-test", includePremarket: false,
   } }));

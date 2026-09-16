@@ -26,7 +26,17 @@ export interface ReportAccount {
   /** Holdings dropped because the provider's row could not be read, and whether paging stopped early. */
   skipped: number; truncated: boolean;
 }
-export interface ReportInput { accounts: ReportAccount[]; generatedAt: string; timeframe: string }
+export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
+
+/** What window the headline may claim. Each row is drawn from its own symbol's chosen frame, and a stock listed two
+ *  years ago has a shorter one than a stock listed in 1980 — so a fixed label on the page would be wrong for exactly
+ *  the holdings whose history is short. Named only when every row agrees. */
+function window(input: ReportInput): string {
+  const labels = new Set<string>();
+  for (const a of input.accounts) for (const r of a.holdings) if (r.levels) labels.add(shown(r.levels)?.label ?? "");
+  labels.delete("");
+  return labels.size === 1 ? `${[...labels][0]} window` : "each stock's longest available window";
+}
 
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 const money = (v: number | null | undefined, dp = 2) =>
@@ -137,8 +147,7 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
 
 /** The expandable technicals for one holding: every timeframe the engine computed, as tabs. `details` and radio
  *  inputs, so there is no script — the page prints, and whatever is left open prints open. */
-function technicals(symbol: string, levels: Levels, series: { daily: Point[]; weekly?: Point[] }, cost: number | null): string {
-  const id = symbol.replace(/[^A-Z0-9]/gi, "");
+function technicals(symbol: string, levels: Levels, series: { daily: Point[]; weekly?: Point[] }, cost: number | null, id: string): string {
   const frames = levels.frames;
   const pane = (frame: Frame) => {
     if (frame.unavailable) return `<div class="pane"><p class="note">${escape(frame.unavailable)}</p></div>`;
@@ -156,7 +165,7 @@ function technicals(symbol: string, levels: Levels, series: { daily: Point[]; we
   </div></details>`;
 }
 
-function row(entry: ReportHolding): string {
+function row(entry: ReportHolding, id: string): string {
   const { holding, levels, series = { daily: [] }, unavailable } = entry;
   const symbol = escape(holding.symbol);
   if (!levels || unavailable) {
@@ -187,15 +196,21 @@ function row(entry: ReportHolding): string {
     <td class="level">${zone(support, toSupport)}</td>
     <td class="level">${zone(resistance, toResistance)}</td>
   </tr>
-  <tr class="expand"><td colspan="8">${technicals(holding.symbol, levels, series, holding.averageCost)}</td></tr>`;
+  <tr class="expand"><td colspan="8">${technicals(holding.symbol, levels, series, holding.averageCost, id)}</td></tr>`;
 }
 
-function account(a: ReportAccount): string {
-  const rows = [...a.holdings].sort((x, y) => {
-    const near = atrsAway(x.levels ? shown(x.levels) : undefined, x.levels?.price ?? 0) -
-      atrsAway(y.levels ? shown(y.levels) : undefined, y.levels?.price ?? 0);
-    return Number.isFinite(near) && near !== 0 ? near : x.holding.symbol.localeCompare(y.holding.symbol);
-  });
+function account(a: ReportAccount, scope: number): string {
+  // Nearest to a level first, alphabetical only to break a tie. A row with no levels has no distance, so it sorts to
+  // the end by a sentinel rather than by Infinity: subtracting two Infinities gives NaN, and subtracting one from a
+  // finite number gives -Infinity, so a single unpriced holding used to make the whole comparator fall through to
+  // alphabetical — the ordering this report exists to give would quietly disappear on exactly the accounts that have
+  // an unreadable or uncharted holding.
+  const distance = (r: ReportHolding) => {
+    const away = r.levels ? atrsAway(shown(r.levels), r.levels.price) : Infinity;
+    return Number.isFinite(away) ? away : Number.MAX_SAFE_INTEGER;
+  };
+  const rows = [...a.holdings].sort((x, y) =>
+    distance(x) - distance(y) || x.holding.symbol.localeCompare(y.holding.symbol));
   // The rows are equities. Robinhood's account value counts everything in the account, options and crypto included,
   // so the two are not the same number and the report says so rather than leaving a reader to find the gap.
   const priced = rows.filter(r => r.levels).reduce((n, r) => n + r.holding.shares * r.levels!.price, 0);
@@ -205,7 +220,7 @@ function account(a: ReportAccount): string {
   const notes: string[] = [];
   if (a.skipped) notes.push(`${a.skipped} holding${a.skipped === 1 ? "" : "s"} could not be read and ${a.skipped === 1 ? "is" : "are"} not shown.`);
   if (a.truncated) notes.push("This account has more holdings than one report can page through; the rest are not shown.");
-  if (elsewhere !== null && Math.abs(elsewhere) > Math.max(1, (value ?? 0) * 0.005))
+  if (elsewhere !== null && !a.truncated && Math.abs(elsewhere) > Math.max(1, (value ?? 0) * 0.005))
     notes.push(`${money(elsewhere, 0)} of this account's value is not in the table below: it covers equities only, while the account value counts everything, including options and crypto.`);
   if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? " has" : "s have"} no price here, so the equities total excludes ${unpriced === 1 ? "it" : "them"}.`);
   return `<section class="account">
@@ -223,7 +238,7 @@ function account(a: ReportAccount): string {
   <table>
     <thead><tr><th scope="col">Stock</th><th scope="col">Shares</th><th scope="col">Avg cost/share</th><th scope="col">Last close</th>
       <th scope="col">Value</th><th scope="col">Unrealized P&amp;L</th><th scope="col">Support below</th><th scope="col">Resistance above</th></tr></thead>
-    <tbody>${rows.map(row).join("\n")}</tbody>
+    <tbody>${rows.map((r, i) => row(r, `${scope}-${i}`)).join("\n")}</tbody>
   </table>
 </section>`;
 }
@@ -236,11 +251,16 @@ export interface PortfolioOverview {
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];
   best: { symbol: string; gainPct: number }[]; worst: { symbol: string; gainPct: number }[];
   unreadable: string[];
+  /** Accounts whose totals could not be read. While this is non-empty the portfolio totals are null, not partial. */
+  unreadableAccounts: string[];
 }
 export function overview(input: ReportInput): PortfolioOverview {
   const near: PortfolioOverview["near"] = [], gains: { symbol: string; gainPct: number }[] = [], unreadable: string[] = [];
+  // A total is the sum of every account or it is nothing. Treating one unreadable account as zero produces a number
+  // that looks like the whole portfolio and is short by an account — and the chat is told to read this figure out.
+  // A missing total is answerable ("I couldn't read one account"); a quietly understated one is not.
   const sum = (pick: (a: ReportAccount) => number | null) =>
-    input.accounts.some(a => pick(a) !== null) ? input.accounts.reduce((n, a) => n + (pick(a) ?? 0), 0) : null;
+    input.accounts.every(a => pick(a) !== null) ? input.accounts.reduce((n, a) => n + pick(a)!, 0) : null;
   for (const account of input.accounts) for (const entry of account.holdings) {
     const { holding, levels } = entry;
     if (!levels) { unreadable.push(holding.symbol); continue; }
@@ -258,7 +278,8 @@ export function overview(input: ReportInput): PortfolioOverview {
   return { asOf: input.generatedAt.slice(0, 10),
     accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, dayChange: a.totals.dayChange, holdings: a.holdings.length })),
     totalValue: sum(a => a.totals.value), totalDayChange: sum(a => a.totals.dayChange),
-    near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable };
+    near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
+    unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }
 
 // The page's only script: the print button, and pointing "save" at the page itself. Its hash is named in the policy
@@ -276,7 +297,7 @@ export const REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-sr
 /** The whole report. Self-contained: no network, no fonts to fetch, and one small script for the print button whose
  *  hash is named in the page's own policy, so nothing else can run even if something got into the markup. */
 export function portfolioReport(input: ReportInput): string {
-  const accounts = input.accounts.map(account).join("\n");
+  const accounts = input.accounts.map((a, i) => account(a, i)).join("\n");
   const holdings = input.accounts.reduce((n, a) => n + a.holdings.length, 0);
   const script = SCRIPT;
   return `<!doctype html>
@@ -393,7 +414,7 @@ export function portfolioReport(input: ReportInput): string {
 <header class="top">
   <div>
     <h1>Portfolio levels</h1>
-    <p class="asof">${escape(day(input.generatedAt.slice(0, 10)))} · ${holdings} holding${holdings === 1 ? "" : "s"} · ${escape(input.timeframe)} window · prices from the last session that closed</p>
+    <p class="asof">${escape(day(input.generatedAt.slice(0, 10)))} · ${holdings} holding${holdings === 1 ? "" : "s"} · ${escape(window(input))} · prices from the last session that closed</p>
   </div>
   <div class="actions">
     <button id="print" type="button">Print or save as PDF</button>

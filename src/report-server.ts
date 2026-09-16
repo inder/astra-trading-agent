@@ -10,11 +10,11 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { REPORT_CSP } from "./report.ts";
 
 export class ReportServer {
-  #server: Server | undefined;
+  #starting: Promise<Server> | undefined;
   #port = 0;
   /** Unguessable name to the file it was written as. Only these are served. */
   #reports = new Map<string, string>();
@@ -32,8 +32,13 @@ export class ReportServer {
   }
   get port() { return this.#port; }
 
-  async #listen(): Promise<number> {
-    if (this.#server) return this.#port;
+  // The promise is what is memoized. Checking a `#server` field before an await and setting it after would let two
+  // reports asked for at once each bind a listener: the second would win `#port`, every link already handed out for
+  // the first would then fail its own Host check, and that first listener would be unreachable by close().
+  #listen(): Promise<number> {
+    return (this.#starting ??= this.#start()).then(() => this.#port);
+  }
+  async #start(): Promise<Server> {
     const server = createServer((request, response) => {
       const headers = {
         "content-type": "text/html; charset=utf-8",
@@ -56,21 +61,25 @@ export class ReportServer {
         response.writeHead(403, headers).end("<p>Not available.</p>"); return;
       }
       if (!file) { response.writeHead(404, headers).end("<p>No such report. Ask Astra for a new one.</p>"); return; }
-      // Read before the head is written: `writeHead(200).end(readFileSync(...))` evaluates the header first, so a
+      // Read before the head is written: `writeHead(200).end(await readFile(...))` evaluates the header first, so a
       // missing file would leave a 200 already sent and the recovery path unable to answer at all — the request
-      // would hang rather than fail.
-      let body: Buffer;
-      try { body = readFileSync(file); }
-      catch { response.writeHead(410, headers).end("<p>That report has been moved or deleted. Ask Astra for a new one.</p>"); return; }
-      response.writeHead(200, headers).end(body);
+      // would hang rather than fail. Read off the loop, too: this process is also answering MCP calls, and a
+      // multi-account report is megabytes.
+      readFile(file).then(
+        body => response.writeHead(200, headers).end(body),
+        () => response.writeHead(410, headers).end("<p>That report has been moved or deleted. Ask Astra for a new one.</p>"));
     });
     await new Promise<void>((ok, fail) => { server.once("error", fail); server.listen(0, "127.0.0.1", ok); });
     server.unref();
-    this.#server = server; this.#port = (server.address() as AddressInfo).port;
-    return this.#port;
+    this.#port = (server.address() as AddressInfo).port;
+    return server;
   }
   async close() {
-    const server = this.#server; this.#server = undefined; this.#reports.clear(); this.#port = 0;
+    // The pending start is awaited rather than dropped: a listener that finished binding after close() was called
+    // would otherwise stay up with nothing holding a reference to it.
+    const starting = this.#starting;
+    this.#starting = undefined; this.#reports.clear(); this.#port = 0;
+    const server = await starting?.catch(() => undefined);
     if (server) await new Promise<void>(ok => server.close(() => ok()));
   }
 }

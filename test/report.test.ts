@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
@@ -21,7 +21,7 @@ const account = (over: Partial<ReportAccount> = {}): ReportAccount => ({
 });
 
 test("the report states the figures a holder needs, and marks a stock sitting on a level", () => {
-  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" });
+  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /••••3312 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
@@ -52,7 +52,7 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /id="print"/); assert.match(html, /Print or save as PDF/);
 });
 test("technicals expand to a readable chart, one per timeframe, with no script to switch them", () => {
-  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" });
+  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.match(html, /<details class="technicals"><summary>Technicals — price, cost and levels/,
     "collapsed until asked for, and its label says what opening it gives you");
   assert.match(html, /<svg class="chart"/);
@@ -88,7 +88,7 @@ test("technicals expand to a readable chart, one per timeframe, with no script t
 test("a holding without levels still appears, saying why, rather than being dropped", () => {
   const html = portfolioReport({ accounts: [account({
     holdings: [{ holding: { symbol: "QUIET", shares: 5, averageCost: null }, unavailable: "no usable daily price history from Robinhood" }],
-    skipped: 2, truncated: true })], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" });
+    skipped: 2, truncated: true })], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.match(html, /QUIET/);
   assert.match(html, /no usable daily price history/);
   assert.match(html, /2 holdings could not be read/, "and the ones that could not be read at all are counted");
@@ -98,11 +98,32 @@ test("what a provider or an issuer wrote cannot become markup", () => {
   const html = portfolioReport({ accounts: [account({
     label: '<script>alert(1)</script> "roth"',
     holdings: [{ holding: { symbol: "A&B<C", shares: 1, averageCost: 1 }, unavailable: "<img src=x onerror=alert(1)>" }],
-  })], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" });
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.ok(!html.includes("<script>alert"), "a label cannot open a tag");
   assert.ok(!html.includes("<img src=x"), "nor can a reason");
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /A&amp;B&lt;C/);
+});
+test("the same stock in two accounts gets two independent sets of tabs, and a total nobody could read is not a total", () => {
+  const two = { accounts: [account(), account({ label: "••••6777 roth ira" })], generatedAt: "2026-09-16T12:00:00.000Z" };
+  const html = portfolioReport(two);
+  // Radio groups are document-scoped. Sharing a name would fuse the two tab sets into one group: both would parse as
+  // checked, the last would win, and the first account's panes would every one be hidden — an empty drawer.
+  const names = [...html.matchAll(/name="(tf-[^"]+)"/g)].map(m => m[1]!);
+  const ids = [...html.matchAll(/ id="(tf-[^"]+)"/g)].map(m => m[1]!);
+  assert.equal(new Set(names).size, 2, "one group per holding, not one shared by both accounts");
+  assert.equal(new Set(ids).size, ids.length, "and every input has its own id");
+  assert.equal((html.match(/ checked>/g) ?? []).length, 2, "each account's tabs start with one selected");
+  for (const [, forId] of html.matchAll(/<label for="(tf-[^"]+)"/g)) assert.ok(ids.includes(forId!), `${forId} exists`);
+
+  // A total is every account or it is nothing. One unreadable account used to be summed as zero, producing a figure
+  // that looked like the whole portfolio and was short by an account — and the chat is told to read it out.
+  const partial = overview({ ...two, accounts: [two.accounts[0]!, account({ label: "••••6777 roth ira",
+    totals: { value: null, cash: null, dayChange: null, totalReturn: null } })] });
+  assert.equal(partial.totalValue, null, "a total that cannot be complete is not reported");
+  assert.equal(partial.totalDayChange, null);
+  assert.deepEqual(partial.unreadableAccounts, ["••••6777 roth ira"], "and the account that could not be read is named");
+  assert.equal(overview(two).totalValue, 125340.55 * 2, "two readable accounts still add up");
 });
 test("the report is written where it was asked for, and nothing about it reaches the data directory", async t => {
   const dataDirectory = mkdtempSync(join(tmpdir(), "astra-report-data-"));
@@ -130,12 +151,20 @@ test("the report is written where it was asked for, and nothing about it reaches
   const [chosen] = await service.accounts();
   const written = await service.portfolioReport([chosen!.handle], outputDirectory);
   assert.equal(written.accounts, 1); assert.equal(written.holdings, 1);
-  assert.match(written.path, /portfolio-2026-09-16\.html$/);
+  assert.match(written.path, /portfolio-2026-09-16-[0-9a-f]{8}\.html$/, "dated, and unique so today's second report cannot overwrite the first");
   const html = readFileSync(written.path, "utf8");
   assert.match(html, /FIXA/); assert.match(html, /••••3312 individual/); assert.match(html, /\$51,000/);
   assert.deepEqual(readdirSync(dataDirectory), before, "an account never reaches the data directory");
   assert.ok(reads.includes("get_portfolio") && reads.includes("get_equity_positions"), "it reads totals and positions");
   assert.ok(!reads.some(r => /order|cancel|place/.test(r)), "and nothing else");
+
+  // Asked for without a directory, it writes under the data directory — the path production actually takes, and the
+  // one place account data is allowed to land. The file must be readable by nobody else.
+  const fallback = await service.portfolioReport([chosen!.handle]);
+  assert.equal(fallback.path, join(dataDirectory, "reports", fallback.path.split("/").pop()!));
+  assert.equal(statSync(fallback.path).mode & 0o777, 0o600, "readable only by its owner");
+  assert.equal(statSync(join(dataDirectory, "reports")).mode & 0o777, 0o700);
+  assert.notEqual(fallback.path, written.path, "and a second report the same day is a second file");
 });
 test("past the charting cap the largest positions keep their charts, and the rest say why they have none", async t => {
   const dataDirectory = mkdtempSync(join(tmpdir(), "astra-report-cap-"));
@@ -181,7 +210,7 @@ test("the report is reachable on loopback, and that link serves only reports thi
   const file = join(directory, "r.html");
   const server = new ReportServer();
   t.after(async () => { await server.close(); rmSync(directory, { recursive: true, force: true }); });
-  writeFileSync(file, portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" }));
+  writeFileSync(file, portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" }));
 
   const url = await server.publish(file);
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/r\/[\w-]{12}$/, "loopback only, and an unguessable name");
@@ -230,7 +259,7 @@ test("the overview says enough for the chat to summarize, and leaves the detail 
     holdings: [
       { holding: { symbol: "FIXA", shares: 10, averageCost: 200 }, levels: computed, series: { daily: series } },
       { holding: { symbol: "QUIET", shares: 5, averageCost: 10 }, unavailable: "no usable daily price history" },
-    ] })], generatedAt: "2026-09-16T12:00:00.000Z", timeframe: "2-year" };
+    ] })], generatedAt: "2026-09-16T12:00:00.000Z" };
   const summary = overview(input);
   assert.equal(summary.asOf, "2026-09-16");
   assert.deepEqual(summary.accounts.map(a => [a.label, a.holdings]), [["••••3312 individual", 1], ["••••6777 roth ira", 2]]);

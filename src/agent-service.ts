@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
@@ -123,13 +123,17 @@ export class TradingAgentService {
     catch { return addDays(today, -1); }
   }
   /** A printable report for the chosen accounts: cost basis, profit and loss, and the levels around each holding.
+   *  `directory` is deliberately not reachable from the MCP tool: a model-chosen path is a way for account data to
+   *  land in a synced or shared folder, and nobody asked to choose where the file goes — they get a link.
    *  Account data is computed into a page and returned as a path — never journalled, logged or cached. Bars are
    *  cached, because they are market data. */
   async portfolioReport(handles: string[], directory?: string):
     Promise<{ url: string; path: string; accounts: number; holdings: number; overview: PortfolioOverview }> {
     const numbers = this.accountNumbers(handles);
     const labels = new Map((await this.accounts()).map(a => [a.handle, a.label]));
-    return sealed(async () => {
+    // Only the account reads are sealed. A file the user cannot write to is their problem to fix and must say so;
+    // rewriting it into "Account read failed" would send them looking at the broker for a permissions error.
+    const accounts = await sealed(async () => {
       const accounts: ReportAccount[] = [];
       for (const [index, accountNumber] of numbers.entries()) {
         const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
@@ -138,7 +142,11 @@ export class TradingAgentService {
         // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
         // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
         // and the rest say why they have none rather than reading as unreadable.
-        const size = (h: { shares: number; averageCost: number | null }) => h.shares * (h.averageCost ?? 0);
+        // A holding whose cost the provider did not give (transferred-in shares, typically) has no size to rank by,
+        // and it can be the largest position in the account — so it is charted first rather than sorted to the
+        // bottom by a zero it never had.
+        const size = (h: { shares: number; averageCost: number | null }) =>
+          h.averageCost === null ? Infinity : h.shares * h.averageCost;
         const charted = new Set([...holdings].sort((a, b) => size(b) - size(a)).slice(0, MAX_CHARTED_HOLDINGS).map(h => h.symbol));
         const computed = charted.size ? await this.levels([...charted], "5y") : [];
         const rows: ReportHolding[] = holdings.map(holding => {
@@ -155,17 +163,26 @@ export class TradingAgentService {
         });
         accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated });
       }
-      const html = portfolioReport({ accounts, generatedAt: new Date(this.#clock()).toISOString(), timeframe: "2-year" });
-      // Written first, so the report outlives this process and can be printed or kept; served second, because a path
-      // is only readable by a chat client inside its own working directory, and that directory moves.
-      const target = resolve(directory ?? join(this.dataDirectory, "reports"));
-      mkdirSync(target, { recursive: true, mode: 0o700 });
-      const path = join(target, `portfolio-${new Date(this.#clock()).toISOString().slice(0, 10)}.html`);
-      writeFileSync(path, html, { mode: 0o600 });
-      return { url: await this.reports.publish(path), path,
-        accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0),
-        overview: overview({ accounts, generatedAt: new Date(this.#clock()).toISOString(), timeframe: "2-year" }) };
+      return accounts;
     });
+    // One reading of the clock for the page, the filename and the overview: three readings disagree across midnight,
+    // and the report would then name a different day than the file it lives in.
+    const input = { accounts, generatedAt: new Date(this.#clock()).toISOString() };
+    // Written first, so the report outlives this process and can be printed or kept; served second, because a path
+    // is only readable by a chat client inside its own working directory, and that directory moves.
+    const target = resolve(directory ?? join(this.dataDirectory, "reports"));
+    mkdirSync(target, { recursive: true, mode: 0o700 });
+    // The minted name is in the filename: a second report the same day must not overwrite the first, because the
+    // first's link is still live and would then serve the second's accounts to whoever was given it.
+    const stamp = randomBytes(4).toString("hex");
+    const path = join(target, `portfolio-${input.generatedAt.slice(0, 10)}-${stamp}.html`);
+    writeFileSync(path, portfolioReport(input), { mode: 0o600 });
+    // Set explicitly, not left to the creation mode: an existing directory keeps the permissions it already had, and
+    // a mode only applies to a file this call created.
+    chmodSync(path, 0o600);
+    return { url: await this.reports.publish(path), path,
+      accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0),
+      overview: overview(input) };
   }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
    *  stock per settled session is kept in memory, pinned to the split adjustment it was fetched with. */

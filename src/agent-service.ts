@@ -5,10 +5,11 @@ import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
-import { normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
-import { portfolioReport, type ReportAccount, type ReportHolding } from "./report.ts";
+import { MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
+import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
-import { levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { ReportServer } from "./report-server.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
@@ -32,6 +33,9 @@ export class TradingAgentService {
   readonly market: RobinhoodMarketData;
   readonly paper: PaperController;
   readonly reviews: PaperReviews;
+  /** Serves written reports on loopback. Starts on the first report, not at startup: an installation that never asks
+   *  for one never opens a port. */
+  readonly reports = new ReportServer();
   #closing?: Promise<void>;
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   #dailyBars = new Map<string, { on: string; bars: DailyBars }>();
@@ -121,7 +125,8 @@ export class TradingAgentService {
   /** A printable report for the chosen accounts: cost basis, profit and loss, and the levels around each holding.
    *  Account data is computed into a page and returned as a path — never journalled, logged or cached. Bars are
    *  cached, because they are market data. */
-  async portfolioReport(handles: string[], directory: string): Promise<{ path: string; accounts: number; holdings: number }> {
+  async portfolioReport(handles: string[], directory?: string):
+    Promise<{ url: string; path: string; accounts: number; holdings: number; overview: PortfolioOverview }> {
     const numbers = this.accountNumbers(handles);
     const labels = new Map((await this.accounts()).map(a => [a.handle, a.label]));
     return sealed(async () => {
@@ -129,26 +134,37 @@ export class TradingAgentService {
       for (const [index, accountNumber] of numbers.entries()) {
         const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
         const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
-        const symbols = holdings.map(h => h.symbol);
-        // One levels call for the whole account, so a holding of twenty stocks is twenty bar reads at most, cached.
-        const computed = symbols.length ? await this.levels(symbols.slice(0, 20)) : [];
+        // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
+        // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
+        // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
+        // and the rest say why they have none rather than reading as unreadable.
+        const size = (h: { shares: number; averageCost: number | null }) => h.shares * (h.averageCost ?? 0);
+        const charted = new Set([...holdings].sort((a, b) => size(b) - size(a)).slice(0, MAX_CHARTED_HOLDINGS).map(h => h.symbol));
+        const computed = charted.size ? await this.levels([...charted], "5y") : [];
         const rows: ReportHolding[] = holdings.map(holding => {
           const found = computed.find(c => c.symbol === holding.symbol);
-          if (!found || "unavailable" in found) return { holding, unavailable: found ? found.unavailable : "not read" };
+          if (!found || "unavailable" in found) {
+            return { holding, unavailable: found ? found.unavailable
+              : `not charted — this report charts the ${MAX_CHARTED_HOLDINGS} largest positions in an account` };
+          }
           const bars = this.#dailyBars.get(holding.symbol)?.bars;
-          const frame = found.frames.find(f => f.timeframe === found.defaultTimeframe && !f.unavailable);
-          const from = bars && frame ? Math.max(0, bars.time.findIndex(t => t >= frame.start)) : 0;
-          return { holding, levels: found,
-            series: bars ? bars.time.slice(from).map((time, i) => ({ time, value: bars.close[from + i]! })) : [] };
+          if (!bars) return { holding, levels: found, series: { daily: [] } };
+          const closes = (source: DailyBars) => source.time.map((time, i) => ({ time, value: source.close[i]! }));
+          const weekly = found.frames.some(f => f.bar === "week" && !f.unavailable) ? closes(aggregateWeekly(bars)) : undefined;
+          return { holding, levels: found, series: { daily: closes(bars), weekly } };
         });
         accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated });
       }
       const html = portfolioReport({ accounts, generatedAt: new Date(this.#clock()).toISOString(), timeframe: "2-year" });
-      const target = resolve(directory);
+      // Written first, so the report outlives this process and can be printed or kept; served second, because a path
+      // is only readable by a chat client inside its own working directory, and that directory moves.
+      const target = resolve(directory ?? join(this.dataDirectory, "reports"));
       mkdirSync(target, { recursive: true, mode: 0o700 });
       const path = join(target, `portfolio-${new Date(this.#clock()).toISOString().slice(0, 10)}.html`);
       writeFileSync(path, html, { mode: 0o600 });
-      return { path, accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0) };
+      return { url: await this.reports.publish(path), path,
+        accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0),
+        overview: overview({ accounts, generatedAt: new Date(this.#clock()).toISOString(), timeframe: "2-year" }) };
     });
   }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
@@ -192,7 +208,9 @@ export class TradingAgentService {
   close() {
     return this.#closing ??= (async () => {
       try { await this.reviews.close(); } finally {
-        try { await this.paper.close(); } finally { await this.broker.close(); }
+        try { await this.reports.close(); } finally {
+          try { await this.paper.close(); } finally { await this.broker.close(); }
+        }
       }
     })();
   }

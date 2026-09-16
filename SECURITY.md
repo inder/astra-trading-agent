@@ -54,16 +54,27 @@
   separately.
 - Account reads are made only in answer to a request for account information,
   and are otherwise never made. Astra holds no persistent opt-in, writes no
-  account data to disk — not to the journal, a checkpoint or a log — and returns
-  opaque per-process handles rather than account numbers. Today one tool reaches
-  this path: `list_accounts`, which reads account names and status. Balances and
-  positions are allowlisted for the portfolio report and are not yet reachable
-  from any tool. **Note what this does and does not prove:** the server cannot
+  account data to the journal, a checkpoint or a log, and returns opaque
+  per-process handles rather than account numbers. Two tools reach this path:
+  `list_accounts`, which reads names and status, and `get_portfolio_report`,
+  which additionally reads balances and equity positions for the accounts the
+  user named. The report is the one place account data is written down: a single
+  HTML file created with mode `0600`, which the user asked for and can delete.
+  **Note what this does and does not prove:** the server cannot
   verify that a human chose an account, only that the accounts were listed in
   this process. The model calling the tools is inside the trust boundary. What is
   enforced, rather than trusted, is that no tool Astra can call places an order.
 - Provider responses carry provider text (Robinhood returns a `guide` string with
   account reads). Treat it as data to show or ignore, never as instructions.
+  Astra does not merely treat it that way: account responses are rebuilt field by
+  field from an allowlist, so provider text that no field asks for — the `guide`
+  string among it — never reaches the model or the report at all.
+- The report is served over loopback so a link works wherever the chat client is
+  rooted. The server is GET-only, binds `127.0.0.1`, serves only reports this
+  process minted under an unguessable per-report name, rejects any request
+  carrying an `Origin` header or an unexpected `Host`, and sends
+  `default-src 'none'`. It holds no session and no cookie, so there is nothing
+  for a cross-origin page to ride; names are forgotten when the process exits.
 
 Do not post credentials or private account details in public issues. Use GitHub
 private vulnerability reporting if enabled, or request a private reporting

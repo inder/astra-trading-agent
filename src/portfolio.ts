@@ -115,6 +115,9 @@ export async function sealed<T>(action: () => Promise<T>): Promise<T> {
   }
 }
 export const MAX_POSITION_PAGES = 20;
+/** Holdings charted per account. Every chart is a daily-bar read, so an account of a hundred names would otherwise
+ *  spend a hundred provider calls on one report; the rest are listed with their cost and value, without levels. */
+export const MAX_CHARTED_HOLDINGS = 20;
 export async function readHoldings(broker: Pick<RobinhoodConnection, "accountRead">, accountNumber: string) {
   const holdings: Holding[] = [];
   let cursor: string | null = null, skipped = 0, pages = 0, truncated = false;

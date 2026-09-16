@@ -262,6 +262,7 @@ than a tool, and are marked.
 | "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
 | "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" / "Show me NVDA's five-year weekly levels" | Price zones with how often they held, open gaps, trend lines and moving averages, daily or weekly | `get_levels` |
 | "Which accounts can you see?" | Lists your Robinhood accounts, masked, so you can pick | `list_accounts` |
+| "Show me my portfolio" / "Print a report for my Roth" | Writes a printable report — cost basis, P&L, and each holding's nearest support and resistance on an expandable chart — and gives you a link to it | `get_portfolio_report` |
 | "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
@@ -383,6 +384,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
 | `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. `timeframe: "5y"` measures weekly bars instead. Advisory; market data only |
 | `list_accounts` | List your Robinhood accounts as masked labels with opaque handles, so you can choose which to report on. Reads names and status only — no balances, no positions |
+| `get_portfolio_report` | Write a printable portfolio report for the accounts you name and return a loopback link to it, plus a short overview the chat can read aloud. Cost basis, market value, unrealized P&L, and the nearest support and resistance for each holding on an expandable chart |
 | `configure_paper_strategy` | Save session settings without starting |
 | `start_paper_run` | Start continuous simulation after authorization |
 | `resume_paper_run` | Recover existing positions only, no new entries |
@@ -400,9 +402,16 @@ No tools execute shell commands, accept arbitrary filesystem paths or submit
 brokerage orders. The upstream client enforces two runtime allowlists — six
 market-data reads, and the three account reads the portfolio report needs — even
 though Robinhood's single scope also advertises order tools. Account reads are
-made only when you ask about your accounts, return masked labels rather than
-account numbers, and are never written to disk. `list_accounts` is the only tool
-reaching that path today; the balances and positions reads land with the report.
+made only when you ask about your accounts, and return masked labels rather than
+account numbers. `list_accounts` reads names and status; `get_portfolio_report`
+additionally reads balances and equity positions, and is the only tool that
+writes any of it down — into the report file itself, created readable only by
+you, under `reports/` in Astra's data directory unless you name another folder.
+
+The report is served on `127.0.0.1` under a name that is minted per report and
+not guessable. It is GET-only, serves nothing but reports this process wrote, and
+sends `default-src 'none'`, so a page on another origin cannot read it and a path
+it did not mint has nothing to traverse to. The link dies with the process.
 
 ### Connect Robinhood independently
 

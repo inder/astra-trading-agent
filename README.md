@@ -112,6 +112,17 @@ than a tool, and are marked.
 >
 > This is what the rules found on the chart, not a suggestion to buy or sell. Ask for the quarter or the year instead of two years, and I'll recompute. For the long view, ask for five years and I'll measure weekly bars instead.
 
+**You:** Give me the long view on HPE.
+
+> **Astra:** Five years of HPE, on weekly bars — a different picture from the daily one, so these are weekly levels and shouldn't be read as daily ones. A week moves $1.12 on average (1.9%), which makes these zones wider.
+>
+> - **Above:** $60.56, touched 3 times, most recently the week of September 7. Then $61.73, once, the week of August 24.
+> - **Below:** $59.13–$59.41, touched 7 times, the last the week of September 7. Then a shelf far beneath the price: $48.30–$48.46 (6) and $47.34–$47.87, which held 25 separate weeks into late November 2025.
+> - **Rising weekly support line** since July 2025, still unbroken, with 5 touches. It passes near $49.11 next week — a long way under the price.
+> - **No unfilled weekly gaps.**
+>
+> One caveat: I only have price history back to September 2024, so this is 104 weeks, not five years. I'd rather tell you that than show you a short window labelled five years.
+
 **You:** Use CRWV, HPE and SMCI, with $1,000 per trade and $2,000 for the day.
 
 > **Astra:** Here's the plan for Tuesday, September 15, on paper only:

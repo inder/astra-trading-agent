@@ -33,7 +33,44 @@ advisory — it reports what the rules found, never what to buy or sell.
 Bars end at the last session that has closed, so during market hours the answer
 is "as of yesterday" by design: the day still trading has a provisional high, low
 and close. The reply's `asOf` says which session it measured, and `priceSource`
-says whether the price on top is a live quote or that session's close.
+says whether the price on top is a live quote or that session's close. A week in
+progress is dropped for the same reason, and a week whose Friday was a holiday
+still counts once that Friday has passed.
+
+Ask for the equivalent of these inputs:
+
+```json
+{ "symbols": ["HPE"] }
+{ "symbols": ["HPE"], "timeframe": "5y" }
+```
+
+The first returns the three daily frames. The second adds the weekly one and
+marks it `requested`; the daily frames still come back, and `defaultTimeframe`
+still names a daily window. Each frame carries what it measured, so nothing has
+to be inferred from its name:
+
+```json
+{
+  "symbol": "HPE", "asOf": "2026-09-14", "price": 60.2, "priceSource": "close",
+  "sessions": 520, "defaultTimeframe": "2y", "requested": "5y",
+  "averages": [{ "period": 10, "value": 59.84 }, { "period": 200, "value": 54.4 }],
+  "frames": [{
+    "label": "5 years (weekly)", "timeframe": "5y", "bar": "week", "sessions": 104,
+    "start": "2024-09-16", "sinceListing": true, "atr": 1.12, "atrPct": 1.87, "width": 0.56,
+    "resistance": [{ "id": "R1", "lo": 60.56, "hi": 60.56, "tests": 3, "last": "2026-09-07", "members": [] }],
+    "support": [{ "id": "S1", "lo": 59.13, "hi": 59.41, "tests": 7, "last": "2026-09-07", "members": [] }],
+    "gaps": [], "trend": { "support": { "from": "2025-07-21", "nextValue": 49.11, "confirmed": true } }
+  }]
+}
+```
+
+Two fields decide how the answer must be described. `bar` is `"week"` here, so
+every quantity in that frame — the ATR, the zone width, the trend tolerance — is
+weekly, and `sessions` counts weeks. `sinceListing: true` says the history began
+well after the window did, so this is 104 weeks and not five years; a reply that
+calls it five years is wrong. A frame that cannot be computed carries
+`unavailable` with the reason instead of levels, and is never filled in with a
+shorter window in its place.
 
 ## Configure and start
 

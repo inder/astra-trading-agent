@@ -111,7 +111,9 @@ export class TradingAgentService {
         }
       }
       const quote = quotes.find(q => q.symbol === symbol);
-      const computed = levels(bars, settings, quote?.fresh && quote.price ? quote.price : undefined);
+      // `settled` advances through weekends and holidays, which is what tells a weekly frame that a week with no
+      // Friday session is nonetheless over.
+      const computed = levels(bars, settings, quote?.fresh && quote.price ? quote.price : undefined, settled);
       out.push({ symbol, ...computed, requested: timeframe ?? computed.defaultTimeframe ?? undefined });
     }
     return out;

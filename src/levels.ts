@@ -42,6 +42,7 @@ export const DIVERGENCES = [
   "Values are full precision; the prototype rounded inside the engine.",
   "Moving averages default to 10, 21, 50 and 200 (the founder's charts), not 20, 50 and 200.",
   "Trend lines that rank equally are separated by the earlier anchor, then the shallower slope, instead of by the order they were found in.",
+  "The weekly timeframe has no counterpart in the prototype and so no parity fixture: it is the same rules over folded bars, checked by its own assertions.",
 ] as const;
 
 export const LEVELS_SETTINGS = {
@@ -153,7 +154,11 @@ export function aggregateWeekly(bars: DailyBars, settledThrough = bars.time.at(-
 }
 /** A moving average as a series, for drawing. `levels()` reports only each average's latest value, which is all a
  *  written answer needs; a chart needs the line, and it must come from here rather than be recomputed by whatever
- *  draws it. Points begin where the average has enough bars behind it. */
+ *  draws it. Points begin where the average has enough bars behind it.
+ *
+ *  `periods` defaults to the constant, NOT to a settings object: a caller working from configured settings must pass
+ *  `settings.movingAverages`, or its chart will draw lines the written answer never mentions. The running sum here
+ *  and the slice sum in `levels()` can differ in the last decimals over a long history; compare with a tolerance. */
 export function movingAverageSeries(bars: DailyBars, periods: number[] = MOVING_AVERAGES) {
   return periods.map(period => {
     const points: { time: string; value: number }[] = [];
@@ -305,6 +310,8 @@ function unusable(bars: DailyBars | undefined, settings: LevelsSettings): string
   if (bars.time.some(x => !isDate(x))) return "price history has invalid dates";
   for (let i = 1; i < n; i++) if (bars.time[i]! <= bars.time[i - 1]!) return "price history is out of order";
   if (bars.high.some((x, i) => x < bars.low[i]!)) return "price history has a high below its low";
+  // minSessions is the floor on the raw daily history every frame is built from, the weekly fold included, so this
+  // gates the whole call rather than one timeframe.
   if (n < settings.minSessions) return `only ${n} sessions of history; needs ${settings.minSessions}`;
   return null;
 }
@@ -320,7 +327,8 @@ function splitWarnings(bars: DailyBars): string[] {
 
 /** Levels for one stock: every configured timeframe, the moving averages, and which timeframe to show by default.
  *  `quote` is the live price when the caller has one; without it the last close is used, and the result says which. */
-export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsSettings(), quote?: number): Levels {
+export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsSettings(), quote?: number,
+  settledThrough?: string): Levels {
   const empty: Levels = { asOf: "", price: 0, priceSource: "close", sessions: 0, averages: [], frames: [], defaultTimeframe: null, warnings: [] };
   const problem = unusable(daily, settings);
   const t = daily?.time ?? [], n = t.length;
@@ -331,7 +339,9 @@ export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsS
   const averages = settings.movingAverages.map(period => ({ period,
     value: n >= period ? daily.close.slice(n - period).reduce((a, b) => a + b, 0) / period : null }));
   // Weekly bars are folded once and shared by every weekly frame, and only when one is asked for.
-  const weeks = settings.timeframes.some(weekly) ? aggregateWeekly(daily) : null;
+  // The caller's settled date, not the last bar's, decides whether the trailing week is over: a week whose Friday was
+  // a holiday has no Friday bar, and judging it by its own last bar would hide a complete week until Tuesday.
+  const weeks = settings.timeframes.some(weekly) ? aggregateWeekly(daily, settledThrough || undefined) : null;
   const frames: Frame[] = settings.timeframes.map(timeframe => {
     const isWeekly = weekly(timeframe);
     const source = isWeekly ? weeks! : daily;

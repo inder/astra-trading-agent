@@ -27,6 +27,26 @@ test("daily bars fold into weeks dated by their Monday, with the week's own open
   assert.equal(weeks.close[0], two.close[4], "and closes where Friday closed");
   assert.equal(weeks.high[0], Math.max(...two.high.slice(0, 5)));
   assert.equal(weeks.low[0], Math.min(...two.low.slice(0, 5)));
+  // Real quotes carry cents tails, and the fold must carry them through untouched rather than round anything.
+  const uneven = weekdays(10, "2026-01-05", i => 100 + i * 0.0137);
+  const odd = aggregateWeekly(uneven, "2026-01-16");
+  assert.equal(odd.high[0], Math.max(...uneven.high.slice(0, 5)));
+  assert.equal(odd.low[0], Math.min(...uneven.low.slice(0, 5)));
+  assert.equal(odd.close[1], uneven.close[9], "the week's close is the last session's, to the cent");
+  assert.ok(String(odd.close[1]).includes("."), "and it is not a round number");
+});
+test("the settled date, not the last bar, decides a week is over — so a holiday Friday does not hide a full week", () => {
+  // Good Friday 2027 is 26 March: the week of the 22nd has no Friday session, and judging it by its own last bar
+  // would drop a complete week until Tuesday. levels() is handed the settled date for exactly this reason, and the
+  // service's settled date advances through weekends and holidays.
+  const bars: DailyBars = { time: [], open: [], high: [], low: [], close: [] };
+  for (const d of ["2027-03-15", "2027-03-16", "2027-03-17", "2027-03-18", "2027-03-19",
+    "2027-03-22", "2027-03-23", "2027-03-24", "2027-03-25"]) {
+    bars.time.push(d); bars.open.push(10); bars.high.push(11); bars.low.push(9); bars.close.push(10.5);
+  }
+  assert.deepEqual(aggregateWeekly(bars, "2027-03-25").time, ["2027-03-15"], "mid-week, the week is still forming");
+  assert.deepEqual(aggregateWeekly(bars, "2027-03-26").time, ["2027-03-15", "2027-03-22"], "on the holiday, it is over");
+  assert.deepEqual(aggregateWeekly(bars, "2027-03-28").time, ["2027-03-15", "2027-03-22"], "and stays over");
 });
 test("a week still trading is left out until it is over, the same rule the daily reader applies to today", () => {
   const partial = weekdays(8);                                 // two full weeks' worth of bars, ending Wednesday

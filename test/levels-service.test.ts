@@ -75,6 +75,10 @@ test("the weekly window is answered when it is asked for, and left out when it i
   assert.ok(frame.sessions > 0 && frame.sessions < got.sessions / 4, "weeks, not sessions");
   assert.equal(got.defaultTimeframe, "2y", "asking for weekly does not make it the default");
   assert.equal(f.reads.filter(r => r.startsWith("get_equity_historicals")).length, 1, "and it needs no second bar read");
+  // The clock is Thursday 10 September 2026, 8:00 a.m. ET, so the settled session is Wednesday the 9th and the week
+  // of the 7th is still forming. The service must hand that settled date down, or the part-week would be measured.
+  const lastWeek = frame.support!.concat(frame.resistance!).flatMap(z => z.members.map(m => m.date)).sort().at(-1)!;
+  assert.ok(lastWeek < "2026-09-07", `the forming week is not measured: newest member ${lastWeek}`);
 });
 test("a stale quote falls back to the last close, and says so", async t => {
   const f = fixture(t, { quoteAt: Date.now() - 600000 });

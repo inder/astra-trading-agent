@@ -16,7 +16,21 @@ export interface Holding { symbol: string; shares: number; averageCost: number |
 export interface AccountTotals { value: number | null; cash: number | null; dayChange: number | null; totalReturn: number | null }
 
 const SYMBOL = /^[A-Z][A-Z0-9.-]{0,9}$/;
-const text = (v: unknown, max = 40) => typeof v === "string" && v.length <= max && /^[\w .,'()\/-]*$/.test(v) ? v : "";
+/** An account type is a provider enum, not prose, and it is validated as one. Free text here would be a second way in
+ *  for provider-authored instructions — the one `guide` is dropped for — and a label reaches the model. A token with
+ *  no spaces cannot be a sentence. */
+/** The words an account type is allowed to be made of. A shape rule is not enough here: "sell everything" is two
+ *  plain words and would pass one. Every word must be a word account types are made of, so the field can carry a type
+ *  and cannot carry an instruction. Anything else becomes the generic label rather than being shown. */
+const TYPE_WORDS = new Set(["individual", "joint", "ira", "roth", "traditional", "rollover", "sep", "simple",
+  "inherited", "beneficiary", "custodial", "margin", "cash", "crypto", "brokerage", "retirement", "trust",
+  "corporate", "llc", "managed", "taxable", "account", "401k", "403b", "hsa", "and", "or"]);
+const enumToken = (v: unknown) => {
+  const t = typeof v === "string" ? v.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ") : "";
+  if (!t || t.length > 24) return "";
+  const words = t.split(" ");
+  return words.length <= 3 && words.every(w => TYPE_WORDS.has(w)) ? t : "";
+};
 const number = (v: unknown): number | null => {
   const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
@@ -36,7 +50,7 @@ export function normalizeAccounts(raw: unknown, handleFor: (accountNumber: strin
   for (const row of rows) {
     const accountNumber = typeof row?.account_number === "string" && row.account_number.length >= 4 ? row.account_number : null;
     if (!accountNumber) continue;
-    const type = text(row?.brokerage_account_type) || text(row?.type) || "account";
+    const type = enumToken(row?.brokerage_account_type) || enumToken(row?.type) || "account";
     let label = `${masked(accountNumber)} ${type}`.trim();
     const count = (seen.get(label) ?? 0) + 1;
     seen.set(label, count);
@@ -80,6 +94,26 @@ export function normalizeTotals(raw: unknown): AccountTotals {
 
 /** Every holding in one account, following the provider's cursor. Bounded: a runaway page loop would burn the grant,
  *  and a truncated portfolio must say so rather than read as a complete one. */
+/** The only messages the account path may show a user. Anything else a future call site throws is replaced, so a
+ *  message that interpolates an account number or a payload cannot reach a transcript by being written carelessly.
+ *  Safe by construction rather than safe because every call site today happens to be. */
+export const ACCOUNT_SAFE_ERRORS: ReadonlySet<string> = new Set([
+  "Accounts unavailable",
+  "Positions unavailable",
+  "Connect Robinhood market data first",
+  "Robinhood account read failed; check connection status. No order was submitted.",
+  "Robinhood did not grant account access to this connection. Reconnect with connect_robinhood to grant it, or carry on with market data.",
+  "Unknown account. List the accounts first, then choose from that list.",
+  "Choose between 1 and 20 accounts",
+]);
+/** Runs an account operation and lets only a known message out. */
+export async function sealed<T>(action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    throw new Error(ACCOUNT_SAFE_ERRORS.has(message) ? message : "Account read failed");
+  }
+}
 export const MAX_POSITION_PAGES = 20;
 export async function readHoldings(broker: Pick<RobinhoodConnection, "accountRead">, accountNumber: string) {
   const holdings: Holding[] = [];

@@ -16,11 +16,14 @@ export type MarketRead = typeof MARKET_READS[number];
  *  Astra can see of an account is visibly a diff to ACCOUNT_READS. */
 export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
 export type AccountRead = typeof ACCOUNT_READS[number];
-/** Nothing that places, previews, cancels or exercises an order, moves money, or edits a watchlist, alert or scan may
- *  ever appear in either list. Checked here rather than trusted, because the lists are the only thing stopping it. */
-const FORBIDDEN = /^(place|preview|review|cancel|exercise|create|update|delete|add|remove|follow|unfollow|mark|run)_/;
+/** Only a read may appear in either list. The positive rule is the one that matters: a name outside the provider's
+ *  read convention is refused, so `submit_order` or `transfer_funds` cannot be added however they are spelled. The
+ *  denylist stays as a second pass for a name that reads like a getter but is not. */
+const READ_NAME = /^(get|list)_/;
+const FORBIDDEN = /(order|transfer|withdraw|deposit|liquidat|execut|submit|buy|sell|cancel|exercise|place)/;
 for (const tool of [...MARKET_READS, ...ACCOUNT_READS]) {
-  if (FORBIDDEN.test(tool)) throw new Error(`Refusing to allow a mutating tool: ${tool}`);
+  if (!READ_NAME.test(tool)) throw new Error(`Refusing a tool outside the read naming convention: ${tool}`);
+  if (FORBIDDEN.test(tool)) throw new Error(`Refusing a tool that names a mutation: ${tool}`);
 }
 if (MARKET_READS.some(t => (ACCOUNT_READS as readonly string[]).includes(t))) throw new Error("Read allowlists must not overlap");
 const allowedURLs = new Set([
@@ -126,19 +129,25 @@ export class RobinhoodConnection {
   #tools = new Set<string>();
   #lastVerifiedAt: string | null = null;
   #lastAccountReadAt: string | null = null;
+  /** Identifies one connected session. A reconnect may be a different Robinhood login, so anything a caller derived
+   *  from the old connection — account handles, above all — can be dropped when this changes. */
+  #connectionId: string | null = null;
   #beginning: Promise<unknown> | undefined;
   constructor(deps: Partial<ConnectionDependencies> = {}) { this.#deps = { ...defaults, ...deps }; }
   status() {
     return { state: this.#state, orderSubmissionEnabled: false, credentialStorage: "memory_only",
+      connectionId: this.#connectionId,
       lastMarketReadAt: this.#lastVerifiedAt,
       lastAccountReadAt: this.#lastAccountReadAt,
-      // Account reads are an optional capability: market data must still connect when the provider does not grant them.
+      // Account reads are an optional capability: market data must still connect when the provider does not grant
+      // them. Listing accounts needs only its own tool, so a partial grant still answers "which accounts are there".
+      accountListAvailable: this.#state === "connected" && this.#tools.has("get_accounts"),
       accountToolsAvailable: this.#state === "connected" && ACCOUNT_READS.every(t => this.#tools.has(t)),
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),
       authorizationExpiresAt: this.#state === "awaiting_authorization" && this.#expiresAt ? new Date(this.#expiresAt).toISOString() : null,
-      note: "Robinhood authorizes broader access than this adapter uses. Astra allows market-data reads, and reads of your accounts, balances and positions when you ask for them. It never places, changes or cancels an order. Restart requires authorization again." };
+      note: "Robinhood authorizes broader access than this adapter uses. Astra allows market-data reads, and reads of your accounts when you ask about them. It never places, changes or cancels an order. Restart requires authorization again." };
   }
   /** Wait up to ms for a pending browser approval to settle. Never starts one; the checks are in memory only. */
   async waitForAuthorization(ms: number, signal?: AbortSignal) {
@@ -189,8 +198,11 @@ export class RobinhoodConnection {
           throw new Error("Market-data tools unavailable");
         }
         if (generation !== this.#generation) throw new Error("Connection cancelled");
-        this.#client = candidate; candidate = undefined; this.#tools = new Set(listing.tools.map(t => t.name)); this.#state = "connected";
-        this.#stopCallback(); res.end("Connected for market data, and for reading your accounts and positions when you ask. Return to your agent. Real orders are disabled.");
+        this.#client = candidate; candidate = undefined; this.#tools = new Set(listing.tools.map(t => t.name));
+        this.#state = "connected"; this.#connectionId = randomBytes(9).toString("base64url");
+        // Said at the moment of consent, so it states what this grant actually permits, not what the build can do.
+        this.#stopCallback();
+        res.end(`Connected for market data${this.#tools.has("get_accounts") ? ", and for listing your accounts when you ask" : ""}. Return to your agent. Real orders are disabled.`);
       } catch {
         await candidate?.close().catch(() => {}); provider.invalidateCredentials("all");
         if (generation === this.#generation) { this.#state = "failed"; this.#stopCallback(); }
@@ -217,7 +229,9 @@ export class RobinhoodConnection {
   #stopCallback() { if (this.#timer) clearTimeout(this.#timer); this.#timer = undefined; this.#callback?.close(); this.#callback = undefined; }
   async close() {
     this.#generation++; this.#stopCallback(); this.#provider?.invalidateCredentials("all"); this.#provider = undefined;
-    const client = this.#client; this.#client = undefined; this.#tools.clear(); this.#state = "not_connected"; this.#lastVerifiedAt = null;
+    const client = this.#client; this.#client = undefined; this.#tools.clear(); this.#state = "not_connected";
+    // Both timestamps reset together: a stale account time would outlive the connection that earned it.
+    this.#lastVerifiedAt = null; this.#lastAccountReadAt = null; this.#connectionId = null;
     await client?.close();
   }
   async read(tool: MarketRead, args: Record<string, unknown>): Promise<unknown> {

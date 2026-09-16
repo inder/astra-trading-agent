@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
-import { normalizeAccounts, sealed, type AccountSummary } from "./portfolio.ts";
+import { normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
+import { portfolioReport, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
@@ -116,6 +117,39 @@ export class TradingAgentService {
     const today = etDate(now);
     try { return !isTradingDay(today) || now >= sessionTimes(today).close ? today : addDays(today, -1); }
     catch { return addDays(today, -1); }
+  }
+  /** A printable report for the chosen accounts: cost basis, profit and loss, and the levels around each holding.
+   *  Account data is computed into a page and returned as a path — never journalled, logged or cached. Bars are
+   *  cached, because they are market data. */
+  async portfolioReport(handles: string[], directory: string): Promise<{ path: string; accounts: number; holdings: number }> {
+    const numbers = this.accountNumbers(handles);
+    const labels = new Map((await this.accounts()).map(a => [a.handle, a.label]));
+    return sealed(async () => {
+      const accounts: ReportAccount[] = [];
+      for (const [index, accountNumber] of numbers.entries()) {
+        const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
+        const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
+        const symbols = holdings.map(h => h.symbol);
+        // One levels call for the whole account, so a holding of twenty stocks is twenty bar reads at most, cached.
+        const computed = symbols.length ? await this.levels(symbols.slice(0, 20)) : [];
+        const rows: ReportHolding[] = holdings.map(holding => {
+          const found = computed.find(c => c.symbol === holding.symbol);
+          if (!found || "unavailable" in found) return { holding, unavailable: found ? found.unavailable : "not read" };
+          const bars = this.#dailyBars.get(holding.symbol)?.bars;
+          const frame = found.frames.find(f => f.timeframe === found.defaultTimeframe && !f.unavailable);
+          const from = bars && frame ? Math.max(0, bars.time.findIndex(t => t >= frame.start)) : 0;
+          return { holding, levels: found,
+            series: bars ? bars.time.slice(from).map((time, i) => ({ time, value: bars.close[from + i]! })) : [] };
+        });
+        accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated });
+      }
+      const html = portfolioReport({ accounts, generatedAt: new Date(this.#clock()).toISOString(), timeframe: "2-year" });
+      const target = resolve(directory);
+      mkdirSync(target, { recursive: true, mode: 0o700 });
+      const path = join(target, `portfolio-${new Date(this.#clock()).toISOString().slice(0, 10)}.html`);
+      writeFileSync(path, html, { mode: 0o600 });
+      return { path, accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0) };
+    });
   }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
    *  stock per settled session is kept in memory, pinned to the split adjustment it was fetched with. */

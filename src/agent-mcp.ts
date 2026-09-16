@@ -74,6 +74,14 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("list_accounts", { description: "List the user's Robinhood accounts so they can choose which to report on. Returns an opaque handle for each and a label masked to the last four digits; the full account number is never returned. Reads account names and status only — no balances, no positions, no orders. Show the labels and ask which accounts the user wants before reading any of them.",
     inputSchema: z.object({}).strict(), annotations: { ...readOnly, openWorldHint: true } },
     () => asyncGuarded(async () => ({ accounts: await service.accounts(), ordersSubmitted: 0 })));
+  server.registerTool("get_portfolio_report", { description: "Write a printable portfolio report for the chosen accounts: cost basis, profit and loss, and the support and resistance around each holding, with a small chart per stock. Call list_accounts first and ask the user which accounts to include — this reads their balances and positions. Returns the path of an HTML file; show it to the user as a markdown link with the full absolute path so they can open and print it. Reads market data and the chosen accounts; places no orders. Advisory: it reports what the rules found, never what to buy or sell.",
+    inputSchema: z.object({
+      accounts: z.array(z.string().regex(/^acct_[0-9a-f]{12}$/)).min(1).max(20)
+        .describe("Handles from list_accounts. There is no \"all\" shortcut: name each account the user chose."),
+      directory: z.string().min(1).max(400)
+        .describe("Absolute path of a directory the user's chat app can read — normally its working directory. A file written elsewhere may be unopenable from the chat."),
+    }).strict(), annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } },
+    a => asyncGuarded(async () => ({ ...await service.portfolioReport(a.accounts, a.directory), advisory: true, ordersSubmitted: 0 })));
   server.registerTool("get_market_quotes", { description: "Read equity prices from the independently authorized Robinhood connection. Includes timestamps and freshness flags; old quotes must not be described as current. Does not read accounts or place orders.",
     inputSchema: z.object({ symbols: configSchema.symbols }).strict(), annotations: { ...readOnly, openWorldHint: true } }, async a => {
       try { return reply({ quotes: await service.market.quotes(a.symbols), ordersSubmitted: 0 }); }

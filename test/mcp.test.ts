@@ -67,7 +67,7 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   t.after(async () => { await client.close(); rmSync(dir, { recursive: true, force: true }); });
   await client.connect(transport);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 23);
+  assert.equal(tools.length, 24);
   assert.ok(!tools.some(t => /close|sell|buy|live|shell|credential/.test(t.name)));
   // Clients that pass server instructions to their model are told to lead with get_readiness's guide.
   assert.match(client.getInstructions() ?? "", /call get_readiness and follow its guide/);
@@ -111,7 +111,7 @@ test("HTTP rejects unauthenticated, cross-origin, hostile-host and oversized req
   const client = new Client({ name: "http-test", version: "1" });
   try {
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 23);
+    assert.equal((await client.listTools()).tools.length, 24);
     assert.equal(unpack(await client.callTool({ name: "get_readiness", arguments: {} })).mode, "sample_and_paper");
   } finally { await client.close(); }
 });

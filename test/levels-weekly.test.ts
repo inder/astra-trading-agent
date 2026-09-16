@@ -94,6 +94,27 @@ test("a weekly frame measures weekly movement and splits at the price the answer
   for (const z of week.resistance!) assert.ok(z.lo > got.price, `${z.id} sits above the reported price`);
   for (const z of [...week.support!, ...week.resistance!]) assert.ok(z.hi - z.lo <= week.width! + 1e-9);
 });
+test("the weekly frame judges trend lines by its own rules, not the daily ones", () => {
+  // Weekly bars swing several times as far as daily ones, so the daily allowance (10 ATR) would call a line most of
+  // the way to zero "near the price". The weekly settings are separate for that reason.
+  const settings = parseLevelsSettings({ timeframes: ["5y"] });
+  assert.equal(settings.weeklyTrendMaxDistanceAtr, 3);
+  assert.equal(settings.weeklyTrendMinBars, 12);
+  assert.ok(settings.trendMaxDistanceAtr > settings.weeklyTrendMaxDistanceAtr, "and they are tighter than the daily ones");
+  assert.ok(settings.weeklyTrendMinBars > settings.trendMinBars, "a five-year line needs a longer anchor than five bars");
+  for (const bad of [{ weeklyTrendMinBars: 2, swingBars: 2 }, { weeklyTrendMaxDistanceAtr: 0.1 }, { weeklyTrendMinBars: 1 }] as any[])
+    assert.throws(() => parseLevelsSettings(bad), `${JSON.stringify(bad)}`);
+  // A line is kept or dropped on the weekly allowance: widening it brings back a line the tighter default refuses.
+  const far = levels(bars, parseLevelsSettings({ timeframes: ["5y"], weeklyTrendMaxDistanceAtr: 50 }));
+  const near = levels(bars, parseLevelsSettings({ timeframes: ["5y"], weeklyTrendMaxDistanceAtr: 0.5 }));
+  const line = (l: typeof far) => l.frames[0]!.trend?.support ?? l.frames[0]!.trend?.resistance;
+  assert.ok(!line(near) || Math.abs(line(near)!.toValue - near.price) <= 0.5 * far.frames[0]!.atr! + 1e-9,
+    "a tight allowance keeps only a line beside the price");
+  assert.ok(line(far), "a wide one admits a distant line");
+  // The daily frames must be untouched by any of this.
+  const daily = levels(bars, parseLevelsSettings({ timeframes: ["2y"], weeklyTrendMaxDistanceAtr: 0.5, weeklyTrendMinBars: 99 }));
+  assert.deepEqual(daily.frames[0]!.trend, levels(bars, parseLevelsSettings({ timeframes: ["2y"] })).frames[0]!.trend);
+});
 test("moving averages come back as series for drawing, matching the values the answer reports", () => {
   const series = movingAverageSeries(bars, [10, 200]);
   assert.deepEqual(series.map(s => s.period), [10, 200]);

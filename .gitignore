@@ -5,6 +5,7 @@ node_modules/
 .trading-agent/
 data/
 output/
+charts/
 *.log
 *.tgz
 .DS_Store

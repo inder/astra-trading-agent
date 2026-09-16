@@ -11,13 +11,14 @@ model; this server provides validated tools and durable run records.
 Independent project, not affiliated with OpenAI or Robinhood. The MCP server is
 model-agnostic; its name does not require a particular model or provider.
 
-**Version 0.3: the end-to-end PAPER workflow is implemented and tested with mocked
+**Version 0.4 adds reading your real accounts: a printable portfolio report** —
+cost basis, profit and loss, and the support and resistance around each holding on
+an expandable chart. Reading is all it does: the same code allowlist that blocks
+order tools governs every account call, and no tool Astra can reach places one.
+
+**The end-to-end PAPER workflow, from 0.3, is implemented and tested with mocked
 market data.** Configure and start continuous strategies, inspect positions and
 option P&L, review trims/closes in your browser, and recover saved positions.
-Astra also reads your real accounts when you ask it to, and writes a printable
-portfolio report — cost basis, profit and loss, and the support and resistance
-around each holding on an expandable chart. Reading is all it does: the same code
-allowlist that blocks order tools governs every account call.
 Independent browser authorization is mock-tested; successful Robinhood login and
 market-hours delivery still need an attended acceptance test. No real orders are
 supported, and no P&L from trading: the report's profit and loss is what holdings

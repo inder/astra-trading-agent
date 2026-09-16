@@ -14,7 +14,10 @@ import { readFile } from "node:fs/promises";
 import { REPORT_CSP } from "./report.ts";
 
 export class ReportServer {
+  /** The memoized start. This, not a server field, is the guard against two concurrent publishes binding twice. */
   #starting: Promise<Server> | undefined;
+  /** The listener that start produced, for identity only — so a late error retires the right one. */
+  #current: Server | undefined;
   #port = 0;
   /** Unguessable name to the file it was written as. Only these are served. */
   #reports = new Map<string, string>();
@@ -36,7 +39,12 @@ export class ReportServer {
   // reports asked for at once each bind a listener: the second would win `#port`, every link already handed out for
   // the first would then fail its own Host check, and that first listener would be unreachable by close().
   #listen(): Promise<number> {
-    return (this.#starting ??= this.#start()).then(() => this.#port);
+    // A rejected promise must not be kept: memoized, a single failed bind would answer every later report with the
+    // same stale error for the life of the process, with the file already written and no link ever handed out.
+    this.#starting ??= this.#start().catch(failure => { this.#starting = undefined; throw failure; });
+    // The port comes from the listener this call actually published against, not from a field a concurrent close()
+    // may already have zeroed — a URL naming port 0 is a link to nothing.
+    return this.#starting.then(server => (server.address() as AddressInfo).port);
   }
   async #start(): Promise<Server> {
     const server = createServer((request, response) => {
@@ -69,16 +77,24 @@ export class ReportServer {
         body => response.writeHead(200, headers).end(body),
         () => response.writeHead(410, headers).end("<p>That report has been moved or deleted. Ask Astra for a new one.</p>"));
     });
-    await new Promise<void>((ok, fail) => { server.once("error", fail); server.listen(0, "127.0.0.1", ok); });
+    await new Promise<void>((ok, fail) => {
+      const binding = (failure: Error) => fail(failure);
+      server.once("error", binding);
+      server.listen(0, "127.0.0.1", () => { server.off("error", binding); ok(); });
+    });
     server.unref();
-    this.#port = (server.address() as AddressInfo).port;
+    this.#current = server; this.#port = (server.address() as AddressInfo).port;
+    // An error after the bind would otherwise reject a promise that has already settled and vanish — or, with no
+    // handler at all, take the process down. Retiring the memo means the next report binds a fresh listener rather
+    // than publishing a link to one that is gone.
+    server.on("error", () => { if (this.#current === server) { this.#current = undefined; this.#starting = undefined; this.#port = 0; } });
     return server;
   }
   async close() {
     // The pending start is awaited rather than dropped: a listener that finished binding after close() was called
     // would otherwise stay up with nothing holding a reference to it.
     const starting = this.#starting;
-    this.#starting = undefined; this.#reports.clear(); this.#port = 0;
+    this.#starting = undefined; this.#current = undefined; this.#reports.clear(); this.#port = 0;
     const server = await starting?.catch(() => undefined);
     if (server) await new Promise<void>(ok => server.close(() => ok()));
   }

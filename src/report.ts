@@ -31,11 +31,14 @@ export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
 /** What window the headline may claim. Each row is drawn from its own symbol's chosen frame, and a stock listed two
  *  years ago has a shorter one than a stock listed in 1980 — so a fixed label on the page would be wrong for exactly
  *  the holdings whose history is short. Named only when every row agrees. */
-function window(input: ReportInput): string {
+function windowLabel(input: ReportInput): string {
   const labels = new Set<string>();
   for (const a of input.accounts) for (const r of a.holdings) if (r.levels) labels.add(shown(r.levels)?.label ?? "");
   labels.delete("");
-  return labels.size === 1 ? `${[...labels][0]} window` : "each stock's longest available window";
+  // Three cases, not two. With nothing measured there is no window to name, and a report of zero readable holdings
+  // claiming "each stock's longest available window" describes stocks it does not have.
+  if (labels.size === 0) return "";
+  return labels.size === 1 ? `${[...labels][0]} window` : "each stock's own window";
 }
 
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -414,7 +417,8 @@ export function portfolioReport(input: ReportInput): string {
 <header class="top">
   <div>
     <h1>Portfolio levels</h1>
-    <p class="asof">${escape(day(input.generatedAt.slice(0, 10)))} · ${holdings} holding${holdings === 1 ? "" : "s"} · ${escape(window(input))} · prices from the last session that closed</p>
+    <p class="asof">${[escape(day(input.generatedAt.slice(0, 10))), `${holdings} holding${holdings === 1 ? "" : "s"}`,
+      escape(windowLabel(input)), "prices from the last session that closed"].filter(Boolean).join(" · ")}</p>
   </div>
   <div class="actions">
     <button id="print" type="button">Print or save as PDF</button>

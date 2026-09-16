@@ -125,9 +125,8 @@ test("the same stock in two accounts gets two independent sets of tabs, and a to
   assert.deepEqual(partial.unreadableAccounts, ["••••6777 roth ira"], "and the account that could not be read is named");
   assert.equal(overview(two).totalValue, 125340.55 * 2, "two readable accounts still add up");
 });
-test("the report is written where it was asked for, and nothing about it reaches the data directory", async t => {
+test("the report lands under the data directory, readable by nobody else, and a second one is a second file", async t => {
   const dataDirectory = mkdtempSync(join(tmpdir(), "astra-report-data-"));
-  const outputDirectory = mkdtempSync(join(tmpdir(), "astra-report-out-"));
   const barPayload = (symbol: string) => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
     bars: bars.time.map((t, i) => ({ begins_at: `${t}T00:00:00Z`, open_price: String(bars.open[i]), high_price: String(bars.high[i]),
       low_price: String(bars.low[i]), close_price: String(bars.close[i]), volume: "1000", session: "reg" })) }] } });
@@ -145,34 +144,33 @@ test("the report is written where it was asked for, and nothing about it reaches
   } as any;
   const service = new TradingAgentService(dataDirectory, undefined, broker,
     { ready: () => true, clock: () => Date.parse("2026-09-16T12:00:00Z"), auto: false });
-  t.after(async () => { await service.close(); rmSync(dataDirectory, { recursive: true, force: true }); rmSync(outputDirectory, { recursive: true, force: true }); });
+  t.after(async () => { await service.close(); rmSync(dataDirectory, { recursive: true, force: true }); });
 
-  const before = readdirSync(dataDirectory);
   const [chosen] = await service.accounts();
-  const written = await service.portfolioReport([chosen!.handle], outputDirectory);
+  const written = await service.portfolioReport([chosen!.handle]);
   assert.equal(written.accounts, 1); assert.equal(written.holdings, 1);
+  // Where the file goes is not an argument: it is the reports folder under the data directory, and nowhere else.
+  assert.equal(written.path, join(dataDirectory, "reports", written.path.split("/").pop()!));
   assert.match(written.path, /portfolio-2026-09-16-[0-9a-f]{8}\.html$/, "dated, and unique so today's second report cannot overwrite the first");
+  assert.equal(statSync(written.path).mode & 0o777, 0o600, "readable only by its owner");
+  assert.equal(statSync(join(dataDirectory, "reports")).mode & 0o777, 0o700);
   const html = readFileSync(written.path, "utf8");
   assert.match(html, /FIXA/); assert.match(html, /••••3312 individual/); assert.match(html, /\$51,000/);
-  assert.deepEqual(readdirSync(dataDirectory), before, "an account never reaches the data directory");
   assert.ok(reads.includes("get_portfolio") && reads.includes("get_equity_positions"), "it reads totals and positions");
   assert.ok(!reads.some(r => /order|cancel|place/.test(r)), "and nothing else");
-
-  // Asked for without a directory, it writes under the data directory — the path production actually takes, and the
-  // one place account data is allowed to land. The file must be readable by nobody else.
-  const fallback = await service.portfolioReport([chosen!.handle]);
-  assert.equal(fallback.path, join(dataDirectory, "reports", fallback.path.split("/").pop()!));
-  assert.equal(statSync(fallback.path).mode & 0o777, 0o600, "readable only by its owner");
-  assert.equal(statSync(join(dataDirectory, "reports")).mode & 0o777, 0o700);
-  assert.notEqual(fallback.path, written.path, "and a second report the same day is a second file");
+  // The journal, the checkpoints and the saved runs are the data directory's own files; an account is in none of them.
+  const second = await service.portfolioReport([chosen!.handle]);
+  assert.notEqual(second.path, written.path, "a second report the same day is a second file, not an overwrite");
+  assert.deepEqual(readdirSync(dataDirectory), ["reports"], "and nothing about an account is written anywhere else");
 });
 test("past the charting cap the largest positions keep their charts, and the rest say why they have none", async t => {
   const dataDirectory = mkdtempSync(join(tmpdir(), "astra-report-cap-"));
-  const outputDirectory = mkdtempSync(join(tmpdir(), "astra-report-cap-out-"));
-  // Twenty-three holdings, priced so the alphabetical order and the size order disagree: AAA is the smallest.
+  // Twenty-three holdings, priced so the alphabetical order and the size order disagree: H22 is the smallest. Two of
+  // them are transferred-in shares the provider gave no cost for — they have no size to rank by and must not be
+  // ranked last by a zero they never had, so they chart first and the two smallest priced holdings lose out.
   const positions = Array.from({ length: 23 }, (_, i) => ({
     symbol: `H${String(i).padStart(2, "0")}`, quantity: "10", average_buy_price: String(100 - i),
-  }));
+  })).concat([{ symbol: "NOCOSTA", quantity: "9" }, { symbol: "NOCOSTB", quantity: "11" }] as any);
   const charted: string[] = [];
   const broker = {
     accountRead: async (tool: string) => {
@@ -192,17 +190,45 @@ test("past the charting cap the largest positions keep their charts, and the res
   } as any;
   const service = new TradingAgentService(dataDirectory, undefined, broker,
     { ready: () => true, clock: () => Date.parse("2026-09-16T12:00:00Z"), auto: false });
-  t.after(async () => { await service.close(); rmSync(dataDirectory, { recursive: true, force: true }); rmSync(outputDirectory, { recursive: true, force: true }); });
+  t.after(async () => { await service.close(); rmSync(dataDirectory, { recursive: true, force: true }); });
 
   const [chosen] = await service.accounts();
-  const written = await service.portfolioReport([chosen!.handle], outputDirectory);
-  assert.equal(written.holdings, 23, "every holding is still listed");
-  const bar = charted.filter(s => s.startsWith("H"));
-  assert.equal(new Set(bar).size, 20, "only the cap's worth of bar reads are spent");
-  assert.ok(!bar.includes("H20") && !bar.includes("H22"), "and they are the largest, not the first alphabetically");
+  const written = await service.portfolioReport([chosen!.handle]);
+  assert.equal(written.holdings, 25, "every holding is still listed");
+  const asked = new Set(charted);
+  assert.equal(asked.size, 20, "only the cap's worth of bar reads are spent");
+  assert.ok(asked.has("NOCOSTA") && asked.has("NOCOSTB"), "a holding with no cost to rank by is charted, not ranked last");
+  assert.ok(!asked.has("H21") && !asked.has("H22"), "and the smallest priced holdings are the ones that lose out");
+  assert.ok(asked.has("H00"), "the largest position keeps its chart");
   const html = readFileSync(written.path, "utf8");
   assert.match(html, /charts the 20 largest positions/, "an uncharted holding says why, rather than reading as unreadable");
   assert.ok(!html.includes("not read"), "and never with a reason that explains nothing");
+});
+test("two reports asked for at once share one listener, and a closed server starts a new one", async t => {
+  const { ReportServer } = await import("../src/report-server.ts");
+  const directory = mkdtempSync(join(tmpdir(), "astra-serve-two-"));
+  const server = new ReportServer();
+  t.after(async () => { await server.close(); rmSync(directory, { recursive: true, force: true }); });
+  const page = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
+  const files = ["a", "b"].map(name => { const file = join(directory, `${name}.html`); writeFileSync(file, page); return file; });
+
+  // The reason the start is memoized rather than guarded by a field set after an await. Two listeners would mean the
+  // second won the port, and every link already handed out for the first would fail its own Host check.
+  const [first, second] = await Promise.all(files.map(file => server.publish(file)));
+  const port = (url: string) => new URL(url).port;
+  assert.equal(port(first!), port(second!), "one listener, not two");
+  assert.notEqual(port(first!), "0", "and a real port, never the zero a concurrent close would leave behind");
+  assert.notEqual(first, second, "each report still gets its own name");
+  for (const url of [first!, second!]) assert.equal((await fetch(url)).status, 200);
+
+  // After close the names are forgotten, and the next report binds a fresh listener rather than reusing a dead memo.
+  await server.close();
+  assert.equal(server.port, 0);
+  const third = await server.publish(files[0]!);
+  assert.notEqual(port(third), port(first!), "a new listener, on a new port");
+  assert.equal((await fetch(third)).status, 200);
+  assert.equal((await fetch(`${new URL(third).origin}/r/${new URL(first!).pathname.slice(3)}`)).status, 404,
+    "and a name minted before the close is not served by what came after it");
 });
 test("the report is reachable on loopback, and that link serves only reports this process wrote", async t => {
   const { ReportServer } = await import("../src/report-server.ts");

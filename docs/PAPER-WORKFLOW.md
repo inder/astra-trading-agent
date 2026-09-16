@@ -72,6 +72,35 @@ calls it five years is wrong. A frame that cannot be computed carries
 `unavailable` with the reason instead of levels, and is never filled in with a
 shorter window in its place.
 
+## See the whole portfolio (optional)
+
+`get_portfolio_report` puts the same levels around what the user already owns.
+Ask `list_accounts` first and let the user choose: the handles it returns are the
+only way to name an account, they are opaque and per-process, and there is no
+"all" shortcut, so an account is read because someone named it.
+
+```json
+{ "accounts": ["acct_4f2a91c07b3e"] }
+```
+
+The reply is a `url` on `127.0.0.1` to open, the `path` it was written to, and an
+`overview`. Give the user the link and summarize the overview in a few sentences
+— account values, the day's change, which holdings sit within one daily range of
+a level, the best and worst by percent. Everything else belongs in the report:
+cost basis, market value, unrealized P&L, and an expandable chart per holding
+with QTD, YTD, two-year daily and five-year weekly views. It prints as it reads;
+only the charts the user opened, and only in the timeframe selected, go on paper.
+
+The report reads balances and equity positions, which nothing else in Astra does.
+Every holding is listed; the twenty largest in each account get charts, and the
+rest say so rather than reading as unreadable. A holding whose bars cannot be
+read is listed with the reason instead of being dropped, and an account with
+more holdings than one report can page through says that too. The file is
+written under Astra's data directory and nowhere else — a caller cannot choose
+the path. The equities in the table rarely add up to the account value —
+the account counts options, crypto and cash too — so the page shows both figures
+and explains the gap rather than implying a reconciliation that is not there.
+
 ## Configure and start
 
 Choose a future/current supported 2026–2027 trading session. This example date is

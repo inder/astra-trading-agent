@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
-import { normalizeAccounts, sealed, type AccountSummary } from "./portfolio.ts";
+import { MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
+import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
-import { levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { ReportServer } from "./report-server.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
@@ -31,6 +33,12 @@ export class TradingAgentService {
   readonly market: RobinhoodMarketData;
   readonly paper: PaperController;
   readonly reviews: PaperReviews;
+  /** Serves written reports on loopback. Starts on the first report, not at startup: an installation that never asks
+   *  for one never opens a port. */
+  readonly reports = new ReportServer();
+  /** Where reports are written. Settled once, at construction, because it decides where account data lands: a
+   *  per-call argument puts that choice in reach of whatever is calling, and the answer must not depend on the call. */
+  #reportDirectory: string;
   #closing?: Promise<void>;
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   #dailyBars = new Map<string, { on: string; bars: DailyBars }>();
@@ -75,8 +83,10 @@ export class TradingAgentService {
   // timeframe. Weekends and holidays are included in the span, not in what comes back.
   get #historyDays() { return Math.round((this.#levelsSettings.weeklyYears + 1) * 365.25); }
   constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection(),
-    testing: { market?: PaperMarket; symbols?: SymbolSource; ready?: () => boolean; clock?: () => number; auto?: boolean } = {}) {
+    testing: { market?: PaperMarket; symbols?: SymbolSource; ready?: () => boolean; clock?: () => number; auto?: boolean;
+      reports?: string } = {}) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
+    this.#reportDirectory = resolve(testing.reports ?? join(this.dataDirectory, "reports"));
     this.broker = broker; this.market = new RobinhoodMarketData(broker);
     if (new Set(strategies.map(s => s.id)).size !== strategies.length) throw new Error("Duplicate strategy ID");
     const live = new RobinhoodPaperMarket(broker);
@@ -116,6 +126,78 @@ export class TradingAgentService {
     const today = etDate(now);
     try { return !isTradingDay(today) || now >= sessionTimes(today).close ? today : addDays(today, -1); }
     catch { return addDays(today, -1); }
+  }
+  /** A printable report for the chosen accounts: cost basis, profit and loss, and the levels around each holding.
+   *  Where the file goes is not an argument at all: a model-chosen path is a way for account data to land in a synced
+   *  or shared folder, and a per-call argument leaves that open to the next caller. It is settled at construction.
+   *  Account data is computed into a page and returned as a path — never journalled, logged or cached. Bars are
+   *  cached, because they are market data. */
+  async portfolioReport(handles: string[]):
+    Promise<{ url: string; path: string; accounts: number; holdings: number; overview: PortfolioOverview }> {
+    const numbers = this.accountNumbers(handles);
+    const labels = new Map((await this.accounts()).map(a => [a.handle, a.label]));
+    // Only the account reads are sealed. A file the user cannot write to is their problem to fix and must say so;
+    // rewriting it into "Account read failed" would send them looking at the broker for a permissions error.
+    const accounts = await sealed(async () => {
+      const accounts: ReportAccount[] = [];
+      for (const [index, accountNumber] of numbers.entries()) {
+        const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
+        const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
+        // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
+        // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
+        // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
+        // and the rest say why they have none rather than reading as unreadable.
+        // A holding whose cost the provider did not give (transferred-in shares, typically) has no size to rank by,
+        // and it can be the largest position in the account — so it is charted first rather than sorted to the
+        // bottom by a zero it never had.
+        // A sentinel, not Infinity: subtracting two Infinities gives NaN, which is an inconsistent comparator and
+        // orders an account of unpriced holdings arbitrarily — the same defect this report's own row ordering had.
+        const size = (h: { shares: number; averageCost: number | null }) =>
+          h.averageCost === null ? Number.MAX_SAFE_INTEGER : h.shares * h.averageCost;
+        const charted = new Set([...holdings]
+          .sort((a, b) => size(b) - size(a) || b.shares - a.shares || a.symbol.localeCompare(b.symbol))
+          .slice(0, MAX_CHARTED_HOLDINGS).map(h => h.symbol));
+        const computed = charted.size ? await this.levels([...charted], "5y") : [];
+        const rows: ReportHolding[] = holdings.map(holding => {
+          const found = computed.find(c => c.symbol === holding.symbol);
+          if (!found || "unavailable" in found) {
+            return { holding, unavailable: found ? found.unavailable
+              : `not charted — this report charts the ${MAX_CHARTED_HOLDINGS} largest positions in an account` };
+          }
+          const bars = this.#dailyBars.get(holding.symbol)?.bars;
+          if (!bars) return { holding, levels: found, series: { daily: [] } };
+          const closes = (source: DailyBars) => source.time.map((time, i) => ({ time, value: source.close[i]! }));
+          const weekly = found.frames.some(f => f.bar === "week" && !f.unavailable) ? closes(aggregateWeekly(bars)) : undefined;
+          return { holding, levels: found, series: { daily: closes(bars), weekly } };
+        });
+        accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated });
+      }
+      return accounts;
+    });
+    // One reading of the clock for the page, the filename and the overview: three readings disagree across midnight,
+    // and the report would then name a different day than the file it lives in.
+    const input = { accounts, generatedAt: new Date(this.#clock()).toISOString() };
+    // Written first, so the report outlives this process and can be printed or kept; served second, because a path
+    // is only readable by a chat client inside its own working directory, and that directory moves.
+    //
+    // A failed write says so in its own words. Left to escape, a Node error carries a `code`, and the MCP edge
+    // rewrites any coded error into "Run not found" or "Run storage unavailable" — naming the wrong thing entirely
+    // and sending the user to look for a saved run. A plain Error carries no code, so its message is passed through.
+    // The minted name is in the filename: a second report the same day must not overwrite the first, because the
+    // first's link is still live and would then serve the second's accounts to whoever was given it.
+    const path = join(this.#reportDirectory, `portfolio-${input.generatedAt.slice(0, 10)}-${randomBytes(4).toString("hex")}.html`);
+    try {
+      mkdirSync(this.#reportDirectory, { recursive: true, mode: 0o700 });
+      // "wx" so a collision is loud rather than an overwrite: overwriting is the failure the stamp exists to prevent.
+      writeFileSync(path, portfolioReport(input), { mode: 0o600, flag: "wx" });
+      // Set explicitly, not left to the creation mode, which does nothing for a file that already existed.
+      chmodSync(path, 0o600);
+    } catch {
+      throw new Error("The report could not be saved. Check that Astra's data directory is writable.");
+    }
+    return { url: await this.reports.publish(path), path,
+      accounts: accounts.length, holdings: accounts.reduce((n, a) => n + a.holdings.length, 0),
+      overview: overview(input) };
   }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
    *  stock per settled session is kept in memory, pinned to the split adjustment it was fetched with. */
@@ -158,7 +240,9 @@ export class TradingAgentService {
   close() {
     return this.#closing ??= (async () => {
       try { await this.reviews.close(); } finally {
-        try { await this.paper.close(); } finally { await this.broker.close(); }
+        try { await this.reports.close(); } finally {
+          try { await this.paper.close(); } finally { await this.broker.close(); }
+        }
       }
     })();
   }

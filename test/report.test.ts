@@ -108,6 +108,28 @@ test("what a provider or an issuer wrote cannot become markup", () => {
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /A&amp;B&lt;C/);
 });
+test("a stock with too little history shows its price, not zero, and says why it has no levels", () => {
+  // A holding listed recently has real sessions but too few to measure a zone. The engine returns levels with every
+  // frame unavailable — and it used to leave price at 0, which put $0.00 and −100% in the money columns and made the
+  // stock the portfolio's worst performer in the overview the chat reads aloud. Only the levels are unknown.
+  const thin = levels({ time: bars.time.slice(-5), open: bars.open.slice(-5), high: bars.high.slice(-5),
+    low: bars.low.slice(-5), close: bars.close.slice(-5) }, parseLevelsSettings());
+  assert.ok(thin.frames.every(f => f.unavailable), "no frame could be measured");
+  assert.equal(thin.price, bars.close.at(-1), "but the price is the last close, not zero");
+
+  const input = { accounts: [account({
+    holdings: [{ holding: { symbol: "NEWCO", shares: 100, averageCost: 40 }, levels: thin, series: { daily: series } }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" };
+  const html = portfolioReport(input);
+  assert.ok(!/\$0\.00/.test(html), "no zero price reaches the table");
+  assert.ok(!/−100\.0%/.test(html), "and no total loss is invented");
+  assert.match(html, /only \d+ sessions of history/, "the reason is on the page, not only in the tool's JSON");
+  // The warning sits beside the row rather than inside the collapsed disclosure, which print drops when unopened.
+  const beforeDetails = html.slice(0, html.indexOf("<details"));
+  assert.match(beforeDetails, /only \d+ sessions of history/, "and is visible without expanding anything");
+  const view = overview(input);
+  assert.ok(!view.worst.some(w => w.symbol === "NEWCO" && w.gainPct <= -99), "the chat is not told it lost everything");
+});
 test("a price that is not a closing price is never shown as one", () => {
   // The case from 2026-09-16: Robinhood had not published that day's daily bar hours after the close, so the newest
   // trade was an after-hours print. Shown under a column headed "Last close", it read as the day's close.

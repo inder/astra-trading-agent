@@ -29,7 +29,7 @@ const quotePayload = (symbols: string[], price: number, tradeAt: number, nonRegA
   bid_price: String(price - 0.01), ask_price: String(price + 0.01), venue_bid_time: new Date(tradeAt).toISOString(),
   venue_ask_time: new Date(tradeAt).toISOString() } })) } });
 
-function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; nonRegAt?: number; barsFail?: boolean | "malformed"; ready?: boolean; now?: number; omitToday?: boolean } = {}) {
+function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; nonRegAt?: number; barsFail?: boolean | "malformed"; ready?: boolean; now?: number; omitToday?: boolean; padBefore?: number; holeAt?: number } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "astra-levels-"));
   const reads: string[] = [];
   const broker = { read: async (tool: string, args: Record<string, unknown>) => {
@@ -39,7 +39,18 @@ function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?:
       if (tool === "get_equity_historicals") {
         if (options.barsFail === "malformed") return { data: { results: [{ symbol: "FIXA", interval: "day", bars: "not bars" }] } };
         if (options.barsFail) throw new Error("Robinhood market-data read failed; check connection status. No order was submitted.");
-        return barPayload((args.symbols as string[])[0]!, options.omitToday ? bars : withToday(bars));
+        {
+          const payload: any = barPayload((args.symbols as string[])[0]!, options.omitToday ? bars : withToday(bars));
+          // Robinhood's pre-listing padding: flat interpolated bars ahead of the first real session.
+          // One real session in the middle replaced by the provider's filled-in placeholder.
+          if (options.holeAt !== undefined) payload.data.results[0].bars[options.holeAt].interpolated = true;
+          if (options.padBefore) {
+            payload.data.results[0].bars = [...Array.from({ length: options.padBefore }, (_, i) => ({
+              begins_at: `2020-${String(i + 1).padStart(2, "0")}-01T13:30:00Z`, open_price: "38", high_price: "38", low_price: "38",
+              close_price: "38", volume: "0", session: "reg", interpolated: true })), ...payload.data.results[0].bars];
+          }
+          return payload;
+        }
       }
       throw new Error("unexpected tool");
     }, status: () => ({ state: options.ready === false ? "disconnected" : "connected" }), close: async () => {} } as unknown as RobinhoodConnection;
@@ -141,28 +152,77 @@ test("levels need the market-data connection, and refuse bad ticker lists", asyn
   await assert.rejects(g.service.levels([]), /Invalid ticker list/);
 });
 
-test("bars Robinhood cannot vouch for are refused, never turned into a level", () => {
+test("a bar that is not a session is left out and counted, never turned into a level", () => {
   const one = (bar: Record<string, unknown>, symbol = "FIXA") => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
     bars: [{ begins_at: "2026-09-08T13:30:00Z", open_price: "10", high_price: "11", low_price: "9", close_price: "10.5" }, bar] }] } });
   const good = { begins_at: "2026-09-09T13:30:00Z", open_price: "10.5", high_price: "12", low_price: "10", close_price: "11.75" };
-  assert.deepEqual(normalizeDailyBars(one(good), "FIXA").close, [10.5, 11.75]);
+  const read = normalizeDailyBars(one(good), "FIXA");
+  assert.deepEqual(read.bars.close, [10.5, 11.75]);
+  assert.deepEqual(read.dropped, { leading: 0, trailing: 0, interior: 0 });
+
+  // Robinhood pads the window it is asked for: every day before an instrument existed comes back interpolated at a
+  // flat price, and so does the current day until it is finalized. Refusing the whole history on sight of one threw
+  // away six years of real bars — and after the close, on 2026-09-16, it did that for every symbol at once.
+  //
+  // Each of these sits LAST, so each is the session still being finalized however it is malformed. Position decides
+  // the bucket, not the reason: counting by reason would have called a corrupt bar at the edge a hole in the middle.
+  const trailing = [
+    ["interpolated", one({ ...good, interpolated: true })],
+    ["a repeated date", one({ ...good, begins_at: "2026-09-08T13:30:00Z" })],
+    ["an unparsable date", one({ ...good, begins_at: "2026-09-09" })],
+    ["a high below its low", one({ ...good, high_price: "9" })],
+    ["a zero price", one({ ...good, close_price: "0" })],
+    ["a price that is not a number", one({ ...good, open_price: "n/a" })],
+  ] as const;
+  for (const [what, raw] of trailing) {
+    const got = normalizeDailyBars(raw, "FIXA");
+    assert.deepEqual(got.bars.close, [10.5], `${what}: the real bar survives`);
+    assert.deepEqual(got.dropped, { leading: 0, trailing: 1, interior: 0 }, `${what}: counted once, at the end`);
+    assert.ok(!got.bars.time.includes("2026-09-09"), `${what}: never becomes a session`);
+  }
+  // The same malformed bar in the MIDDLE is a hole, not an edge.
+  const middle = { data: { results: [{ symbol: "FIXA", interval: "day", bounds: "regular", bars: [
+    { begins_at: "2026-09-08T13:30:00Z", open_price: "10", high_price: "11", low_price: "9", close_price: "10.5" },
+    { ...good, close_price: "0" },
+    { begins_at: "2026-09-10T13:30:00Z", open_price: "11", high_price: "12", low_price: "11", close_price: "11.5" },
+  ] }] } };
+  assert.deepEqual(normalizeDailyBars(middle, "FIXA").dropped, { leading: 0, trailing: 0, interior: 1 });
+  // And a date whose first bar is unusable is not spent: a later good bar for it is kept rather than called a repeat.
+  const retried = { data: { results: [{ symbol: "FIXA", interval: "day", bounds: "regular", bars: [
+    { ...good, close_price: "0" }, good,
+  ] }] } };
+  assert.deepEqual(normalizeDailyBars(retried, "FIXA").bars.close, [11.75], "the valid bar for that date survives");
+
+  // Structure is still refused outright: a bad series is not a bad bar, and nothing here can say which order is right.
   const refused: [string, unknown][] = [
-    // An interpolated bar is the dangerous one: it looks like a session and nothing downstream can tell it was invented.
-    ["Interpolated daily bar", one({ ...good, interpolated: true })],
-    ["Duplicate daily bar", one({ ...good, begins_at: "2026-09-08T13:30:00Z" })],
     ["Daily bars are out of order", one({ ...good, begins_at: "2026-09-05T13:30:00Z" })],
-    ["Invalid daily bar date", one({ ...good, begins_at: "2026-09-09" })],
-    ["Invalid daily bar prices", one({ ...good, high_price: "9" })],
-    ["Invalid daily bar prices", one({ ...good, close_price: "0" })],
-    ["Invalid daily bar prices", one({ ...good, open_price: "n/a" })],
     ["Daily bars unavailable", one(good, "OTHER")],
     ["Daily bars unavailable", { data: { results: [{ symbol: "FIXA", interval: "5minute", bars: [good] }] } }],
     ["Daily bars unavailable", { data: { results: [] } }],
     ["Daily bars unavailable", { data: {} }],
+    // Nothing real in the range is said plainly rather than handed on as an empty history.
+    ["No real daily bars in the range", { data: { results: [{ symbol: "FIXA", interval: "day", bars: [{ ...good, interpolated: true }] }] } }],
   ];
   for (const [message, raw] of refused) {
     assert.throws(() => normalizeDailyBars(raw, "FIXA"), (e: Error) => e instanceof DailyBarsError && e.message === message, message);
   }
+});
+test("a hole in the middle is announced; ordinary padding is counted and kept quiet", async t => {
+  // Padding before the first real session is what sinceListing already reports, and the placeholder for the session
+  // still being finalized is what the as-of date says. Warning about either would put a line on every holding every
+  // evening and teach the reader to skip all of them — including the one that matters.
+  const padded = fixture(t, { padBefore: 3 });
+  const quiet = usable((await padded.service.levels(["FIXA"]))[0]!);
+  assert.deepEqual(quiet.warnings, [], "ordinary padding is counted, not announced");
+  assert.equal(quiet.asOf, "2026-09-09", "and the real history is still measured");
+
+  // A session missing from the MIDDLE is different: a level near it rests on less than it appears to.
+  // Derived, so a fixture that changes length cannot quietly move the hole to an edge and invert the test.
+  const holed = fixture(t, { holeAt: Math.floor(bars.time.length / 2) });
+  const gap = usable((await holed.service.levels(["FIXA"]))[0]!);
+  assert.ok(gap.warnings.some(w => /inside this history/.test(w)), `warned: ${JSON.stringify(gap.warnings)}`);
+  assert.ok(gap.warnings.some(w => w.startsWith("1 day")), "and says how many");
+  assert.equal(gap.asOf, "2026-09-09", "the rest of the history is still measured");
 });
 test("a half-formed bar is never measured or cached: today counts only once its session has closed", async t => {
   const duringTheDay = fixture(t, { now: Date.parse("2026-09-10T15:00:00Z") });       // 11:00 a.m. ET, still trading

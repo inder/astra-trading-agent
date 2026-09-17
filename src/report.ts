@@ -170,7 +170,7 @@ function technicals(symbol: string, levels: Levels, series: { daily: Point[]; we
     const from = Math.max(0, source.findIndex(p => p.time >= frame.start));
     const bar = frame.bar === "week" ? "week" : "day";
     return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost, priceNote(levels, true))}
-      <p class="legend">Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s traded into it without closing through. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
+      <p class="legend">${frame.sinceListing ? `<strong>Short window: this holds ${frame.sessions} ${bar}${frame.sessions === 1 ? "" : "s"} of trading, because ${escape(symbol)} was listed inside it${source[from] ? ` and its history starts ${escape(day(source[from]!.time))}` : ""}.</strong> ` : ""}Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s traded into it without closing through. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
   };
   const selected = Math.max(0, frames.findIndex(x => x.timeframe === levels.defaultTimeframe));
   return `<details class="technicals"><summary>Technicals — price, cost and levels<span class="chev" aria-hidden="true"></span></summary>
@@ -211,7 +211,12 @@ function row(entry: ReportHolding, id: string): string {
     <td class="level">${zone(support, toSupport)}</td>
     <td class="level">${zone(resistance, toResistance)}</td>
   </tr>
-  <tr class="expand"><td colspan="8">${technicals(holding.symbol, levels, series, holding.averageCost, id)}</td></tr>`;
+  <tr class="expand"><td colspan="8">${
+    // Beside the row, not inside the disclosure. A caveat folded into a collapsed section is not shown to anyone
+    // reading the table, and print drops unopened sections entirely — so it would be absent from exactly the copy
+    // someone keeps. The numbers it qualifies are on the line above it.
+    levels.warnings.length ? `<p class="note">${levels.warnings.map(w => escape(w)).join(" ")}</p>` : ""
+  }${technicals(holding.symbol, levels, series, holding.averageCost, id)}</td></tr>`;
 }
 
 function account(a: ReportAccount, scope: number): string {

@@ -171,6 +171,11 @@ test("the options line tells apart the four things a bare count cannot", () => {
     "a read that failed is not an account that holds nothing");
   assert.match(withOptions({ count: 0, skipped: 40, truncated: false }), /none of its 40 contract rows could be read/,
     "and neither is a payload whose every row was dropped — the shape-drift case");
+  // No rows, nothing dropped, and an account worth $470,000 in options: the provider disagreeing with itself. This
+  // is the shape a payload wrapper Astra does not know about produces, and the last state that could still have been
+  // reported as a fact — "0 open contracts" takes one side of a contradiction and states it.
+  assert.match(withOptions({ count: 0, skipped: 0, truncated: false }), /no contract rows came back for it/);
+  assert.ok(!/0 open contracts/.test(withOptions({ count: 0, skipped: 0, truncated: false })));
   assert.match(withOptions({ count: 20, skipped: 0, truncated: true }), /20\+ open contracts, more than one report can page through/,
     "a count that stopped early says so rather than looking authoritative");
   assert.match(withOptions({ count: 12, skipped: 3, truncated: false }), /12 open contracts, and 3 rows that could not be read/);

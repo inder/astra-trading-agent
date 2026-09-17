@@ -128,17 +128,29 @@ export function normalizeTotals(raw: unknown): AccountTotals {
 
 /** Every holding in one account, following the provider's cursor. Bounded: a runaway page loop would burn the grant,
  *  and a truncated portfolio must say so rather than read as a complete one. */
-/** The only messages the account path may show a user. Anything else a future call site throws is replaced, so a
- *  message that interpolates an account number or a payload cannot reach a transcript by being written carelessly.
- *  Safe by construction rather than safe because every call site today happens to be. */
 /** The messages that mean the boundary itself refused, rather than a read failing. A call site that degrades on a
  *  failed read must let these past: an allowlist rejection or a closed connection at the only caller of a read that
- *  widened the boundary is precisely what must not be silent. */
+ *  widened the boundary is precisely what must not be silent.
+ *
+ *  Both are also on ACCOUNT_SAFE_ERRORS, so rethrowing one reaches a user as itself. Rethrowing a message that set
+ *  does not carry would cost the report AND flatten the signal to "Account read failed" — losing both things the
+ *  rethrow exists for. */
 export const BOUNDARY_ERRORS: ReadonlySet<string> = new Set([
   "Broker mutation or unsupported tool blocked",
   "Connect Robinhood market data first",
 ]);
+/** The only messages the account path may show a user. Anything else a future call site throws is replaced, so a
+ *  message that interpolates an account number or a payload cannot reach a transcript by being written carelessly.
+ *  Safe by construction rather than safe because every call site today happens to be.
+ *
+ *  This is a claim about SAFETY, not a routing table: a message belongs here if showing it would disclose nothing,
+ *  whether or not anything currently throws it. "Option positions unavailable" is on it and is, by design, caught
+ *  before it reaches `sealed()` at today's only call site — it stays so the next call site that does rethrow it is
+ *  not flattened into a generic failure. */
 export const ACCOUNT_SAFE_ERRORS: ReadonlySet<string> = new Set([
+  // Names the boundary's own refusal without naming the tool or the account: safe to show, and it must be, because
+  // a call site that degrades on a read failure rethrows this rather than swallowing it.
+  "Broker mutation or unsupported tool blocked",
   "Accounts unavailable",
   "Positions unavailable",
   // Carries no account number and no payload — the same shape as the line above it, for the option read.

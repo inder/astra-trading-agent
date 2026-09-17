@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ACCOUNT_READS, MARKET_READS, REQUIRED_ACCOUNT_READS, RobinhoodConnection } from "../src/broker-connection.ts";
-import { normalizeAccounts, normalizeHoldings, normalizeTotals, readHoldings, MAX_POSITION_PAGES } from "../src/portfolio.ts";
+import { normalizeAccounts, normalizeHoldings, normalizeTotals, readHoldings, readOptionHoldings, BOUNDARY_ERRORS, MAX_POSITION_PAGES } from "../src/portfolio.ts";
 import { TradingAgentService } from "../src/agent-service.ts";
 
 // Every tool Robinhood's one `internal` scope granted, from the attended discovery run on 2026-09-15. The allowlists
@@ -57,8 +57,12 @@ test("of the 73 tools the grant includes, only the ten on the two allowlists can
   for (const tool of GRANTED) {
     if (allowed.has(tool)) continue;
     const connection = new RobinhoodConnection();
-    await assert.rejects(connection.read(tool as never, {}), /blocked/, `${tool} must not be a market read`);
-    await assert.rejects(connection.accountRead(tool as never, {}), /blocked/, `${tool} must not be an account read`);
+    // Matched EXACTLY against BOUNDARY_ERRORS, not loosely against /blocked/. A call site that degrades on a failed
+    // read decides whether to rethrow by comparing this message, so rewording the throw would silently stop the
+    // rethrow firing and turn a boundary refusal back into a shrug on the page — with a loose match still green.
+    const boundary = (e: Error) => e.message === "Broker mutation or unsupported tool blocked" && BOUNDARY_ERRORS.has(e.message);
+    await assert.rejects(connection.read(tool as never, {}), boundary, `${tool} must not be a market read`);
+    await assert.rejects(connection.accountRead(tool as never, {}), boundary, `${tool} must not be an account read`);
     await connection.close();
   }
   // The two lists stay apart, and neither can be edited into the other by accident.
@@ -225,7 +229,6 @@ test("an option position is read as the provider actually sends it, not as it wa
   assert.throws(() => normalizeOptionHoldings({ data: {} }), /Option positions unavailable/);
 });
 test("option positions page to the end, and a book too long to page through says so", async () => {
-  const { readOptionHoldings } = await import("../src/portfolio.ts");
   const row = (n: number) => ({ option_id: `3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c${String(n).padStart(2, "0")}`,
     chain_symbol: "NVDA", type: "long", quantity: "1.0000", average_price: "1.0000",
     expiration_date: "2026-12-18", trade_value_multiplier: "100.0000" });

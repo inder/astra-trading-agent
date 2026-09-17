@@ -46,6 +46,18 @@ const money = (v: number | null | undefined, dp = 2) =>
   v === null || v === undefined ? "—" : `${v < 0 ? "−" : ""}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
 const percent = (v: number | null | undefined) => v === null || v === undefined ? "—" : `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(1)}%`;
 const day = (iso: string) => new Date(`${iso}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+/** The time of day a trade happened, in the market's own timezone — the only one a closing price means anything in. */
+const easternTime = (iso: string) => new Date(iso).toLocaleString("en-US",
+  { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/New_York" });
+/** What the price beside a holding actually is. A closing price and an after-hours trade are different facts, and a
+ *  column that shows one under the other's name is how a report misleads without stating a single wrong number. */
+function priceNote(levels: Levels, short = false): string {
+  if (levels.priceSource === "close") return `close ${day(levels.asOf)}`;
+  const when = !short && levels.priceAt ? ` ${easternTime(levels.priceAt)} ET` : "";
+  if (levels.priceSource === "after-hours") return `after hours${when}`;
+  if (levels.priceSource === "pre-market") return `pre-market${when}`;
+  return `last trade${when}`;
+}
 
 /** The frame a report row is drawn from: the one the levels engine chose, which is the longest daily window with
  *  enough history. */
@@ -72,7 +84,7 @@ function atrsAway(frame: Frame | undefined, price: number): number {
 /** A chart with room to read it: price, the zones as labelled bands, unfilled gaps, the trend line, and a price
  *  scale. Drawn at a fixed viewBox and scaled by CSS, so it is equally legible on screen and on paper. */
 const W = 960, H = 380, PAD_B = 22, PAD_T = 26;
-function chart(points: Point[], frame: Frame, price: number, label: string, cost: number | null): string {
+function chart(points: Point[], frame: Frame, price: number, label: string, cost: number | null, priceLabel: string): string {
   if (points.length < 2) return `<p class="note">Not enough history to draw ${escape(label)}.</p>`;
   const values = points.map(p => p.value);
   // Only the nearest zones are drawn. Twenty bands is not a chart, it is a wall — the rest are in get_levels.
@@ -82,7 +94,7 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   // Room for the longest label there will actually be, rather than a guess that the text then overflows.
   const width = (text: string) => text.length * 6.2 + 12;
   const PAD_R = Math.round(Math.min(260, Math.max(96, ...zones.map(z => width(`${money(z.lo)}–${z.hi.toFixed(2)} ${z.tests} held`)),
-    width(`${money(price)} last close`), ...(cost ? [width(`${money(cost)} your cost (off scale)`)] : []))));
+    width(`${money(price)} ${priceLabel}`), ...(cost ? [width(`${money(cost)} your cost (off scale)`)] : []))));
   const plot = W - PAD_R, plotH = H - PAD_B - PAD_T;
   const marks = [price, ...(cost ? [cost] : [])];
   const lo = Math.min(...values, ...zones.map(z => z.lo), ...gaps.map(g => g.lo), ...marks);
@@ -143,7 +155,7 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   ${cost ? `<line class="cost" x1="0" y1="${at(cost).toFixed(1)}" x2="${plot}" y2="${at(cost).toFixed(1)}"/>
   <text class="costlabel" x="${plot + 6}" y="${costY.toFixed(1)}">${money(cost)} your cost${cost < bottom || cost > top ? " (off scale)" : ""}</text>` : ""}
   <line class="now" x1="0" y1="${at(price).toFixed(1)}" x2="${plot}" y2="${at(price).toFixed(1)}"/>
-  <text class="nowlabel" x="${plot + 6}" y="${priceY.toFixed(1)}">${money(price)} last close</text>
+  <text class="nowlabel" x="${plot + 6}" y="${priceY.toFixed(1)}">${money(price)} ${escape(priceLabel)}</text>
   ${dates.map((i, n) => `<text class="date" x="${Math.min(plot - 30, Math.max(2, x(i))).toFixed(1)}" y="${H - 6}" text-anchor="${n === 0 ? "start" : n === 1 ? "middle" : "end"}">${escape(day(points[i]!.time))}</text>`).join("\n  ")}
 </svg>`;
 }
@@ -157,7 +169,7 @@ function technicals(symbol: string, levels: Levels, series: { daily: Point[]; we
     const source = frame.bar === "week" ? series.weekly ?? [] : series.daily;
     const from = Math.max(0, source.findIndex(p => p.time >= frame.start));
     const bar = frame.bar === "week" ? "week" : "day";
-    return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost)}
+    return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost, priceNote(levels, true))}
       <p class="legend">Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s traded into it without closing through. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
   };
   const selected = Math.max(0, frames.findIndex(x => x.timeframe === levels.defaultTimeframe));
@@ -193,7 +205,7 @@ function row(entry: ReportHolding, id: string): string {
     <th scope="row">${symbol}${near ? `<span class="flag" title="Within one average daily range of this level">near ${side}</span>` : ""}</th>
     <td class="num">${holding.shares.toLocaleString("en-US")}</td>
     <td class="num">${money(holding.averageCost)}</td>
-    <td class="num">${money(price)}</td>
+    <td class="num">${money(price)}<span class="dist">${escape(priceNote(levels))}</span></td>
     <td class="num">${money(value, 0)}</td>
     <td class="num ${gain !== null && gain < 0 ? "down" : "up"}">${money(gain, 0)}<span class="dist">${percent(gainPct)}</span></td>
     <td class="level">${zone(support, toSupport)}</td>
@@ -239,7 +251,7 @@ function account(a: ReportAccount, scope: number): string {
   </header>
   ${notes.length ? `<p class="note">${notes.map(escape).join(" ")}</p>` : ""}
   <table>
-    <thead><tr><th scope="col">Stock</th><th scope="col">Shares</th><th scope="col">Avg cost/share</th><th scope="col">Last close</th>
+    <thead><tr><th scope="col">Stock</th><th scope="col">Shares</th><th scope="col">Avg cost/share</th><th scope="col">Price</th>
       <th scope="col">Value</th><th scope="col">Unrealized P&amp;L</th><th scope="col">Support below</th><th scope="col">Resistance above</th></tr></thead>
     <tbody>${rows.map((r, i) => row(r, `${scope}-${i}`)).join("\n")}</tbody>
   </table>
@@ -418,7 +430,7 @@ export function portfolioReport(input: ReportInput): string {
   <div>
     <h1>Portfolio levels</h1>
     <p class="asof">${[escape(day(input.generatedAt.slice(0, 10))), `${holdings} holding${holdings === 1 ? "" : "s"}`,
-      escape(windowLabel(input)), "prices from the last session that closed"].filter(Boolean).join(" · ")}</p>
+      escape(windowLabel(input)), "each price says which session it is from"].filter(Boolean).join(" · ")}</p>
   </div>
   <div class="actions">
     <button id="print" type="button">Print or save as PDF</button>
@@ -426,11 +438,13 @@ export function portfolioReport(input: ReportInput): string {
   </div>
 </header>
 ${accounts}
-<footer>Prices are the last close of the session named above; distances are measured from that close to the nearest edge of
-a zone. Support and resistance are computed by fixed rules from daily bars, or from weekly bars on the five-year
-chart, and "held 24" counts how many bars traded into that zone without closing through it — a record of what
-happened, not a probability that it happens again. Nothing here is a recommendation to buy or sell, and Astra places
-no orders.</footer>
+<footer>Every price says what it is. "Close" is that session's official closing price. "After hours", "pre-market" and
+"last trade" are single trades later than the last close Robinhood has published — which is why one can appear here
+before today's close does — and they are not closing prices. Distances are measured from the price shown to the
+nearest edge of a zone. Support and resistance are computed by fixed rules from settled daily bars, or from weekly
+bars on the five-year chart, and never from a trade after the last close; "held 24" counts how many bars traded into
+that zone without closing through it — a record of what happened, not a probability that it happens again. Nothing
+here is a recommendation to buy or sell, and Astra places no orders.</footer>
 <script>${script}</script>
 </body></html>`;
 }

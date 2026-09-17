@@ -4,11 +4,11 @@ import { join, resolve } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
-import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols } from "./market-data.ts";
+import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type EquityMarketQuote } from "./market-data.ts";
 import { MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
 import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
-import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { ReportServer } from "./report-server.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
@@ -201,6 +201,31 @@ export class TradingAgentService {
   }
   /** Support and resistance for stocks, from daily bars: no account is read, and nothing is advice. One bar read per
    *  stock per settled session is kept in memory, pinned to the split adjustment it was fetched with. */
+  /** The price to report, when a trade is newer than the last close the provider has published.
+   *
+   *  Robinhood does not always have today's daily bar by the time someone asks — on 2026-09-16 it still had not,
+   *  three hours after the close — and the fallback was then the previous session's close, shown under a heading that
+   *  said "last close" with today's date on the page. A reader cannot tell that apart from today's close.
+   *
+   *  So: the official close wins whenever the provider has it, because it is the authoritative number. Only when the
+   *  newest trade belongs to a later session than the newest bar is that trade used instead, and then it is named —
+   *  a regular-session trade, an after-hours one, or a pre-market one — so it is never read as a close.
+   *
+   *  Freshness is deliberately not required here. The five-second rule exists so the paper engine never trades on a
+   *  stale tick; a report is not a trade, and after the close every quote is stale by that measure, which is exactly
+   *  when this is needed. */
+  #latestTrade(quote: EquityMarketQuote | undefined, bars: DailyBars, now: number): LatestTrade | undefined {
+    if (!quote?.price || !quote.tradeAt || quote.state !== "active") return undefined;
+    const tradedOn = etDate(Date.parse(quote.tradeAt));
+    const lastBar = bars.time.at(-1);
+    if (!lastBar || tradedOn <= lastBar) return undefined;          // the close is published and authoritative
+    if (quote.regularSession) return { price: quote.price, source: "quote", at: quote.tradeAt };
+    // Outside the regular session, which side of it decides the word. A trade before the day's open is pre-market;
+    // anything else — after the close, or on a day with no session at all — reads as after-hours.
+    let premarket = false;
+    try { premarket = Date.parse(quote.tradeAt) < sessionTimes(tradedOn).open; } catch { premarket = false; }
+    return { price: quote.price, source: premarket ? "pre-market" : "after-hours", at: quote.tradeAt };
+  }
   async levels(symbols: string[], timeframe?: Timeframe): Promise<SymbolLevels[]> {
     validateSymbols(symbols);
     if (!this.#ready()) throw new Error("Connect Robinhood market data first");
@@ -210,7 +235,7 @@ export class TradingAgentService {
     const settings = timeframe && !this.#levelsSettings.timeframes.includes(timeframe)
       ? { ...this.#levelsSettings, timeframes: [...this.#levelsSettings.timeframes, timeframe] } : this.#levelsSettings;
     for (const [key, held] of this.#dailyBars) if (held.on !== settled) this.#dailyBars.delete(key);   // yesterday's bars are dead weight
-    const quotes = await this.market.quotes(symbols).catch(() => [] as { symbol: string; price: number | null; fresh: boolean }[]);
+    const quotes = await this.market.quotes(symbols).catch(() => [] as EquityMarketQuote[]);
     const out: SymbolLevels[] = [];
     for (const symbol of symbols) {
       const cached = this.#dailyBars.get(symbol);
@@ -224,15 +249,17 @@ export class TradingAgentService {
           bars = sessionsBefore(await this.market.dailyBars(symbol, now - this.#historyDays * 86400000, now), addDays(settled, 1));
           this.#dailyBars.set(symbol, { on: settled, bars });
         } catch (error) {
+          // The reason is kept. "No usable history" alone cannot be acted on — it does not say whether the provider
+          // returned nothing, returned a bar that failed a check, or was never reached.
           out.push({ symbol, unavailable: error instanceof DailyBarsError
-            ? "no usable daily price history from Robinhood" : "daily price history could not be read" });
+            ? `no usable daily price history from Robinhood (${error.message.toLowerCase()})`
+            : "daily price history could not be read" });
           continue;
         }
       }
-      const quote = quotes.find(q => q.symbol === symbol);
       // `settled` advances through weekends and holidays, which is what tells a weekly frame that a week with no
       // Friday session is nonetheless over.
-      const computed = levels(bars, settings, quote?.fresh && quote.price ? quote.price : undefined, settled);
+      const computed = levels(bars, settings, this.#latestTrade(quotes.find(q => q.symbol === symbol), bars, now), settled);
       out.push({ symbol, ...computed, requested: timeframe ?? computed.defaultTimeframe ?? undefined });
     }
     return out;

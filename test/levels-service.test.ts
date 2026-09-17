@@ -21,22 +21,25 @@ const withToday = (series: DailyBars): DailyBars => ({ time: [...series.time, fo
 const barPayload = (symbol: string, series: DailyBars) => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
   bars: series.time.map((t, i) => ({ begins_at: `${t}T13:30:00Z`, open_price: String(series.open[i]), high_price: String(series.high[i]),
     low_price: String(series.low[i]), close_price: String(series.close[i]), volume: "1000", session: "reg" })) }] } });
-const quotePayload = (symbols: string[], price: number, tradeAt: number) => ({ data: { results: symbols.map(symbol => ({ quote: {
+// `nonRegAt` later than `tradeAt` is how Robinhood reports an extended-hours print: the quote then reads as
+// non-regular, which is what tells after-hours and pre-market apart from a regular-session trade.
+const quotePayload = (symbols: string[], price: number, tradeAt: number, nonRegAt = tradeAt - 3600000) => ({ data: { results: symbols.map(symbol => ({ quote: {
   symbol, state: "active", has_traded: true, last_trade_price: String(price), venue_last_trade_time: new Date(tradeAt).toISOString(),
-  last_non_reg_trade_price: String(price), venue_last_non_reg_trade_time: new Date(tradeAt - 3600000).toISOString(),
+  last_non_reg_trade_price: String(price), venue_last_non_reg_trade_time: new Date(nonRegAt).toISOString(),
   bid_price: String(price - 0.01), ask_price: String(price + 0.01), venue_bid_time: new Date(tradeAt).toISOString(),
   venue_ask_time: new Date(tradeAt).toISOString() } })) } });
 
-function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; barsFail?: boolean | "malformed"; ready?: boolean; now?: number } = {}) {
+function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?: number; nonRegAt?: number; barsFail?: boolean | "malformed"; ready?: boolean; now?: number; omitToday?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "astra-levels-"));
   const reads: string[] = [];
   const broker = { read: async (tool: string, args: Record<string, unknown>) => {
       reads.push(`${tool}:${(args.symbols as string[]).join(",")}`);
-      if (tool === "get_equity_quotes") return quotePayload(args.symbols as string[], 131.5, options.quoteAt ?? Date.now() - 1000);
+      if (tool === "get_equity_quotes") return quotePayload(args.symbols as string[], 131.5,
+        options.quoteAt ?? Date.parse("2026-09-09T19:59:00Z"), options.nonRegAt);
       if (tool === "get_equity_historicals") {
         if (options.barsFail === "malformed") return { data: { results: [{ symbol: "FIXA", interval: "day", bars: "not bars" }] } };
         if (options.barsFail) throw new Error("Robinhood market-data read failed; check connection status. No order was submitted.");
-        return barPayload((args.symbols as string[])[0]!, withToday(bars));
+        return barPayload((args.symbols as string[])[0]!, options.omitToday ? bars : withToday(bars));
       }
       throw new Error("unexpected tool");
     }, status: () => ({ state: options.ready === false ? "disconnected" : "connected" }), close: async () => {} } as unknown as RobinhoodConnection;
@@ -48,7 +51,8 @@ function fixture(t: { after: (fn: () => unknown) => void }, options: { quoteAt?:
 const usable = (l: SymbolLevels) => { assert.ok(!("unavailable" in l), `${l.symbol} unavailable`); return l as Exclude<SymbolLevels, { unavailable: string }>; };
 
 test("levels come from daily bars and a live quote, and each stock's bars are read once a day", async t => {
-  const f = fixture(t);
+  // A trade during the 10th's session, which is later than the last settled bar (the 9th), so the quote is the price.
+  const f = fixture(t, { quoteAt: Date.parse("2026-09-10T14:00:00Z") });
   const [first] = await f.service.levels(["FIXA"]);
   const got = usable(first!);
   assert.equal(got.symbol, "FIXA");
@@ -80,8 +84,42 @@ test("the weekly window is answered when it is asked for, and left out when it i
   const lastWeek = frame.support!.concat(frame.resistance!).flatMap(z => z.members.map(m => m.date)).sort().at(-1)!;
   assert.ok(lastWeek < "2026-09-07", `the forming week is not measured: newest member ${lastWeek}`);
 });
-test("a stale quote falls back to the last close, and says so", async t => {
-  const f = fixture(t, { quoteAt: Date.now() - 600000 });
+// The clock is 08:00 ET on Thursday 10 September; the last settled bar is Wednesday the 9th.
+test("the published close wins over a trade from the same session, however old that trade is", async t => {
+  // 3:59 PM ET on the 9th — the closing print. The bar for the 9th exists, so the bar is the authority.
+  const f = fixture(t, { quoteAt: Date.parse("2026-09-09T19:59:00Z") });
+  const got = usable((await f.service.levels(["FIXA"]))[0]!);
+  assert.equal(got.priceSource, "close"); assert.equal(got.price, bars.close.at(-1));
+  assert.equal(got.priceAt, null); assert.equal(got.asOf, "2026-09-09");
+});
+test("a trade later than the last published close is used, and named for the session it happened in", async t => {
+  // Robinhood does not always have a session's daily bar when someone asks — on 2026-09-16 it did not have that
+  // day's, three hours after the close. Falling back to the previous close under a heading that says "last close"
+  // is indistinguishable from today's close, so the newer trade is shown and told apart from a closing price.
+  const at = (iso: string) => Date.parse(iso);
+  const cases = [
+    // 8 AM ET on the 10th, before that session opens, while the last published bar is the 9th.
+    { name: "pre-market", quoteAt: at("2026-09-10T08:00:00Z"), nonRegAt: at("2026-09-10T12:00:00Z"),
+      now: at("2026-09-10T12:30:00Z"), omitToday: false, source: "pre-market" },
+    // 5 PM ET on the 10th, with the 10th's session over and its bar still not published — the case that started this.
+    // Note the trade must be evening in New York, not merely a later UTC day: 00:30Z on the 11th is still the 10th ET.
+    { name: "after hours", quoteAt: at("2026-09-10T19:59:00Z"), nonRegAt: at("2026-09-10T21:00:00Z"),
+      now: at("2026-09-10T22:00:00Z"), omitToday: true, source: "after-hours" },
+    { name: "regular session", quoteAt: at("2026-09-10T14:00:00Z"), nonRegAt: undefined,
+      now: at("2026-09-10T14:30:00Z"), omitToday: false, source: "quote" },
+  ] as const;
+  for (const c of cases) {
+    const f = fixture(t, { quoteAt: c.quoteAt, nonRegAt: c.nonRegAt, now: c.now, omitToday: c.omitToday });
+    const got = usable((await f.service.levels(["FIXA"]))[0]!);
+    assert.equal(got.priceSource, c.source, c.name);
+    assert.equal(got.price, 131.5, `${c.name} reports the traded price`);
+    assert.ok(got.priceAt, `${c.name} says when it traded`);
+    // Whatever the price, the levels themselves still come only from settled bars.
+    assert.equal(got.asOf, "2026-09-09", `${c.name} measures levels from the last settled session`);
+  }
+});
+test("with no quote at all, the last close is used and said to be one", async t => {
+  const f = fixture(t, { quoteAt: Number.NaN });
   const got = usable((await f.service.levels(["FIXA"]))[0]!);
   assert.equal(got.priceSource, "close"); assert.equal(got.price, bars.close.at(-1));
 });
@@ -91,7 +129,9 @@ test("a stock whose history cannot be read is named, and a broken read is not ca
   // The broker's own failure text mentions "no order was submitted"; that must not be read as unusable bars.
   assert.deepEqual(only, { symbol: "FIXA", unavailable: "daily price history could not be read" });
   const g = fixture(t, { barsFail: "malformed" });
-  assert.deepEqual((await g.service.levels(["FIXA"]))[0], { symbol: "FIXA", unavailable: "no usable daily price history from Robinhood" });
+  // The reason survives: "no usable history" alone cannot be acted on, and this is the message a user reports back.
+  assert.deepEqual((await g.service.levels(["FIXA"]))[0],
+    { symbol: "FIXA", unavailable: "no usable daily price history from Robinhood (daily bars unavailable)" });
 });
 test("levels need the market-data connection, and refuse bad ticker lists", async t => {
   const f = fixture(t, { ready: false });

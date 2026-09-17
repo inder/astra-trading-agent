@@ -28,7 +28,17 @@ export interface Frame extends Partial<Analysis> {
 }
 export type Timeframe = "qtd" | "ytd" | "2y" | "5y";
 export interface Levels {
-  asOf: string; price: number; priceSource: "quote" | "close"; sessions: number;
+  /** The last settled session these levels were measured from. Zones never come from a later trade. */
+  asOf: string;
+  price: number;
+  /** Where `price` came from. `close` is `asOf`'s official close. The rest are trades later than that close: `quote`
+   *  during the session, and `after-hours` or `pre-market` outside it — which is how a price can be newer than the
+   *  last close the provider has published. A reader must be told which, so a report can never imply a price is a
+   *  closing price when it is not. */
+  priceSource: "close" | "quote" | "after-hours" | "pre-market";
+  /** When the trade behind `price` happened, when it was not a close. */
+  priceAt: string | null;
+  sessions: number;
   averages: { period: number; value: number | null }[];
   frames: Frame[]; defaultTimeframe: Timeframe | null;
   /** Data problems worth saying out loud rather than silently computing through. */
@@ -338,15 +348,19 @@ function splitWarnings(bars: DailyBars): string[] {
 
 /** Levels for one stock: every configured timeframe, the moving averages, and which timeframe to show by default.
  *  `quote` is the live price when the caller has one; without it the last close is used, and the result says which. */
-export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsSettings(), quote?: number,
+/** A trade later than the last settled close, and what kind it was. The caller decides that, because only it knows
+ *  the clock and the session; the engine only reports what it was handed. */
+export interface LatestTrade { price: number; source: "quote" | "after-hours" | "pre-market"; at: string | null }
+export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsSettings(), quote?: number | LatestTrade,
   settledThrough?: string): Levels {
-  const empty: Levels = { asOf: "", price: 0, priceSource: "close", sessions: 0, averages: [], frames: [], defaultTimeframe: null, warnings: [] };
+  const latest: LatestTrade | undefined = typeof quote === "number" ? { price: quote, source: "quote", at: null } : quote;
+  const empty: Levels = { asOf: "", price: 0, priceSource: "close", priceAt: null, sessions: 0, averages: [], frames: [], defaultTimeframe: null, warnings: [] };
   const problem = unusable(daily, settings);
   const t = daily?.time ?? [], n = t.length;
   if (problem) return { ...empty, asOf: t[n - 1] ?? "", sessions: n, warnings: [problem],
     frames: settings.timeframes.map(timeframe => ({ label: LABELS[timeframe], timeframe, bar: weekly(timeframe) ? "week" : "day",
       start: "", sessions: n, sinceListing: false, unavailable: problem })) };
-  const price = quote ?? daily.close[n - 1]!;
+  const price = latest?.price ?? daily.close[n - 1]!;
   const averages = settings.movingAverages.map(period => ({ period,
     value: n >= period ? daily.close.slice(n - period).reduce((a, b) => a + b, 0) / period : null }));
   // Weekly bars are folded once and shared by every weekly frame, and only when one is asked for.
@@ -385,6 +399,6 @@ export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsS
   // Weekly is never the default: it answers a different question, and it would otherwise win by being the longest.
   const usable = frames.filter(f => !f.unavailable);
   const longest = DAILY_TIMEFRAMES.filter(tf => usable.some(f => f.timeframe === tf)).at(-1) ?? null;
-  return { asOf: t[n - 1]!, price, priceSource: quote === undefined ? "close" : "quote", sessions: n, averages, frames,
+  return { asOf: t[n - 1]!, price, priceSource: latest?.source ?? "close", priceAt: latest?.at ?? null, sessions: n, averages, frames,
     defaultTimeframe: longest, warnings: splitWarnings(daily) };
 }

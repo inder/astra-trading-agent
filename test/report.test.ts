@@ -35,7 +35,11 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /Support below/); assert.match(html, /Resistance above/);
   assert.match(html, /held \d+</, "a zone says how often it held, in one word used everywhere");
   assert.ok(!/\d+ tests|\d+×/.test(html), "and never in a second vocabulary");
-  assert.match(html, /Avg cost\/share/); assert.match(html, /Unrealized P&amp;L/); assert.match(html, /Last close/);
+  assert.match(html, /Avg cost\/share/); assert.match(html, /Unrealized P&amp;L/); assert.match(html, />Price</);
+  // Every price says what it is. A closing price and an after-hours trade are different facts, and the column used to
+  // be headed "Last close" whatever it held — which is how a report misleads without stating a wrong number.
+  assert.match(html, /close [A-Z][a-z]{2} \d+, \d{4}/, "a close names its session");
+  assert.ok(!/Last close/.test(html), "and nothing claims to be a close without naming one");
   assert.match(html, /near support|near resistance/, "the flag says which side it is near");
   // Equities in the table against the account's own value, which counts options and crypto too.
   assert.match(html, /Equities here/);
@@ -103,6 +107,26 @@ test("what a provider or an issuer wrote cannot become markup", () => {
   assert.ok(!html.includes("<img src=x"), "nor can a reason");
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /A&amp;B&lt;C/);
+});
+test("a price that is not a closing price is never shown as one", () => {
+  // The case from 2026-09-16: Robinhood had not published that day's daily bar hours after the close, so the newest
+  // trade was an after-hours print. Shown under a column headed "Last close", it read as the day's close.
+  const afterHours = { ...computed, priceSource: "after-hours" as const, priceAt: "2026-09-16T21:42:00.000Z" };
+  const html = portfolioReport({ accounts: [account({
+    holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: afterHours, series: { daily: series } }],
+  })], generatedAt: "2026-09-16T23:36:00.000Z" });
+  // \s, not a literal space: ICU separates the time from AM/PM with U+202F, a narrow no-break space.
+  assert.match(html, /after hours Sep 16, 5:42\sPM ET/, "it says what it is, and when, in the market's own timezone");
+  assert.ok(!/Last close/.test(html), "and never under a heading that calls it a close");
+  assert.match(html, /after hours<\/text>/, "the chart's own price line says so too");
+  // The levels themselves still come from the last settled session, whatever the price is.
+  assert.match(html, new RegExp(`${computed.frames.find(f => !f.unavailable)!.label}`), "frames are unchanged");
+
+  const preMarket = { ...computed, priceSource: "pre-market" as const, priceAt: "2026-09-16T12:10:00.000Z" };
+  const early = portfolioReport({ accounts: [account({
+    holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: preMarket, series: { daily: series } }],
+  })], generatedAt: "2026-09-16T12:15:00.000Z" });
+  assert.match(early, /pre-market Sep 16, 8:10\sAM ET/);
 });
 test("the same stock in two accounts gets two independent sets of tabs, and a total nobody could read is not a total", () => {
   const two = { accounts: [account(), account({ label: "••••1234 roth ira" })], generatedAt: "2026-09-16T12:00:00.000Z" };

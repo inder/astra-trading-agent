@@ -128,9 +128,39 @@ test("a holding Astra cannot read is dropped and counted, never invented", () =>
   assert.throws(() => normalizeHoldings({ data: {} }), /Positions unavailable/);
 });
 test("totals report what the provider gave and nothing it did not", () => {
-  assert.deepEqual(normalizeTotals({ data: { portfolio: { total_market_value: "125340.55", cash: "2200", day_change: "-812.40" } } }),
-    { value: 125340.55, cash: 2200, dayChange: -812.4, totalReturn: null });
-  assert.deepEqual(normalizeTotals({ data: {} }), { value: null, cash: null, dayChange: null, totalReturn: null });
+  // The shape of a real get_portfolio payload, captured 2026-09-16. Figures are mocks; the KEYS are the product.
+  const captured = { data: { portfolio: {
+    total_value: "125340.55", cash: "2200.00", pending_deposits: "0.00", buying_power: "4400.00",
+    crypto_buying_power: "0.00", currency: "USD",
+    equity_value: "100000.00", options_value: "23140.55", crypto_value: "200.00",
+    futures_value: "0.00", event_contracts_value: "0.00", fixed_income_value: "0.00", mutual_funds_value: "0.00",
+  } } };
+  assert.deepEqual(normalizeTotals(captured), {
+    value: 125340.55, cash: 2200,
+    // Only classes worth something, in reading order. A zero class is not a line on a page.
+    byClass: [{ label: "Stocks", value: 100000 }, { label: "Options", value: 23140.55 }, { label: "Crypto", value: 200 }],
+  });
+  assert.deepEqual(normalizeTotals({ data: {} }), { value: null, cash: null, byClass: [] });
+
+  // The names this function used to ask for are not the provider's. It asked for four keys for the account value and
+  // never matched one, so every report ever produced read "Account value —" while looking like the data was missing.
+  // A guessed field name fails silently and forever, so a payload in the old shape must now report nothing at all
+  // rather than a number that happens to parse.
+  const invented = { data: { portfolio: { total_market_value: "999", market_value: "999", equity: "999",
+    total_equity: "999", day_change: "-812.40", total_return: "18430.22" } } };
+  assert.deepEqual(normalizeTotals(invented), { value: null, cash: null, byClass: [] });
+
+  // buying_power is real, and on a margin account it is roughly twice the cash. It was a fallback for cash, standing
+  // ready to report borrowed money as money the moment the cash key moved.
+  assert.equal(normalizeTotals({ data: { portfolio: { total_value: "10", buying_power: "8000" } } }).cash, null);
+
+  // Filtered at the precision it is shown at. Crypto dust left after a sale is worth a tenth of a cent: it passed a
+  // plain `!== 0` test and then printed "$0" — a line claiming a class exists, at nothing.
+  const dust = (v: string) => normalizeTotals({ data: { portfolio: { total_value: "10", crypto_value: v } } }).byClass;
+  assert.deepEqual(dust("0.001"), [], "a tenth of a cent is not a line on a page");
+  assert.deepEqual(dust("0.49"), [], "nor is anything else that rounds to zero");
+  assert.deepEqual(dust("0.5"), [{ label: "Crypto", value: 0.5 }], "the smallest value that does not round away is");
+  assert.deepEqual(dust("-1200"), [{ label: "Crypto", value: -1200 }], "and a short book is negative, not absent");
 });
 test("positions are read to the last page, and a portfolio too long to page through says so", async () => {
   const page = (n: number, last: boolean) => ({ data: { positions: [{ symbol: `SYM${n}`, quantity: "1", average_buy_price: "1" }],

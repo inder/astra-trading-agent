@@ -97,9 +97,11 @@ rest say so rather than reading as unreadable. A holding whose bars cannot be
 read is listed with the reason instead of being dropped, and an account with
 more holdings than one report can page through says that too. The file is
 written under Astra's data directory and nowhere else — a caller cannot choose
-the path. The equities in the table rarely add up to the account value —
-the account counts options, crypto and cash too — so the page shows both figures
-and explains the gap rather than implying a reconciliation that is not there.
+the path. The table lists stocks, which rarely add up to the account value: an
+account holds options, crypto and cash as well. Robinhood reports a value for
+every class it supports, so the header names each one at its own figure and the
+note says which of them the table leaves out — rather than implying a
+reconciliation that is not there, or leaving an options account looking empty.
 
 ## Configure and start
 

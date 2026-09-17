@@ -140,11 +140,14 @@ out-of-band channel.
 
 Remote HTTPS/client OAuth, durable credential storage, process supervision,
 multi-tenancy and real-order execution are not implemented. Account reporting
-covers what is held now — cost basis, market value and unrealized profit and loss,
-with levels around each holding. Realized profit and loss, transaction history,
-time-weighted return, options and crypto positions, and anything cross-account are
-not read: the page says how much of an account's value its equities table does not
-cover rather than implying the two reconcile.
+covers the stocks held now — cost basis, market value and unrealized profit and
+loss, with levels around each holding. What is *inside* an account's other classes
+is not read: options, crypto, futures, event contracts, fixed income and mutual
+funds are reported at the value Robinhood states for each, itemized in the header,
+with the note naming which of them the table leaves out. Realized profit and loss,
+transaction history and time-weighted return are not read at all, and no field in
+`get_portfolio` carries a day change — so the report claims none rather than
+rendering an em-dash that reads as a broken page.
 
 A real Robinhood login, market-hours freshness and the user's chat-client setup
 remain attended acceptance gates; mock tests do not establish those facts.

@@ -15,7 +15,7 @@ const computed = levels(bars, parseLevelsSettings());
 const series = bars.time.map((time, i) => ({ time, value: bars.close[i]! }));
 const account = (over: Partial<ReportAccount> = {}): ReportAccount => ({
   label: "••••0000 individual",
-  totals: { value: 125340.55, cash: 2200, dayChange: -812.4, totalReturn: 18430.22 },
+  totals: { value: 125340.55, cash: 2200, byClass: [{ label: "Stocks", value: 15294 }] },
   holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: computed, series: { daily: series } }],
   skipped: 0, truncated: false, ...over,
 });
@@ -25,7 +25,8 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /••••0000 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
-  assert.match(html, /−\$812/, "a loss is shown with a minus, not a bracket");
+  assert.match(html, /−0\.2%/, "a negative is shown with a minus, not a bracket");
+  assert.ok(!/\(\$[\d,]/.test(html), "and never in accountants' brackets");
   assert.match(html, /FIXA/);
   assert.match(html, /120/, "shares");
   assert.match(html, /\$41\.22/, "cost basis");
@@ -41,9 +42,11 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /close [A-Z][a-z]{2} \d+, \d{4}/, "a close names its session");
   assert.ok(!/Last close/.test(html), "and nothing claims to be a close without naming one");
   assert.match(html, /near support|near resistance/, "the flag says which side it is near");
-  // Equities in the table against the account's own value, which counts options and crypto too.
-  assert.match(html, /Equities here/);
-  assert.match(html, /is not in the table below/, "and the difference is explained rather than left to be found");
+  // The header names every class Robinhood reports a value for, so what the table leaves out is stated rather than
+  // lumped. This fixture is stocks only, so there is nothing else to name and no note to make.
+  assert.match(html, /<dt>Stocks<\/dt>/);
+  assert.ok(!/Equities here/.test(html), "the old stat that existed only to paper over the gap is gone");
+  assert.ok(!/Today<\/dt>|Total return<\/dt>/.test(html), "and nothing claims a figure the provider never sends");
   assert.match(html, /@media print/, "and it is written to be printed");
   // Exactly one script — the print button — and the page's own policy names its hash, so nothing that reached the
   // markup could run even if the escaping above ever failed.
@@ -97,6 +100,10 @@ test("a holding without levels still appears, saying why, rather than being drop
   assert.match(html, /no usable daily price history/);
   assert.match(html, /2 holdings could not be read/, "and the ones that could not be read at all are counted");
   assert.match(html, /more holdings than one report can page through/);
+  // The Stocks figure is Robinhood's own and counts these holdings. The note used to say the total excluded them,
+  // which was true of the subtotal Astra computed and is a misstatement of the one it now shows.
+  assert.match(html, /still counted in the figures above/);
+  assert.ok(!/stocks total excludes/.test(html), "the note does not describe a total that no longer exists");
 });
 test("what a provider or an issuer wrote cannot become markup", () => {
   const html = portfolioReport({ accounts: [account({
@@ -107,6 +114,48 @@ test("what a provider or an issuer wrote cannot become markup", () => {
   assert.ok(!html.includes("<img src=x"), "nor can a reason");
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /A&amp;B&lt;C/);
+});
+test("an account holding more than stocks says so, by class and by figure", () => {
+  // The founder's complaint: "it does not include my options positions though. only equity positions." Robinhood
+  // reports a value for every class it supports, so the account can be itemized before a single contract is listed.
+  const html = portfolioReport({ accounts: [account({ totals: { value: 500000, cash: 10000, byClass: [
+    { label: "Stocks", value: 15294 }, { label: "Options", value: 470000 }, { label: "Crypto", value: 4706 },
+  ] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(html, /<dt>Options<\/dt><dd>\$470,000<\/dd>/, "options are a figure in the header, not an absence");
+  assert.match(html, /<dt>Crypto<\/dt><dd>\$4,706<\/dd>/);
+  // And the table says what it is and is not, naming each class rather than lumping them as "options and crypto".
+  assert.match(html, /The table below lists this account&#39;s stocks\./);
+  assert.match(html, /Also counted in the account value above, but not listed here: options \(\$470,000\), crypto \(\$4,706\)\./);
+
+  // An account can hold no stocks at all — one of the founder's holds only options. A note opening "the table below
+  // lists this account's stocks" would then describe an empty table, and "its options ... is counted" is not English.
+  const optionsOnly = portfolioReport({ accounts: [account({ holdings: [], totals: {
+    value: 100000, cash: 1000, byClass: [{ label: "Options", value: 99000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(optionsOnly, /This account holds no stocks, so the table below is empty\./);
+  assert.match(optionsOnly, /Counted in the account value above, but not listed here: options \(\$99,000\)\./);
+  assert.ok(!/&#39;s stocks\./.test(optionsOnly), "and it does not describe stocks it does not have");
+  assert.match(optionsOnly, /<dt>Options<\/dt><dd>\$99,000<\/dd>/, "the value is still stated");
+  assert.ok(!/<dt>Stocks<\/dt>/.test(optionsOnly), "with no stocks line invented for it");
+  assert.ok(!/<thead>/.test(optionsOnly), "and no empty table: eight column headers over nothing read as a failure");
+
+  // Whatever the account value holds that the header has not named gets a line of its own. Robinhood folds things
+  // into the total that no class field covers — pending deposits today, an eighth class tomorrow — and those would
+  // otherwise vanish between the lines, which is the failure this whole change exists to end.
+  const gap = portfolioReport({ accounts: [account({ totals: { value: 100000, cash: 1000, byClass: [
+    { label: "Stocks", value: 15294 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(gap, /<dt>Not itemized<\/dt><dd>\$83,706<\/dd>/, "the remainder is shown, not absorbed");
+  // It is a remainder, never an assertion that the parts must agree: under half a dollar there is no line at all.
+  const exact = portfolioReport({ accounts: [account({ totals: { value: 16294.2, cash: 1000, byClass: [
+    { label: "Stocks", value: 15294 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(!/Not itemized/.test(exact), "and rounding noise is not a discrepancy");
+  const unknownCash = portfolioReport({ accounts: [account({ totals: { value: 100000, cash: null, byClass: [] } })],
+    generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(!/Not itemized/.test(unknownCash), "a remainder needs both ends known to mean anything");
+
+  const overview_ = overview({ accounts: [account({ totals: { value: 500000, cash: 10000, byClass: [
+    { label: "Options", value: 470000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.deepEqual(overview_.accounts[0]!.byClass, [{ label: "Options", value: 470000 }],
+    "so the chat can say it without the report being open");
 });
 test("a stock with too little history shows its price, not zero, and says why it has no levels", () => {
   // A holding listed recently has real sessions but too few to measure a zone. The engine returns levels with every
@@ -165,9 +214,8 @@ test("the same stock in two accounts gets two independent sets of tabs, and a to
   // A total is every account or it is nothing. One unreadable account used to be summed as zero, producing a figure
   // that looked like the whole portfolio and was short by an account — and the chat is told to read it out.
   const partial = overview({ ...two, accounts: [two.accounts[0]!, account({ label: "••••1234 roth ira",
-    totals: { value: null, cash: null, dayChange: null, totalReturn: null } })] });
+    totals: { value: null, cash: null, byClass: [] } })] });
   assert.equal(partial.totalValue, null, "a total that cannot be complete is not reported");
-  assert.equal(partial.totalDayChange, null);
   assert.deepEqual(partial.unreadableAccounts, ["••••1234 roth ira"], "and the account that could not be read is named");
   assert.equal(overview(two).totalValue, 125340.55 * 2, "two readable accounts still add up");
 });
@@ -181,7 +229,7 @@ test("the report lands under the data directory, readable by nobody else, and a 
     accountRead: async (tool: string) => {
       reads.push(tool);
       if (tool === "get_accounts") return { data: { accounts: [{ account_number: "100000000", brokerage_account_type: "individual", is_default: true }] } };
-      if (tool === "get_portfolio") return { data: { portfolio: { total_market_value: "51000", cash: "1000" } } };
+      if (tool === "get_portfolio") return { data: { portfolio: { total_value: "51000", cash: "1000", equity_value: "50000" } } };
       return { data: { positions: [{ symbol: "FIXA", quantity: "120", average_buy_price: "41.22" }], next_cursor: null } };
     },
     read: async (tool: string, args: any) => { reads.push(tool); return barPayload(args.symbols[0]); },
@@ -221,7 +269,7 @@ test("past the charting cap the largest positions keep their charts, and the res
   const broker = {
     accountRead: async (tool: string) => {
       if (tool === "get_accounts") return { data: { accounts: [{ account_number: "100000000", brokerage_account_type: "individual", is_default: true }] } };
-      if (tool === "get_portfolio") return { data: { portfolio: { total_market_value: "51000", cash: "1000" } } };
+      if (tool === "get_portfolio") return { data: { portfolio: { total_value: "51000", cash: "1000", equity_value: "50000" } } };
       return { data: { positions, next_cursor: null } };
     },
     read: async (tool: string, args: any) => {
@@ -327,7 +375,7 @@ test("the report is reachable on loopback, and that link serves only reports thi
 });
 test("the overview says enough for the chat to summarize, and leaves the detail in the report", () => {
   const input = { accounts: [account(), account({ label: "••••1234 roth ira",
-    totals: { value: 40000, cash: 0, dayChange: 120, totalReturn: 900 },
+    totals: { value: 40000, cash: 0, byClass: [{ label: "Stocks", value: 40000 }] },
     holdings: [
       { holding: { symbol: "FIXA", shares: 10, averageCost: 200 }, levels: computed, series: { daily: series } },
       { holding: { symbol: "QUIET", shares: 5, averageCost: 10 }, unavailable: "no usable daily price history" },
@@ -336,7 +384,9 @@ test("the overview says enough for the chat to summarize, and leaves the detail 
   assert.equal(summary.asOf, "2026-09-16");
   assert.deepEqual(summary.accounts.map(a => [a.label, a.holdings]), [["••••0000 individual", 1], ["••••1234 roth ira", 2]]);
   assert.equal(summary.totalValue, 165340.55, "totals add up across the accounts");
-  assert.equal(summary.totalDayChange, -692.4);
+  // Robinhood's payload carries no day change, so the overview no longer claims one.
+  assert.ok(!("totalDayChange" in summary), "no figure is offered that the provider does not send");
+  assert.deepEqual(summary.accounts[0]!.byClass, [{ label: "Stocks", value: 15294 }], "what the account is made of rides along");
   assert.deepEqual(summary.unreadable, ["QUIET"], "and it names what could not be read");
   // FIXA sits inside a day's range of a level in this fixture, so it is what the chat should mention first.
   assert.ok(summary.near.some(n => n.symbol === "FIXA" && /support|resistance/.test(n.side) && n.tests > 0));

@@ -13,7 +13,19 @@ export interface AccountSummary {
   active: boolean;
 }
 export interface Holding { symbol: string; shares: number; averageCost: number | null }
-export interface AccountTotals { value: number | null; cash: number | null; dayChange: number | null; totalReturn: number | null }
+/** What an account is worth, as Robinhood reports it.
+ *
+ *  `value` is the account's own total, not a sum Astra computed. `byClass` is what that total is made of: Robinhood
+ *  carries a value for every asset class it supports, so an account itemizes itself without a single position being
+ *  read. That is how options can be reported truthfully before Astra can list a contract.
+ *
+ *  There is deliberately no day change and no total return. The payload carries neither, and the two fields that
+ *  used to claim them rendered a permanent em-dash — which reads as a broken report rather than an honest absence. */
+export interface AccountTotals {
+  value: number | null;
+  cash: number | null;
+  byClass: { label: string; value: number }[];
+}
 
 const SYMBOL = /^[A-Z][A-Z0-9.-]{0,9}$/;
 /** An account type is a provider enum, not prose, and it is validated as one. Free text here would be a second way in
@@ -82,14 +94,36 @@ export function normalizeHoldings(raw: unknown): { holdings: Holding[]; skipped:
   return { holdings, skipped, cursor };
 }
 
-/** Account totals, from `get_portfolio`. Every field is optional: a missing total is reported as unknown rather than
- *  computed from something that looked close. */
+/** The classes Robinhood reports a value for, in the order a reader thinks about them. Names are the provider's,
+ *  taken from a captured payload rather than guessed — see the note on `normalizeTotals`. */
+const VALUE_CLASSES = Object.freeze([
+  ["equity_value", "Stocks"], ["options_value", "Options"], ["crypto_value", "Crypto"],
+  ["futures_value", "Futures"], ["event_contracts_value", "Event contracts"],
+  ["fixed_income_value", "Fixed income"], ["mutual_funds_value", "Mutual funds"],
+] as const);
+
+/** Account totals, from `get_portfolio`. A missing total is reported as unknown rather than computed from something
+ *  that looked close.
+ *
+ *  The field names here are the ones the provider actually sends, captured from a live payload on 2026-09-16. They
+ *  had to be: this function previously asked for `total_market_value`, `market_value`, `equity`, `total_equity`,
+ *  `day_change`, `today_return`, `equity_change`, `total_return` and `total_return_amount` — and Robinhood sends
+ *  none of them. Every report ever produced showed "Account value —". Only `cash` was right, by coincidence of
+ *  naming. A guessed field name fails silently and indefinitely, which is why these are measured.
+ *
+ *  Note what is NOT accepted: `buying_power` is in the payload and was previously a fallback for cash. On a margin
+ *  account it is roughly twice the cash, so that fallback stood ready to report borrowed money as money. */
 export function normalizeTotals(raw: unknown): AccountTotals {
   const p = (raw as any)?.data?.portfolio ?? (raw as any)?.data ?? {};
-  return { value: number(p.total_market_value ?? p.market_value ?? p.equity ?? p.total_equity),
-    cash: number(p.cash ?? p.buying_power ?? p.total_cash),
-    dayChange: number(p.day_change ?? p.today_return ?? p.equity_change),
-    totalReturn: number(p.total_return ?? p.total_return_amount) };
+  const byClass: { label: string; value: number }[] = [];
+  for (const [key, label] of VALUE_CLASSES) {
+    const v = number(p[key]);
+    // Filtered at the precision it will be SHOWN at, not at exact zero. The page renders whole dollars, so a class
+    // holding a tenth of a cent — crypto dust left after a sale — passed a `!== 0` test and then printed "$0": a line
+    // asserting a class exists, at nothing. Half a dollar is the smallest value that does not round away.
+    if (v !== null && Math.abs(v) >= 0.5) byClass.push({ label, value: v });
+  }
+  return { value: number(p.total_value), cash: number(p.cash), byClass };
 }
 
 /** Every holding in one account, following the provider's cursor. Bounded: a runaway page loop would burn the grant,

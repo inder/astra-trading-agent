@@ -111,7 +111,7 @@ marked.
 
 > **Astra:** Here's the report: http://127.0.0.1:50000/r/EXAMPLEONLY1 — it opens in your browser and prints.
 >
-> The two accounts hold $100,000 together, down $1,000 today. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+30.0%), HPE (+20.0%) and DELL (+10.0%); worst is INTC (−10.0%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
+> The two accounts hold $100,000 together: $60,000 in stocks, $30,000 in options and $10,000 cash. The options aren't listed yet — they're counted in the total. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+30.0%), HPE (+20.0%) and DELL (+10.0%); worst is INTC (−10.0%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
 
 The page shows a row per holding with shares, average cost, last close, market
 value, unrealized P&L, and the nearest support below and resistance above.

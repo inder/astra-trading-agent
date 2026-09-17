@@ -25,6 +25,9 @@ export interface ReportAccount {
   label: string; totals: AccountTotals; holdings: ReportHolding[];
   /** Holdings dropped because the provider's row could not be read, and whether paging stopped early. */
   skipped: number; truncated: boolean;
+  /** Open option contracts in this account, or null where the grant could not be read for them. The contracts are
+   *  not listed yet — this is how many stand behind the options figure, so it is a count and not a silence. */
+  optionContracts?: number | null;
 }
 export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
 
@@ -251,7 +254,12 @@ function account(a: ReportAccount, scope: number): string {
     // A colon list rather than a sentence: "options" is plural and "crypto" is not, so any is/are agreement is wrong
     // for one of them. And an account can hold no stocks at all — one of the founder's does — where a note opening
     // "the table below lists this account's stocks" describes an empty table.
-    const named = others.map(c => `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
+    // The options line says how many contracts stand behind it where that could be read — a count is not a listing,
+    // but it is the difference between a figure and a figure with nothing known about it.
+    const contracts = a.optionContracts;
+    const named = others.map(c => c.label === "Options" && contracts
+      ? `options (${money(c.value, 0)}, ${contracts} open contract${contracts === 1 ? "" : "s"})`
+      : `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
     notes.push(rows.length
       ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
       : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);

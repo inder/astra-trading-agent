@@ -13,9 +13,14 @@ export type MarketRead = typeof MARKET_READS[number];
 /** Account reads live in their own list, with their own accessor, deliberately. Robinhood's single `internal` scope
  *  grants 73 tools including order placement, so these two arrays are the whole boundary — and keeping them apart
  *  means a change that widens market data cannot widen account access by accident, and any diff that touches what
- *  Astra can see of an account is visibly a diff to ACCOUNT_READS. */
+ *  Astra can see of an account is visibly a diff to ACCOUNT_READS.
+ *
+ *  Every name here has a caller. `get_crypto_positions` is granted and was drafted into this list, then taken out
+ *  again: nothing called it, and a widening that no code exercises cannot be reviewed — a reader has no caller to
+ *  reason about and the test that pins the list's length simply enshrines it. It is one string to add back the day
+ *  something needs it, reviewed then against real use. */
 export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions",
-  "get_option_positions", "get_crypto_positions"] as const);
+  "get_option_positions"] as const);
 export type AccountRead = typeof ACCOUNT_READS[number];
 /** The account reads every grant must carry for a report to mean anything: who the accounts are, what they are worth,
  *  and the shares in them. The rest of ACCOUNT_READS is per-asset-class and optional — a user who never onboarded to
@@ -153,7 +158,6 @@ export class RobinhoodConnection {
       // Which asset classes this particular grant can report on. A report says what it could not read rather than
       // leaving the value it represents to be mistaken for money that is not there.
       optionPositionsAvailable: this.#state === "connected" && this.#tools.has("get_option_positions"),
-      cryptoPositionsAvailable: this.#state === "connected" && this.#tools.has("get_crypto_positions"),
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),

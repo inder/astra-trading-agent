@@ -118,9 +118,10 @@ export function normalizeTotals(raw: unknown): AccountTotals {
   const byClass: { label: string; value: number }[] = [];
   for (const [key, label] of VALUE_CLASSES) {
     const v = number(p[key]);
-    // A class worth nothing is not a line on a page; a class worth something always is, even if Astra cannot yet
-    // list what is in it.
-    if (v !== null && v !== 0) byClass.push({ label, value: v });
+    // Filtered at the precision it will be SHOWN at, not at exact zero. The page renders whole dollars, so a class
+    // holding a tenth of a cent — crypto dust left after a sale — passed a `!== 0` test and then printed "$0": a line
+    // asserting a class exists, at nothing. Half a dollar is the smallest value that does not round away.
+    if (v !== null && Math.abs(v) >= 0.5) byClass.push({ label, value: v });
   }
   return { value: number(p.total_value), cash: number(p.cash), byClass };
 }

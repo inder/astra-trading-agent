@@ -100,6 +100,10 @@ test("a holding without levels still appears, saying why, rather than being drop
   assert.match(html, /no usable daily price history/);
   assert.match(html, /2 holdings could not be read/, "and the ones that could not be read at all are counted");
   assert.match(html, /more holdings than one report can page through/);
+  // The Stocks figure is Robinhood's own and counts these holdings. The note used to say the total excluded them,
+  // which was true of the subtotal Astra computed and is a misstatement of the one it now shows.
+  assert.match(html, /still counted in the figures above/);
+  assert.ok(!/stocks total excludes/.test(html), "the note does not describe a total that no longer exists");
 });
 test("what a provider or an issuer wrote cannot become markup", () => {
   const html = portfolioReport({ accounts: [account({
@@ -132,6 +136,21 @@ test("an account holding more than stocks says so, by class and by figure", () =
   assert.ok(!/&#39;s stocks\./.test(optionsOnly), "and it does not describe stocks it does not have");
   assert.match(optionsOnly, /<dt>Options<\/dt><dd>\$99,000<\/dd>/, "the value is still stated");
   assert.ok(!/<dt>Stocks<\/dt>/.test(optionsOnly), "with no stocks line invented for it");
+  assert.ok(!/<thead>/.test(optionsOnly), "and no empty table: eight column headers over nothing read as a failure");
+
+  // Whatever the account value holds that the header has not named gets a line of its own. Robinhood folds things
+  // into the total that no class field covers — pending deposits today, an eighth class tomorrow — and those would
+  // otherwise vanish between the lines, which is the failure this whole change exists to end.
+  const gap = portfolioReport({ accounts: [account({ totals: { value: 100000, cash: 1000, byClass: [
+    { label: "Stocks", value: 15294 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(gap, /<dt>Not itemized<\/dt><dd>\$83,706<\/dd>/, "the remainder is shown, not absorbed");
+  // It is a remainder, never an assertion that the parts must agree: under half a dollar there is no line at all.
+  const exact = portfolioReport({ accounts: [account({ totals: { value: 16294.2, cash: 1000, byClass: [
+    { label: "Stocks", value: 15294 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(!/Not itemized/.test(exact), "and rounding noise is not a discrepancy");
+  const unknownCash = portfolioReport({ accounts: [account({ totals: { value: 100000, cash: null, byClass: [] } })],
+    generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(!/Not itemized/.test(unknownCash), "a remainder needs both ends known to mean anything");
 
   const overview_ = overview({ accounts: [account({ totals: { value: 500000, cash: 10000, byClass: [
     { label: "Options", value: 470000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });

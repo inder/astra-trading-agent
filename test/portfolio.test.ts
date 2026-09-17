@@ -153,6 +153,14 @@ test("totals report what the provider gave and nothing it did not", () => {
   // buying_power is real, and on a margin account it is roughly twice the cash. It was a fallback for cash, standing
   // ready to report borrowed money as money the moment the cash key moved.
   assert.equal(normalizeTotals({ data: { portfolio: { total_value: "10", buying_power: "8000" } } }).cash, null);
+
+  // Filtered at the precision it is shown at. Crypto dust left after a sale is worth a tenth of a cent: it passed a
+  // plain `!== 0` test and then printed "$0" — a line claiming a class exists, at nothing.
+  const dust = (v: string) => normalizeTotals({ data: { portfolio: { total_value: "10", crypto_value: v } } }).byClass;
+  assert.deepEqual(dust("0.001"), [], "a tenth of a cent is not a line on a page");
+  assert.deepEqual(dust("0.49"), [], "nor is anything else that rounds to zero");
+  assert.deepEqual(dust("0.5"), [{ label: "Crypto", value: 0.5 }], "the smallest value that does not round away is");
+  assert.deepEqual(dust("-1200"), [{ label: "Crypto", value: -1200 }], "and a short book is negative, not absent");
 });
 test("positions are read to the last page, and a portfolio too long to page through says so", async () => {
   const page = (n: number, last: boolean) => ({ data: { positions: [{ symbol: `SYM${n}`, quantity: "1", average_buy_price: "1" }],

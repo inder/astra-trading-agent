@@ -233,6 +233,14 @@ function account(a: ReportAccount, scope: number): string {
     distance(x) - distance(y) || x.holding.symbol.localeCompare(y.holding.symbol));
   const unpriced = rows.filter(r => !r.levels).length;
   const value = a.totals.value;
+  // What the account value holds that this header has not named. The classes come from a frozen list, so anything
+  // Robinhood folds into the total and Astra does not know about — pending deposits today, an eighth asset class
+  // tomorrow — would otherwise vanish between the lines, which is the failure this whole change exists to end, one
+  // level up from where it started. Shown rather than reconciled: nothing here asserts the parts must agree, only
+  // what is left over. Needs both ends known, and only worth a line once it would not round to nothing.
+  const itemized = a.totals.byClass.reduce((n, c) => n + c.value, 0) + (a.totals.cash ?? 0);
+  const left = value === null || a.totals.cash === null ? null : value - itemized;
+  const residual = left !== null && Math.abs(left) >= 0.5 ? left : null;
   const notes: string[] = [];
   if (a.skipped) notes.push(`${a.skipped} holding${a.skipped === 1 ? "" : "s"} could not be read and ${a.skipped === 1 ? "is" : "are"} not shown.`);
   if (a.truncated) notes.push("This account has more holdings than one report can page through; the rest are not shown.");
@@ -248,22 +256,26 @@ function account(a: ReportAccount, scope: number): string {
       ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
       : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);
   }
-  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? " has" : "s have"} no price here, so the stocks total excludes ${unpriced === 1 ? "it" : "them"}.`);
+  // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
+  // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.
+  // Saying the total excludes them would misstate a money figure.
+  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? "" : "s"} below could not be priced, so ${unpriced === 1 ? "it shows" : "they show"} no value, gain or levels — ${unpriced === 1 ? "it is" : "they are"} still counted in the figures above.`);
   return `<section class="account">
   <header>
     <h2>${escape(a.label)}</h2>
     <dl class="totals">
       <div><dt>Account value</dt><dd>${money(value, 0)}</dd></div>
       ${a.totals.byClass.map(c => `<div><dt>${escape(c.label)}</dt><dd>${money(c.value, 0)}</dd></div>`).join("\n      ")}
-      <div><dt>Cash</dt><dd>${money(a.totals.cash, 0)}</dd></div>
+      <div><dt>Cash</dt><dd>${money(a.totals.cash, 0)}</dd></div>${residual === null ? "" : `
+      <div><dt>Not itemized</dt><dd>${money(residual, 0)}</dd></div>`}
     </dl>
   </header>
   ${notes.length ? `<p class="note">${notes.map(escape).join(" ")}</p>` : ""}
-  <table>
+  ${rows.length === 0 ? "" : `<table>
     <thead><tr><th scope="col">Stock</th><th scope="col">Shares</th><th scope="col">Avg cost/share</th><th scope="col">Price</th>
       <th scope="col">Value</th><th scope="col">Unrealized P&amp;L</th><th scope="col">Support below</th><th scope="col">Resistance above</th></tr></thead>
     <tbody>${rows.map((r, i) => row(r, `${scope}-${i}`)).join("\n")}</tbody>
-  </table>
+  </table>`}
 </section>`;
 }
 
@@ -271,6 +283,8 @@ function account(a: ReportAccount, scope: number): string {
  *  Small on purpose: totals, the accounts, what is sitting on a level, and the extremes. */
 export interface PortfolioOverview {
   asOf: string;
+  /** `byClass` is per account and is NOT summed across them. Adding the same class across accounts is arithmetically
+   *  fine, but it would be a portfolio figure Astra never computed or checked — say it per account, as it is given. */
   accounts: { label: string; value: number | null; holdings: number; byClass: { label: string; value: number }[] }[];
   totalValue: number | null;
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];

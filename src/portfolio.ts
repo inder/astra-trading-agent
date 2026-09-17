@@ -131,6 +131,13 @@ export function normalizeTotals(raw: unknown): AccountTotals {
 /** The only messages the account path may show a user. Anything else a future call site throws is replaced, so a
  *  message that interpolates an account number or a payload cannot reach a transcript by being written carelessly.
  *  Safe by construction rather than safe because every call site today happens to be. */
+/** The messages that mean the boundary itself refused, rather than a read failing. A call site that degrades on a
+ *  failed read must let these past: an allowlist rejection or a closed connection at the only caller of a read that
+ *  widened the boundary is precisely what must not be silent. */
+export const BOUNDARY_ERRORS: ReadonlySet<string> = new Set([
+  "Broker mutation or unsupported tool blocked",
+  "Connect Robinhood market data first",
+]);
 export const ACCOUNT_SAFE_ERRORS: ReadonlySet<string> = new Set([
   "Accounts unavailable",
   "Positions unavailable",

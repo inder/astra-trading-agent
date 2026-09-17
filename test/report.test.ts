@@ -157,6 +157,26 @@ test("an account holding more than stocks says so, by class and by figure", () =
   assert.deepEqual(overview_.accounts[0]!.byClass, [{ label: "Options", value: 470000 }],
     "so the chat can say it without the report being open");
 });
+test("the options line tells apart the four things a bare count cannot", () => {
+  // A count alone renders identically for: holds none, read failed, grant lacks the tool, and every row unreadable.
+  // The last is the one that matters — the normalizer is keyed field by field to a captured payload shape, and a
+  // provider that renames a field does not error, it drops every row. "No options" to someone who holds options.
+  const withOptions = (options: ReportAccount["options"]) => portfolioReport({ accounts: [account({ options,
+    totals: { value: 500000, cash: 1000, byClass: [{ label: "Stocks", value: 15294 }, { label: "Options", value: 470000 }] },
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(withOptions({ count: 12, skipped: 0, truncated: false }), /options \(\$470,000, 12 open contracts\)/);
+  assert.match(withOptions({ count: 1, skipped: 0, truncated: false }), /1 open contract\)/, "and it counts in English");
+  assert.match(withOptions("unreadable"), /options \(\$470,000, the contracts behind it could not be read\)/,
+    "a read that failed is not an account that holds nothing");
+  assert.match(withOptions({ count: 0, skipped: 40, truncated: false }), /none of its 40 contract rows could be read/,
+    "and neither is a payload whose every row was dropped — the shape-drift case");
+  assert.match(withOptions({ count: 20, skipped: 0, truncated: true }), /20\+ open contracts, more than one report can page through/,
+    "a count that stopped early says so rather than looking authoritative");
+  assert.match(withOptions({ count: 12, skipped: 3, truncated: false }), /12 open contracts, and 3 rows that could not be read/);
+  // Nothing known at all — the options figure stands alone rather than gaining a claim about its contracts.
+  assert.match(withOptions(undefined), /options \(\$470,000\)/);
+});
 test("a stock with too little history shows its price, not zero, and says why it has no levels", () => {
   // A holding listed recently has real sessions but too few to measure a zone. The engine returns levels with every
   // frame unavailable — and it used to leave price at 0, which put $0.00 and −100% in the money columns and made the

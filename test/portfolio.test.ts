@@ -29,10 +29,16 @@ const GRANTED = ["add_option_to_watchlist", "add_to_watchlist", "cancel_crypto_o
 test("of the 73 tools the grant includes, only the ten on the two allowlists can be called", async () => {
   assert.equal(GRANTED.length, 73, "the discovered surface");
   const allowed = new Set<string>([...MARKET_READS, ...ACCOUNT_READS]);
-  // Ten, not nine: get_option_positions was added so the report can say what stands behind an options figure. The
-  // count is pinned deliberately — widening this list is the one change that must never pass unnoticed.
+  // Pinned by CONTENTS, not by length. The module-load guard bounds the CLASS of name that may appear — it rejects
+  // anything outside a read convention or naming a mutation — but within that class it cannot discriminate:
+  // get_crypto_positions, get_equity_tax_lots and get_realized_pnl all pass it just as get_option_positions does. So
+  // the array IS the policy and this assertion is the only thing enforcing it. A length check would stay green while
+  // one read was swapped for another; this turns every widening into a test diff nobody can miss.
+  assert.deepEqual([...ACCOUNT_READS],
+    ["get_accounts", "get_portfolio", "get_equity_positions", "get_option_positions"]);
+  assert.deepEqual([...MARKET_READS], ["get_equity_quotes", "get_equity_technical_indicators", "get_equity_historicals",
+    "get_option_chains", "get_option_instruments", "get_option_quotes"]);
   assert.equal(allowed.size, 10);
-  assert.equal(ACCOUNT_READS.length, 4);
   // Every member has a caller. get_crypto_positions is granted and was drafted in, then taken out again: nothing
   // called it, and a widening no code exercises cannot be reviewed — there is no caller to reason about.
   assert.ok(!(ACCOUNT_READS as readonly string[]).includes("get_crypto_positions"),
@@ -40,6 +46,12 @@ test("of the 73 tools the grant includes, only the ten on the two allowlists can
   // A grant may lack a class-specific read without account access being unavailable. Required is the core three.
   assert.deepEqual([...REQUIRED_ACCOUNT_READS], ["get_accounts", "get_portfolio", "get_equity_positions"]);
   assert.ok(REQUIRED_ACCOUNT_READS.every(t => (ACCOUNT_READS as readonly string[]).includes(t)));
+  // The required set must exclude every per-class read, or the split does nothing: `accountToolsAvailable` is
+  // `REQUIRED_ACCOUNT_READS.every(...)`, so anything listed here becomes mandatory for account access to report as
+  // available at all, and a user without that one tool loses a working report they could otherwise have had.
+  assert.ok(!(REQUIRED_ACCOUNT_READS as readonly string[]).includes("get_option_positions"),
+    "a per-asset-class read is never required");
+  assert.ok(REQUIRED_ACCOUNT_READS.length < ACCOUNT_READS.length, "and the split is a real one");
   assert.ok([...allowed].every(t => GRANTED.includes(t)), "every allowlisted tool is one the provider actually grants");
   // Nothing that moves money or changes state is reachable, by name, from either list.
   for (const tool of GRANTED) {
@@ -211,6 +223,24 @@ test("an option position is read as the provider actually sends it, not as it wa
   assert.ok(!/place_option_order|IMPORTANT/i.test(JSON.stringify(guided)));
   assert.equal(normalizeOptionHoldings({ data: { positions: [row()], next: "abc" } }).cursor, "abc", "the cursor is `next`");
   assert.throws(() => normalizeOptionHoldings({ data: {} }), /Option positions unavailable/);
+});
+test("option positions page to the end, and a book too long to page through says so", async () => {
+  const { readOptionHoldings } = await import("../src/portfolio.ts");
+  const row = (n: number) => ({ option_id: `3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c${String(n).padStart(2, "0")}`,
+    chain_symbol: "NVDA", type: "long", quantity: "1.0000", average_price: "1.0000",
+    expiration_date: "2026-12-18", trade_value_multiplier: "100.0000" });
+  const broker = (pages: number) => {
+    let n = 0;
+    return { accountRead: async () => ({ data: { positions: [row(n)], next: ++n < pages ? `c${n}` : null } }) } as any;
+  };
+  const short = await readOptionHoldings(broker(3), "100000000");
+  assert.equal(short.holdings.length, 3); assert.equal(short.truncated, false);
+
+  // Bounded, and it says so. A book that quietly stops short reads as a complete one, which is the failure the
+  // whole options line was reshaped to prevent.
+  const long = await readOptionHoldings(broker(MAX_POSITION_PAGES + 5), "100000000");
+  assert.equal(long.holdings.length, MAX_POSITION_PAGES);
+  assert.equal(long.truncated, true, "and a truncated book admits it rather than looking complete");
 });
 test("positions are read to the last page, and a portfolio too long to page through says so", async () => {
   const page = (n: number, last: boolean) => ({ data: { positions: [{ symbol: `SYM${n}`, quantity: "1", average_buy_price: "1" }],

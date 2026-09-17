@@ -16,9 +16,9 @@ export type MarketRead = typeof MARKET_READS[number];
  *  Astra can see of an account is visibly a diff to ACCOUNT_READS.
  *
  *  Every name here has a caller. `get_crypto_positions` is granted and was drafted into this list, then taken out
- *  again: nothing called it, and a widening that no code exercises cannot be reviewed — a reader has no caller to
- *  reason about and the test that pins the list's length simply enshrines it. It is one string to add back the day
- *  something needs it, reviewed then against real use. */
+ *  again: nothing called it, and a widening that no code runs cannot be reviewed — a reader has no caller to reason
+ *  about, and a test that pins the list only enshrines it. It is one string to add back the day something needs it,
+ *  reviewed then against real use. */
 export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions",
   "get_option_positions"] as const);
 export type AccountRead = typeof ACCOUNT_READS[number];
@@ -30,14 +30,25 @@ export type AccountRead = typeof ACCOUNT_READS[number];
 export const REQUIRED_ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
 /** Only a read may appear in either list. The positive rule is the one that matters: a name outside the provider's
  *  read convention is refused, so `submit_order` or `transfer_funds` cannot be added however they are spelled. The
- *  denylist stays as a second pass for a name that reads like a getter but is not. */
+ *  denylist stays as a second pass for a name that reads like a getter but is not.
+ *
+ *  **These bound the CLASS of name that may appear. They are not the policy.** Within the read class they cannot
+ *  discriminate: `get_crypto_positions`, `get_equity_tax_lots` and `get_realized_pnl` all pass both, exactly as
+ *  `get_option_positions` does. What a grant may actually be asked for is the two arrays above, and the only thing
+ *  enforcing their contents is the test that asserts them element by element. Nothing here should ever be cited as
+ *  evidence that a particular tool belongs — it is a guard against a mutation being typed in, and no more. */
 const READ_NAME = /^(get|list)_/;
-const FORBIDDEN = /(order|transfer|withdraw|deposit|liquidat|execut|submit|buy|sell|cancel|exercise|place)/;
+// Case-insensitive: the denylist should not depend on the provider never capitalising a tool name.
+const FORBIDDEN = /(order|transfer|withdraw|deposit|liquidat|execut|submit|buy|sell|cancel|exercise|place)/i;
 for (const tool of [...MARKET_READS, ...ACCOUNT_READS]) {
   if (!READ_NAME.test(tool)) throw new Error(`Refusing a tool outside the read naming convention: ${tool}`);
   if (FORBIDDEN.test(tool)) throw new Error(`Refusing a tool that names a mutation: ${tool}`);
 }
 if (MARKET_READS.some(t => (ACCOUNT_READS as readonly string[]).includes(t))) throw new Error("Read allowlists must not overlap");
+// The required set is a subset of the full one by construction, and stays one at load rather than only in a test:
+// an entry here that is not an account read would quietly make account access report unavailable for everyone.
+if (REQUIRED_ACCOUNT_READS.some(t => !(ACCOUNT_READS as readonly string[]).includes(t)))
+  throw new Error("A required account read must be an account read");
 const allowedURLs = new Set([
   ROBINHOOD_MCP_URL,
   "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading",

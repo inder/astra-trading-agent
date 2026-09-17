@@ -14,8 +14,15 @@ export type MarketRead = typeof MARKET_READS[number];
  *  grants 73 tools including order placement, so these two arrays are the whole boundary — and keeping them apart
  *  means a change that widens market data cannot widen account access by accident, and any diff that touches what
  *  Astra can see of an account is visibly a diff to ACCOUNT_READS. */
-export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
+export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions",
+  "get_option_positions", "get_crypto_positions"] as const);
 export type AccountRead = typeof ACCOUNT_READS[number];
+/** The account reads every grant must carry for a report to mean anything: who the accounts are, what they are worth,
+ *  and the shares in them. The rest of ACCOUNT_READS is per-asset-class and optional — a user who never onboarded to
+ *  Robinhood Crypto has no `get_crypto_positions` in their grant, and that must not read as "account access is
+ *  unavailable" and take their working equity report down with it. Asking `every(ACCOUNT_READS)` would do exactly
+ *  that the moment this list grew, which is why the distinction exists before the list grows and not after. */
+export const REQUIRED_ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
 /** Only a read may appear in either list. The positive rule is the one that matters: a name outside the provider's
  *  read convention is refused, so `submit_order` or `transfer_funds` cannot be added however they are spelled. The
  *  denylist stays as a second pass for a name that reads like a getter but is not. */
@@ -142,7 +149,11 @@ export class RobinhoodConnection {
       // Account reads are an optional capability: market data must still connect when the provider does not grant
       // them. Listing accounts needs only its own tool, so a partial grant still answers "which accounts are there".
       accountListAvailable: this.#state === "connected" && this.#tools.has("get_accounts"),
-      accountToolsAvailable: this.#state === "connected" && ACCOUNT_READS.every(t => this.#tools.has(t)),
+      accountToolsAvailable: this.#state === "connected" && REQUIRED_ACCOUNT_READS.every(t => this.#tools.has(t)),
+      // Which asset classes this particular grant can report on. A report says what it could not read rather than
+      // leaving the value it represents to be mistaken for money that is not there.
+      optionPositionsAvailable: this.#state === "connected" && this.#tools.has("get_option_positions"),
+      cryptoPositionsAvailable: this.#state === "connected" && this.#tools.has("get_crypto_positions"),
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),

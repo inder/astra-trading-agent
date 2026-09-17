@@ -231,27 +231,28 @@ function account(a: ReportAccount, scope: number): string {
   };
   const rows = [...a.holdings].sort((x, y) =>
     distance(x) - distance(y) || x.holding.symbol.localeCompare(y.holding.symbol));
-  // The rows are equities. Robinhood's account value counts everything in the account, options and crypto included,
-  // so the two are not the same number and the report says so rather than leaving a reader to find the gap.
   const priced = rows.filter(r => r.levels).reduce((n, r) => n + r.holding.shares * r.levels!.price, 0);
   const unpriced = rows.filter(r => !r.levels).length;
   const value = a.totals.value;
-  const elsewhere = value !== null && !unpriced ? value - priced - (a.totals.cash ?? 0) : null;
   const notes: string[] = [];
   if (a.skipped) notes.push(`${a.skipped} holding${a.skipped === 1 ? "" : "s"} could not be read and ${a.skipped === 1 ? "is" : "are"} not shown.`);
   if (a.truncated) notes.push("This account has more holdings than one report can page through; the rest are not shown.");
-  if (elsewhere !== null && !a.truncated && Math.abs(elsewhere) > Math.max(1, (value ?? 0) * 0.005))
-    notes.push(`${money(elsewhere, 0)} of this account's value is not in the table below: it covers equities only, while the account value counts everything, including options and crypto.`);
-  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? " has" : "s have"} no price here, so the equities total excludes ${unpriced === 1 ? "it" : "them"}.`);
+  // The header now names every class Robinhood reports a value for, so the gap can be named rather than lumped.
+  // The table lists stocks; anything else the account holds is stated above it and said here in words.
+  const others = a.totals.byClass.filter(c => c.label !== "Stocks");
+  if (others.length) {
+    const named = others.map(c => `${c.label.toLowerCase()} (${money(c.value, 0)})`);
+    const list = named.length === 1 ? named[0]! : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
+    notes.push(`The table below lists this account's stocks. Its ${list} ${others.length === 1 ? "is" : "are"} counted in the account value above, but not listed here yet.`);
+  }
+  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? " has" : "s have"} no price here, so the stocks total excludes ${unpriced === 1 ? "it" : "them"}.`);
   return `<section class="account">
   <header>
     <h2>${escape(a.label)}</h2>
     <dl class="totals">
       <div><dt>Account value</dt><dd>${money(value, 0)}</dd></div>
-      <div><dt>Equities here</dt><dd>${money(priced, 0)}</dd></div>
+      ${a.totals.byClass.map(c => `<div><dt>${escape(c.label)}</dt><dd>${money(c.value, 0)}</dd></div>`).join("\n      ")}
       <div><dt>Cash</dt><dd>${money(a.totals.cash, 0)}</dd></div>
-      <div><dt>Today</dt><dd class="${(a.totals.dayChange ?? 0) < 0 ? "down" : "up"}">${money(a.totals.dayChange, 0)}</dd></div>
-      <div><dt>Total return</dt><dd class="${(a.totals.totalReturn ?? 0) < 0 ? "down" : "up"}">${money(a.totals.totalReturn, 0)}</dd></div>
     </dl>
   </header>
   ${notes.length ? `<p class="note">${notes.map(escape).join(" ")}</p>` : ""}
@@ -266,8 +267,9 @@ function account(a: ReportAccount, scope: number): string {
 /** What the chat should say out loud, so the model can speak in a paragraph and leave the detail in the report.
  *  Small on purpose: totals, the accounts, what is sitting on a level, and the extremes. */
 export interface PortfolioOverview {
-  asOf: string; accounts: { label: string; value: number | null; dayChange: number | null; holdings: number }[];
-  totalValue: number | null; totalDayChange: number | null;
+  asOf: string;
+  accounts: { label: string; value: number | null; holdings: number; byClass: { label: string; value: number }[] }[];
+  totalValue: number | null;
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];
   best: { symbol: string; gainPct: number }[]; worst: { symbol: string; gainPct: number }[];
   unreadable: string[];
@@ -296,8 +298,9 @@ export function overview(input: ReportInput): PortfolioOverview {
   }
   const ranked = [...gains].sort((a, b) => b.gainPct - a.gainPct).map(g => ({ ...g, gainPct: Number(g.gainPct.toFixed(1)) }));
   return { asOf: input.generatedAt.slice(0, 10),
-    accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, dayChange: a.totals.dayChange, holdings: a.holdings.length })),
-    totalValue: sum(a => a.totals.value), totalDayChange: sum(a => a.totals.dayChange),
+    // byClass rides along so the chat can say "and $84,000 of that is options" without the report being open.
+    accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, holdings: a.holdings.length, byClass: a.totals.byClass })),
+    totalValue: sum(a => a.totals.value),
     near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
     unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }

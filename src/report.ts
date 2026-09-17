@@ -25,6 +25,15 @@ export interface ReportAccount {
   label: string; totals: AccountTotals; holdings: ReportHolding[];
   /** Holdings dropped because the provider's row could not be read, and whether paging stopped early. */
   skipped: number; truncated: boolean;
+  /** What is known about this account's option contracts. They are not listed yet; this is what stands behind the
+   *  options figure.
+   *
+   *  It is not a bare count, because a bare count cannot tell four things apart: an account that holds no options, a
+   *  read that failed, a grant without the tool, and a read that returned rows every one of which was unreadable.
+   *  The last is the one that matters — the normalizer is keyed field by field to a payload shape, and a provider
+   *  that renames a field does not error, it drops every row. A count would then say "no options" to someone who
+   *  holds options, with nothing on the page to notice it by. */
+  options?: { count: number; skipped: number; truncated: boolean } | "unreadable";
 }
 export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
 
@@ -57,6 +66,24 @@ function priceNote(levels: Levels, short = false): string {
   if (levels.priceSource === "after-hours") return `after hours${when}`;
   if (levels.priceSource === "pre-market") return `pre-market${when}`;
   return `last trade${when}`;
+}
+
+/** What can honestly be said about an account's contracts. Each state gets its own words, because the four of them
+ *  mean different things and a reader acts differently on each: nothing held, nothing readable, a complete count, a
+ *  count that stopped early, and a count with rows it could not parse. */
+function optionNote(options: NonNullable<ReportAccount["options"]>, value: number): string {
+  if (options === "unreadable") return "the contracts behind it could not be read";
+  const { count, skipped, truncated } = options;
+  if (!count && skipped) return `none of its ${skipped} contract row${skipped === 1 ? "" : "s"} could be read`;
+  // No rows at all, nothing dropped, and yet the account is worth something in options: the provider is disagreeing
+  // with itself, and "0 open contracts" would take one side of that and state it as fact. This is also the shape an
+  // unanticipated payload wrapper produces — rows arriving somewhere the reader does not look — so it is the one
+  // remaining way a drift could be reported as a number rather than as a doubt.
+  if (!count && value > 0) return "no contract rows came back for it";
+  const contracts = `${count}${truncated ? "+" : ""} open contract${count === 1 && !truncated ? "" : "s"}`;
+  if (truncated) return `${contracts}, more than one report can page through`;
+  if (skipped) return `${contracts}, and ${skipped} row${skipped === 1 ? "" : "s"} that could not be read`;
+  return contracts;
 }
 
 /** The frame a report row is drawn from: the one the levels engine chose, which is the longest daily window with
@@ -251,7 +278,11 @@ function account(a: ReportAccount, scope: number): string {
     // A colon list rather than a sentence: "options" is plural and "crypto" is not, so any is/are agreement is wrong
     // for one of them. And an account can hold no stocks at all — one of the founder's does — where a note opening
     // "the table below lists this account's stocks" describes an empty table.
-    const named = others.map(c => `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
+    // The options line says what is known about the contracts behind it — including when that is nothing, and
+    // including when some rows could not be read. A number with no qualifier is a claim; these say which claim.
+    const named = others.map(c => c.label === "Options" && a.options !== undefined
+      ? `options (${money(c.value, 0)}, ${optionNote(a.options, c.value)})`
+      : `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
     notes.push(rows.length
       ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
       : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);

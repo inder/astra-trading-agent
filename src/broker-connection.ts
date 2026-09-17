@@ -13,19 +13,42 @@ export type MarketRead = typeof MARKET_READS[number];
 /** Account reads live in their own list, with their own accessor, deliberately. Robinhood's single `internal` scope
  *  grants 73 tools including order placement, so these two arrays are the whole boundary — and keeping them apart
  *  means a change that widens market data cannot widen account access by accident, and any diff that touches what
- *  Astra can see of an account is visibly a diff to ACCOUNT_READS. */
-export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
+ *  Astra can see of an account is visibly a diff to ACCOUNT_READS.
+ *
+ *  Every name here has a caller. `get_crypto_positions` is granted and was drafted into this list, then taken out
+ *  again: nothing called it, and a widening that no code runs cannot be reviewed — a reader has no caller to reason
+ *  about, and a test that pins the list only enshrines it. It is one string to add back the day something needs it,
+ *  reviewed then against real use. */
+export const ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions",
+  "get_option_positions"] as const);
 export type AccountRead = typeof ACCOUNT_READS[number];
+/** The account reads every grant must carry for a report to mean anything: who the accounts are, what they are worth,
+ *  and the shares in them. The rest of ACCOUNT_READS is per-asset-class and optional — a user who never onboarded to
+ *  Robinhood Crypto has no `get_crypto_positions` in their grant, and that must not read as "account access is
+ *  unavailable" and take their working equity report down with it. Asking `every(ACCOUNT_READS)` would do exactly
+ *  that the moment this list grew, which is why the distinction exists before the list grows and not after. */
+export const REQUIRED_ACCOUNT_READS = Object.freeze(["get_accounts", "get_portfolio", "get_equity_positions"] as const);
 /** Only a read may appear in either list. The positive rule is the one that matters: a name outside the provider's
  *  read convention is refused, so `submit_order` or `transfer_funds` cannot be added however they are spelled. The
- *  denylist stays as a second pass for a name that reads like a getter but is not. */
+ *  denylist stays as a second pass for a name that reads like a getter but is not.
+ *
+ *  **These bound the CLASS of name that may appear. They are not the policy.** Within the read class they cannot
+ *  discriminate: `get_crypto_positions`, `get_equity_tax_lots` and `get_realized_pnl` all pass both, exactly as
+ *  `get_option_positions` does. What a grant may actually be asked for is the two arrays above, and the only thing
+ *  enforcing their contents is the test that asserts them element by element. Nothing here should ever be cited as
+ *  evidence that a particular tool belongs — it is a guard against a mutation being typed in, and no more. */
 const READ_NAME = /^(get|list)_/;
-const FORBIDDEN = /(order|transfer|withdraw|deposit|liquidat|execut|submit|buy|sell|cancel|exercise|place)/;
+// Case-insensitive: the denylist should not depend on the provider never capitalising a tool name.
+const FORBIDDEN = /(order|transfer|withdraw|deposit|liquidat|execut|submit|buy|sell|cancel|exercise|place)/i;
 for (const tool of [...MARKET_READS, ...ACCOUNT_READS]) {
   if (!READ_NAME.test(tool)) throw new Error(`Refusing a tool outside the read naming convention: ${tool}`);
   if (FORBIDDEN.test(tool)) throw new Error(`Refusing a tool that names a mutation: ${tool}`);
 }
 if (MARKET_READS.some(t => (ACCOUNT_READS as readonly string[]).includes(t))) throw new Error("Read allowlists must not overlap");
+// The required set is a subset of the full one by construction, and stays one at load rather than only in a test:
+// an entry here that is not an account read would quietly make account access report unavailable for everyone.
+if (REQUIRED_ACCOUNT_READS.some(t => !(ACCOUNT_READS as readonly string[]).includes(t)))
+  throw new Error("A required account read must be an account read");
 const allowedURLs = new Set([
   ROBINHOOD_MCP_URL,
   "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading",
@@ -142,7 +165,10 @@ export class RobinhoodConnection {
       // Account reads are an optional capability: market data must still connect when the provider does not grant
       // them. Listing accounts needs only its own tool, so a partial grant still answers "which accounts are there".
       accountListAvailable: this.#state === "connected" && this.#tools.has("get_accounts"),
-      accountToolsAvailable: this.#state === "connected" && ACCOUNT_READS.every(t => this.#tools.has(t)),
+      accountToolsAvailable: this.#state === "connected" && REQUIRED_ACCOUNT_READS.every(t => this.#tools.has(t)),
+      // Which asset classes this particular grant can report on. A report says what it could not read rather than
+      // leaving the value it represents to be mistaken for money that is not there.
+      optionPositionsAvailable: this.#state === "connected" && this.#tools.has("get_option_positions"),
       quoteToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_quotes"),
       movingAverageToolAvailable: this.#state === "connected" && this.#tools.has("get_equity_technical_indicators"),
       paperDataAvailable: this.#state === "connected" && MARKET_READS.filter(t => t !== "get_equity_technical_indicators").every(t => this.#tools.has(t)),

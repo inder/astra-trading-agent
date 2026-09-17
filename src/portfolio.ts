@@ -128,12 +128,33 @@ export function normalizeTotals(raw: unknown): AccountTotals {
 
 /** Every holding in one account, following the provider's cursor. Bounded: a runaway page loop would burn the grant,
  *  and a truncated portfolio must say so rather than read as a complete one. */
+/** The messages that mean the boundary itself refused, rather than a read failing. A call site that degrades on a
+ *  failed read must let these past: an allowlist rejection or a closed connection at the only caller of a read that
+ *  widened the boundary is precisely what must not be silent.
+ *
+ *  Both are also on ACCOUNT_SAFE_ERRORS, so rethrowing one reaches a user as itself. Rethrowing a message that set
+ *  does not carry would cost the report AND flatten the signal to "Account read failed" — losing both things the
+ *  rethrow exists for. */
+export const BOUNDARY_ERRORS: ReadonlySet<string> = new Set([
+  "Broker mutation or unsupported tool blocked",
+  "Connect Robinhood market data first",
+]);
 /** The only messages the account path may show a user. Anything else a future call site throws is replaced, so a
  *  message that interpolates an account number or a payload cannot reach a transcript by being written carelessly.
- *  Safe by construction rather than safe because every call site today happens to be. */
+ *  Safe by construction rather than safe because every call site today happens to be.
+ *
+ *  This is a claim about SAFETY, not a routing table: a message belongs here if showing it would disclose nothing,
+ *  whether or not anything currently throws it. "Option positions unavailable" is on it and is, by design, caught
+ *  before it reaches `sealed()` at today's only call site — it stays so the next call site that does rethrow it is
+ *  not flattened into a generic failure. */
 export const ACCOUNT_SAFE_ERRORS: ReadonlySet<string> = new Set([
+  // Names the boundary's own refusal without naming the tool or the account: safe to show, and it must be, because
+  // a call site that degrades on a read failure rethrows this rather than swallowing it.
+  "Broker mutation or unsupported tool blocked",
   "Accounts unavailable",
   "Positions unavailable",
+  // Carries no account number and no payload — the same shape as the line above it, for the option read.
+  "Option positions unavailable",
   "Connect Robinhood market data first",
   "Robinhood account read failed; check connection status. No order was submitted.",
   "Robinhood did not grant account access to this connection. Reconnect with connect_robinhood to grant it, or carry on with market data.",
@@ -148,6 +169,60 @@ export async function sealed<T>(action: () => Promise<T>): Promise<T> {
     throw new Error(ACCOUNT_SAFE_ERRORS.has(message) ? message : "Account read failed");
   }
 }
+/** One open option position. Every field is what the provider actually sends, captured 2026-09-16 — the shapes here
+ *  were all guessed wrong before that capture, and each guess would have produced a confident wrong number:
+ *
+ *  - Direction is a `type` of `long`/`short`. Quantity stays POSITIVE. A normalizer written to read a negative
+ *    quantity as a short would have booked every short as a long and inverted its profit and loss.
+ *  - The field is `trade_value_multiplier` ("100.0000"), not `multiplier`. Hardcoding 100 is wrong for an adjusted
+ *    contract and silently misprices it.
+ *  - `average_price` is per SHARE. Cost per contract is `averageCostPerShare × multiplier`.
+ *  - There is no strike and no call/put on the row at all. Both need a `get_option_instruments` lookup by
+ *    `optionId`, which is market data and already allowed — so it is a later slice's work, not this one's. */
+export interface OptionHolding {
+  optionId: string;
+  underlying: string;
+  direction: "long" | "short";
+  contracts: number;
+  expiry: string;
+  averageCostPerShare: number | null;
+  multiplier: number;
+}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Open option positions, rebuilt field by field like every other account read. A row that cannot be read as a
+ *  position is dropped and counted rather than guessed: a made-up contract is worse than a missing one.
+ *
+ *  Closed positions come back too — one live account returned 750 rows, most of them long gone — so a zero quantity
+ *  is skipped before anything else, exactly as a closed share position is. */
+export function normalizeOptionHoldings(raw: unknown): { holdings: OptionHolding[]; skipped: number; cursor: string | null } {
+  const data = (raw as any)?.data;
+  const rows = Array.isArray(data?.positions) ? data.positions : Array.isArray(data?.results) ? data.results : null;
+  if (!rows) throw new Error("Option positions unavailable");
+  const holdings: OptionHolding[] = [];
+  let skipped = 0;
+  for (const row of rows) {
+    const contracts = number(row?.quantity);
+    if (contracts === null) { skipped++; continue; }
+    if (contracts === 0) continue;                                   // a closed position is not a holding
+    const optionId = typeof row?.option_id === "string" ? row.option_id : "";
+    const underlying = typeof row?.chain_symbol === "string" ? row.chain_symbol.trim().toUpperCase() : "";
+    const expiry = typeof row?.expiration_date === "string" ? row.expiration_date : "";
+    const direction = row?.type === "short" ? "short" : row?.type === "long" ? "long" : null;
+    const multiplier = positive(row?.trade_value_multiplier);
+    // Every one of these is load-bearing for a money figure, so a row missing any of them is dropped rather than
+    // defaulted. A contract of unknown direction or unknown multiplier cannot be valued, only guessed at.
+    if (!UUID.test(optionId) || !SYMBOL.test(underlying) || !DATE.test(expiry) || !direction || multiplier === null) {
+      skipped++; continue;
+    }
+    holdings.push({ optionId, underlying, direction, contracts: Math.abs(contracts), expiry,
+      averageCostPerShare: positive(row?.average_price), multiplier });
+  }
+  const cursor = typeof data?.next === "string" ? data.next : typeof data?.next_cursor === "string" ? data.next_cursor : null;
+  return { holdings, skipped, cursor };
+}
+
 export const MAX_POSITION_PAGES = 20;
 /** Holdings charted per account. Every chart is a daily-bar read, so an account of a hundred names would otherwise
  *  spend a hundred provider calls on one report; the rest are listed with their cost and value, without levels. */
@@ -157,6 +232,24 @@ export async function readHoldings(broker: Pick<RobinhoodConnection, "accountRea
   let cursor: string | null = null, skipped = 0, pages = 0, truncated = false;
   do {
     const page = normalizeHoldings(await broker.accountRead("get_equity_positions",
+      cursor ? { account_number: accountNumber, cursor } : { account_number: accountNumber }));
+    holdings.push(...page.holdings); skipped += page.skipped; cursor = page.cursor;
+    if (++pages >= MAX_POSITION_PAGES && cursor) { truncated = true; break; }
+  } while (cursor);
+  return { holdings, skipped, truncated };
+}
+
+/** Every open option position in one account. Same cursor discipline and the same page bound as shares.
+ *
+ *  The page bound was sized for share positions, and option rows are far more numerous — closed contracts come back
+ *  alongside open ones, and one live account returned 750 in a single response. That is the reassuring part: the
+ *  provider pages in hundreds, not tens, so twenty pages is thousands of rows. It is still bounded, and a truncated
+ *  account still says so, because a portfolio that quietly stops short is worse than one that admits it. */
+export async function readOptionHoldings(broker: Pick<RobinhoodConnection, "accountRead">, accountNumber: string) {
+  const holdings: OptionHolding[] = [];
+  let cursor: string | null = null, skipped = 0, pages = 0, truncated = false;
+  do {
+    const page = normalizeOptionHoldings(await broker.accountRead("get_option_positions",
       cursor ? { account_number: accountNumber, cursor } : { account_number: accountNumber }));
     holdings.push(...page.holdings); skipped += page.skipped; cursor = page.cursor;
     if (++pages >= MAX_POSITION_PAGES && cursor) { truncated = true; break; }

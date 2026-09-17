@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type DroppedBars, type EquityMarketQuote } from "./market-data.ts";
-import { MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
+import { BOUNDARY_ERRORS, MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, readOptionHoldings, sealed, type AccountSummary } from "./portfolio.ts";
 import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
@@ -143,6 +143,27 @@ export class TradingAgentService {
       for (const [index, accountNumber] of numbers.entries()) {
         const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
         const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
+        // Read only where the grant allows it: a grant is not a guarantee, and an account that cannot be read for
+        // contracts must still report its shares.
+        //
+        // The catch is narrow on purpose. A blanket one here would also swallow the allowlist refusing the tool and
+        // the connection reporting itself closed — the two loudest signals that the boundary is misconfigured — at
+        // the only call site of the read that widened it. Those are rethrown to `sealed()`, which is what decides
+        // what a user may see. What is caught is the read itself failing, and that becomes a state on the page
+        // rather than a silence.
+        let options: ReportAccount["options"];
+        if (this.broker.status().optionPositionsAvailable) {
+          try {
+            const read = await readOptionHoldings(this.broker, accountNumber);
+            options = { count: read.holdings.length, skipped: read.skipped, truncated: read.truncated };
+          } catch (error) {
+            if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+            options = "unreadable";
+          }
+        } else if (totals.byClass.some(c => c.label === "Options")) {
+          // The account is worth something in options and this grant cannot say what. Silence would read as none.
+          options = "unreadable";
+        }
         // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
         // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
         // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
@@ -170,7 +191,8 @@ export class TradingAgentService {
           const weekly = found.frames.some(f => f.bar === "week" && !f.unavailable) ? closes(aggregateWeekly(bars)) : undefined;
           return { holding, levels: found, series: { daily: closes(bars), weekly } };
         });
-        accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated });
+        accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated,
+          options });
       }
       return accounts;
     });

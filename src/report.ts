@@ -240,9 +240,13 @@ function account(a: ReportAccount, scope: number): string {
   // The table lists stocks; anything else the account holds is stated above it and said here in words.
   const others = a.totals.byClass.filter(c => c.label !== "Stocks");
   if (others.length) {
-    const named = others.map(c => `${c.label.toLowerCase()} (${money(c.value, 0)})`);
-    const list = named.length === 1 ? named[0]! : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
-    notes.push(`The table below lists this account's stocks. Its ${list} ${others.length === 1 ? "is" : "are"} counted in the account value above, but not listed here yet.`);
+    // A colon list rather than a sentence: "options" is plural and "crypto" is not, so any is/are agreement is wrong
+    // for one of them. And an account can hold no stocks at all — one of the founder's does — where a note opening
+    // "the table below lists this account's stocks" describes an empty table.
+    const named = others.map(c => `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
+    notes.push(rows.length
+      ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
+      : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);
   }
   if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? " has" : "s have"} no price here, so the stocks total excludes ${unpriced === 1 ? "it" : "them"}.`);
   return `<section class="account">

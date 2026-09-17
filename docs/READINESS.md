@@ -57,7 +57,9 @@ No real-account readiness or trading performance is claimed.
 
 - Trading is PAPER only: no real orders and no live flag. Real accounts are read,
   but only read — balances and equity positions, when asked, for the portfolio
-  report. Its profit and loss is unrealized and covers equities held now; realized
+  report. Its profit and loss is unrealized and covers the stocks held now, with
+  every other class the account holds stated at the value Robinhood reports for
+  it rather than listed; realized
   P&L, transaction history and account-wide return are not read.
 - Assumed ask/bid fills, no execution guarantees, partial fills or actual fees.
   P&L excludes fees; missing marks are unavailable, never zero-valued marks.

@@ -121,7 +121,17 @@ test("an account holding more than stocks says so, by class and by figure", () =
   assert.match(html, /<dt>Crypto<\/dt><dd>\$4,706<\/dd>/);
   // And the table says what it is and is not, naming each class rather than lumping them as "options and crypto".
   assert.match(html, /The table below lists this account&#39;s stocks\./);
-  assert.match(html, /Its options \(\$470,000\) and crypto \(\$4,706\) are counted in the account value above, but not listed here yet/);
+  assert.match(html, /Also counted in the account value above, but not listed here: options \(\$470,000\), crypto \(\$4,706\)\./);
+
+  // An account can hold no stocks at all — one of the founder's holds only options. A note opening "the table below
+  // lists this account's stocks" would then describe an empty table, and "its options ... is counted" is not English.
+  const optionsOnly = portfolioReport({ accounts: [account({ holdings: [], totals: {
+    value: 100000, cash: 1000, byClass: [{ label: "Options", value: 99000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(optionsOnly, /This account holds no stocks, so the table below is empty\./);
+  assert.match(optionsOnly, /Counted in the account value above, but not listed here: options \(\$99,000\)\./);
+  assert.ok(!/&#39;s stocks\./.test(optionsOnly), "and it does not describe stocks it does not have");
+  assert.match(optionsOnly, /<dt>Options<\/dt><dd>\$99,000<\/dd>/, "the value is still stated");
+  assert.ok(!/<dt>Stocks<\/dt>/.test(optionsOnly), "with no stocks line invented for it");
 
   const overview_ = overview({ accounts: [account({ totals: { value: 500000, cash: 10000, byClass: [
     { label: "Options", value: 470000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });

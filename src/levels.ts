@@ -357,7 +357,12 @@ export function levels(daily: DailyBars, settings: LevelsSettings = parseLevelsS
   const empty: Levels = { asOf: "", price: 0, priceSource: "close", priceAt: null, sessions: 0, averages: [], frames: [], defaultTimeframe: null, warnings: [] };
   const problem = unusable(daily, settings);
   const t = daily?.time ?? [], n = t.length;
+  // A price without levels is still a price. Too few sessions to measure a zone says nothing about what the stock
+  // last traded at, and leaving it zero here put $0.00 and −100% in a holdings table and made the stock the
+  // portfolio's worst performer in what the chat read aloud. Only the levels are unknown; the price is not.
   if (problem) return { ...empty, asOf: t[n - 1] ?? "", sessions: n, warnings: [problem],
+    price: latest?.price ?? daily?.close?.[n - 1] ?? 0,
+    priceSource: latest?.source ?? "close", priceAt: latest?.at ?? null,
     frames: settings.timeframes.map(timeframe => ({ label: LABELS[timeframe], timeframe, bar: weekly(timeframe) ? "week" : "day",
       start: "", sessions: n, sinceListing: false, unavailable: problem })) };
   const price = latest?.price ?? daily.close[n - 1]!;

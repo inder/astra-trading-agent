@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
-import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type EquityMarketQuote } from "./market-data.ts";
+import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type DroppedBars, type EquityMarketQuote } from "./market-data.ts";
 import { MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, sealed, type AccountSummary } from "./portfolio.ts";
 import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
@@ -41,7 +41,7 @@ export class TradingAgentService {
   #reportDirectory: string;
   #closing?: Promise<void>;
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
-  #dailyBars = new Map<string, { on: string; bars: DailyBars }>();
+  #dailyBars = new Map<string, { on: string; bars: DailyBars; dropped: DroppedBars }>();
   #levelsSettings: LevelsSettings = parseLevelsSettings();
   // Account numbers never enter the chat: callers hold a handle that is random for this process and forgotten when it
   // exits. Nothing here is written to disk, and nothing is derived from the account number.
@@ -240,14 +240,17 @@ export class TradingAgentService {
     for (const symbol of symbols) {
       const cached = this.#dailyBars.get(symbol);
       let bars = cached?.on === settled ? cached.bars : undefined;
+      let dropped = cached?.on === settled ? cached.dropped : undefined;
       if (!bars) {
         try {
           // Enough for the longest window anyone can ask for — the weekly frame's years, plus a run-up for the
           // 200-day average and for swing points at the window's edge. One span for every caller, so a request that
           // only needs two years cannot poison the cache for one that needs five.
           // Today's forming bar is dropped rather than measured: its high, low and close are all still provisional.
-          bars = sessionsBefore(await this.market.dailyBars(symbol, now - this.#historyDays * 86400000, now), addDays(settled, 1));
-          this.#dailyBars.set(symbol, { on: settled, bars });
+          const read = await this.market.dailyBars(symbol, now - this.#historyDays * 86400000, now);
+          bars = sessionsBefore(read.bars, addDays(settled, 1));
+          dropped = read.dropped;
+          this.#dailyBars.set(symbol, { on: settled, bars, dropped });
         } catch (error) {
           // The reason is kept. "No usable history" alone cannot be acted on — it does not say whether the provider
           // returned nothing, returned a bar that failed a check, or was never reached.
@@ -260,7 +263,15 @@ export class TradingAgentService {
       // `settled` advances through weekends and holidays, which is what tells a weekly frame that a week with no
       // Friday session is nonetheless over.
       const computed = levels(bars, settings, this.#latestTrade(quotes.find(q => q.symbol === symbol), bars, now), settled);
-      out.push({ symbol, ...computed, requested: timeframe ?? computed.defaultTimeframe ?? undefined });
+      // Only the drops a reader would want interrupting for. Padding before the first real session is what
+      // `sinceListing` already reports, and the placeholder for the session still being finalized is what the as-of
+      // date and the price's own label already say — warning about those would put a line on every holding every
+      // evening and teach the reader to skip all of them, including the two that matter.
+      const notes: string[] = [];
+      const gap = dropped?.interior ?? 0;
+      if (gap) notes.push(`${gap} day${gap === 1 ? "" : "s"} inside this history could not be read as a session and ${gap === 1 ? "was" : "were"} left out, so a level near ${gap === 1 ? "that date" : "those dates"} rests on less than it appears to.`);
+      out.push({ symbol, ...computed, warnings: [...computed.warnings, ...notes],
+        requested: timeframe ?? computed.defaultTimeframe ?? undefined });
     }
     return out;
   }

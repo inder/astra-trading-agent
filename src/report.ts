@@ -231,7 +231,6 @@ function account(a: ReportAccount, scope: number): string {
   };
   const rows = [...a.holdings].sort((x, y) =>
     distance(x) - distance(y) || x.holding.symbol.localeCompare(y.holding.symbol));
-  const priced = rows.filter(r => r.levels).reduce((n, r) => n + r.holding.shares * r.levels!.price, 0);
   const unpriced = rows.filter(r => !r.levels).length;
   const value = a.totals.value;
   const notes: string[] = [];

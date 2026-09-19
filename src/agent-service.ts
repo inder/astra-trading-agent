@@ -187,8 +187,6 @@ export class TradingAgentService {
         // bottom by a zero it never had.
         // A sentinel, not Infinity: subtracting two Infinities gives NaN, which is an inconsistent comparator and
         // orders an account of unpriced holdings arbitrarily — the same defect this report's own row ordering had.
-        const size = (h: { shares: number; averageCost: number | null }) =>
-          h.averageCost === null ? Number.MAX_SAFE_INTEGER : h.shares * h.averageCost;
         // One group per underlying, across shares and contracts. An account holding options on twenty names it owns
         // no stock in has twenty underlyings to chart, so the cap counts groups rather than share positions.
         const bySymbol = new Map<string, { holding?: Holding; contracts: OptionHolding[] }>();
@@ -216,6 +214,7 @@ export class TradingAgentService {
             const instrument = terms?.found.get(c.optionId);
             const note = instrument ? undefined
               : terms?.unasked.has(c.optionId) ? "terms not fetched within this report's limit"
+              : terms?.unreadable.has(c.optionId) ? "this contract's terms came back in a shape Astra could not read"
               : "the provider did not return this contract's terms";
             return { expiry: c.expiry, contracts: c.contracts, direction: c.direction, multiplier: c.multiplier,
               averageCostPerShare: c.averageCostPerShare,
@@ -224,7 +223,8 @@ export class TradingAgentService {
               // against a guessed payload shape. A contract with no mark shows its cost and quantity and no value,
               // which is the stated fallback — not a value inferred from what it cost.
               mark: null, markAt: null, value: null,
-              note: note ?? (c.incomplete?.length ? `not valued: ${c.incomplete.join(", ")} could not be read` : undefined),
+              note: [note, c.incomplete?.length ? `not valued: ${c.incomplete.join(", ")} could not be read` : ""]
+                .filter(Boolean).join(" · ") || undefined,
               strikeNotDrawn: instrument ? strikeNotComparable(instrument, symbol) ?? undefined : undefined };
           });
           const found = computed.find(c => c.symbol === symbol);

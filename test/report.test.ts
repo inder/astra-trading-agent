@@ -609,3 +609,74 @@ test("a strike is drawn once per distinct price, and a far one does not flatten 
   // A distance is a magnitude with a direction in words. "+7.0% below" reads as a contradiction.
   assert.ok(!/[+−]\d+\.\d% (above|below) the price/.test(html), "no signed percentage sits in front of above/below");
 });
+
+test("a group total covers every contract in it, or says it is unknown", () => {
+  // The oldest defect on this project wearing new clothes. Summing only the contracts that COULD be valued makes an
+  // empty list total zero, so a group of shares plus contracts nobody could price printed the share figure alone —
+  // identical on the page to a group whose contracts are worth nothing, and short by whatever they are worth. This
+  // is how overview() once reported a portfolio short by an entire account, by treating a null total as a zero.
+  const shares = 120 * computed.price;
+  const withUnvalued = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 },
+      levels: computed, series: { daily: series },
+      contracts: [contract({ mark: null, markAt: null, value: null })] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  const groupRow = withUnvalued.match(/<tr class="holding[^"]*">[\s\S]*?<\/tr>/)![0];
+  assert.ok(!groupRow.includes(`$${Math.round(shares).toLocaleString("en-US")}`),
+    "the share figure alone is not the group's value when a contract could not be priced");
+  assert.match(groupRow, /<td class="num">—<\/td>/, "an unknown total is a dash, not a number that omits a part");
+
+  // The same group with every contract valued does state a total — the rule is completeness, not pessimism.
+  const allValued = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 },
+      levels: computed, series: { daily: series }, contracts: [contract()] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(allValued.includes(`$${Math.round(shares + 3140).toLocaleString("en-US")}`),
+    "with every contract priced, the group totals shares plus contracts");
+
+  // Partial valuation is the same failure with a subtler face: two priced and one not must not total the two.
+  const partial = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [
+      contract(), contract({ expiry: "2027-01-15" }),
+      contract({ expiry: "2027-06-18", mark: null, markAt: null, value: null }),
+    ] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(!partial.includes("$6,280"), "two priced contracts are not the total of three");
+});
+
+test("listing the contracts does not lose the warning that the list is incomplete", () => {
+  // Taking the options class out of the "not listed here" sentence took the truncated and skipped clauses with it —
+  // they were only ever reachable through optionNote(), which is only called for classes in that sentence. The
+  // reader would then see N rows and take them for the whole book, which is worse than the bare count this replaced:
+  // rows look complete in a way a number does not.
+  const listed = (options: ReportAccount["options"]) => portfolioReport({ accounts: [account({
+    options,
+    totals: { value: 50000, cash: 1000, byClass: [{ label: "Options", value: 2600 }] },
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [contract()] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(listed({ count: 40, positions: 20, skipped: 0, truncated: true }),
+    /more contracts than one report can page through/, "a book that stopped early says so beside the rows");
+  assert.match(listed({ count: 4, positions: 1, skipped: 3, truncated: false }),
+    /3 contract rows could not be read and are not listed/, "and dropped rows are still counted out loud");
+  // A complete book says neither, rather than hedging every report.
+  const clean = listed({ count: 4, positions: 1, skipped: 0, truncated: false });
+  assert.ok(!/page through|could not be read/.test(clean), "a complete book is not qualified");
+});
+
+test("a contract that cannot be valued says why, even when its terms are known", () => {
+  // The reason was rendered only when the strike was missing, so a contract whose terms were found but whose
+  // direction could not be read showed a dash in three money columns with nothing beside it — the shape this report
+  // treats as a defect everywhere else.
+  const html = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [
+      contract({ direction: null, mark: null, markAt: null, value: null,
+        note: "not valued: direction could not be read" }),
+    ] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(html, /strike \$44\.00 is [\d.]+% below the price · not valued: direction could not be read/,
+    "both facts are stated: where the strike sits, and why there is no value");
+  assert.match(html, /FIXA Dec 18, 2026 \$44\.00 call\b/, "and the contract is still named by its terms");
+  assert.ok(!/call · null|· long · short/.test(html), "with no direction invented for it");
+});

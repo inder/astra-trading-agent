@@ -367,6 +367,10 @@ export interface InstrumentLookup {
   /** Never asked about, because a budget ran out first. A different sentence from `missing`: one is the provider
    *  declining to answer, the other is this report declining to ask. */
   unasked: Set<string>;
+  /** A subset of `missing`: the provider DID send a row for these and it could not be read. Kept apart because
+   *  blaming the provider's silence for a shape Astra failed to parse points the reader at the wrong thing — and
+   *  because a rename on the provider's side lands here, where it can be noticed. */
+  unreadable: Set<string>;
 }
 
 /** Look contracts up by id, in batches, reconciling what came back against what was asked for.
@@ -385,6 +389,7 @@ export async function readOptionInstruments(
   cache: Map<string, OptionInstrument | null> = new Map(),
 ): Promise<InstrumentLookup> {
   const found = new Map<string, OptionInstrument>(), missing = new Set<string>(), unasked = new Set<string>();
+  const unreadable = new Set<string>();
   const wanted: string[] = [];
   for (const id of new Set(ids)) {
     if (!cache.has(id)) { wanted.push(id); continue; }
@@ -406,8 +411,14 @@ export async function readOptionInstruments(
         const hit = back.get(id);
         if (hit) { found.set(id, hit); cache.set(id, hit); } else outstanding.push(id);
       }
-    } catch {
-      // A whole batch failing says nothing about the individual contracts in it — the retry pass decides that.
+    } catch (error) {
+      // The boundary refusing this tool, or the connection reporting itself closed, is not a fact about any
+      // contract — it is a fact about the connection, and swallowing it would spend sixty more refused calls and
+      // then tell the reader the provider declined to identify their positions. The positions read rethrows these
+      // for exactly this reason; this read did not, which is how a misconfigured allowlist would have looked like
+      // Robinhood's fault on the page.
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      // Any other batch failure says nothing about the individual contracts in it — the retry pass decides that.
       outstanding.push(...batch);
     }
   }
@@ -417,12 +428,21 @@ export async function readOptionInstruments(
     if (retries >= MAX_INSTRUMENT_RETRIES) { unasked.add(id); continue; }
     retries++;
     try {
-      const { instruments } = normalizeOptionInstruments(await broker.read("get_option_instruments", { ids: id }));
+      const { instruments, skipped } = normalizeOptionInstruments(await broker.read("get_option_instruments", { ids: id }));
       const hit = instruments.find(x => x.optionId === id);
-      if (hit) { found.set(id, hit); cache.set(id, hit); } else { missing.add(id); cache.set(id, null); }
-    } catch { missing.add(id); cache.set(id, null); }
+      if (hit) { found.set(id, hit); cache.set(id, hit); }
+      else {
+        // A row that came back and could not be read is not a row that never came. Both leave the contract without
+        // terms, but only one of them is the provider's silence, and the page says which.
+        if (skipped) unreadable.add(id);
+        missing.add(id); cache.set(id, null);
+      }
+    } catch (error) {
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      missing.add(id); cache.set(id, null);
+    }
   }
-  return { found, missing, unasked };
+  return { found, missing, unasked, unreadable };
 }
 
 /** What a held contract is worth and what it has made, with the sign in the right places.

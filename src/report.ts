@@ -319,16 +319,23 @@ function contractRow(c: ReportContract, symbol: string, price: number | null): s
   const multiplier = c.multiplier !== null && c.multiplier !== 100 ? `<span class="dist">×${c.multiplier} per contract</span>` : "";
   // A magnitude with a direction in words, so no signed percentage ever sits in front of "below" — which reads as a
   // contradiction and, worse, as a number whose sign means something it does not.
-  const strikeNote = c.strike === null || price === null ? escape(c.note ?? "contract details unavailable")
-    : `strike ${money(c.strike)} is ${(Math.abs((c.strike - price) / price) * 100).toFixed(1)}% ${c.strike >= price ? "above" : "below"} the price`
-      + (c.strikeNotDrawn ? ` · not drawn: ${escape(c.strikeNotDrawn)}` : "");
+  //
+  // The reason is shown whenever there is one, not only when the strike is missing. A contract whose terms were
+  // found but whose direction could not be read shows a dash in three money columns, and a dash with no sentence
+  // beside it is the shape this report treats as a defect everywhere else.
+  const placed = c.strike !== null && price !== null && price !== 0
+    ? `strike ${money(c.strike)} is ${(Math.abs((c.strike - price) / price) * 100).toFixed(1)}% ${c.strike >= price ? "above" : "below"} the price`
+      + (c.strikeNotDrawn ? ` · not drawn: ${escape(c.strikeNotDrawn)}` : "")
+    : c.strike !== null ? `strike ${money(c.strike)}` : "";
+  const strikeNote = [placed, c.note ? escape(c.note) : ""].filter(Boolean).join(" · ")
+    || escape("contract details unavailable");
   return `<tr class="contract">
     <th scope="row">${escape(contractName(c, symbol))}</th>
     <td class="num">${c.contracts.toLocaleString("en-US")}${multiplier}</td>
     <td class="num">${money(c.averageCostPerShare)}</td>
     <td class="num">${c.mark === null ? "—" : money(c.mark)}${c.markAt ? `<span class="dist">mark ${escape(easternTime(c.markAt) + " ET")}</span>` : ""}</td>
     <td class="num">${v ? money(v.value, 0) : "—"}</td>
-    <td class="num ${v?.gain !== null && v?.gain !== undefined && v.gain < 0 ? "down" : "up"}">${v?.gain === null || v === null ? "—" : money(v.gain, 0)}${
+    <td class="num ${v?.gain == null ? "" : v.gain < 0 ? "down" : "up"}">${v?.gain === null || v === null ? "—" : money(v.gain, 0)}${
       v?.gainPctOfPremium == null ? "" : `<span class="dist">${percent(v.gainPctOfPremium)} of premium</span>`}</td>
     <td class="level" colspan="2">${strikeNote}</td>
   </tr>`;
@@ -340,22 +347,30 @@ function row(entry: ReportHolding, id: string): string {
   if (!levels || unavailable) {
     // No levels for the underlying. The contracts are still held and are still listed — the stock's price history is
     // what could not be read, not the account's positions.
-    return `<tr class="holding"><th scope="row">${symbol}</th>
-      <td class="num">${holding ? holding.shares.toLocaleString("en-US") : "—"}</td>
+    return `<tr class="holding${holding ? "" : " optionsonly"}"><th scope="row">${symbol}</th>
+      <td class="num">${holding ? holding.shares.toLocaleString("en-US") : `<span class="dist">no shares</span>`}</td>
       <td class="num">${money(holding?.averageCost ?? null)}</td>
       <td class="num" colspan="5">${escape(unavailable ?? "no price history")}</td></tr>
       ${contracts.map(c => contractRow(c, raw, null)).join("\n")}`;
   }
   const frame = shown(levels), price = levels.price;
-  // The group's money is the share position plus every contract that could be valued, signed. A short leg subtracts,
-  // which is the only way the column can be added up — and two legs that offset net to nothing without either
-  // disappearing from the rows below.
+  // The group's money is the share position plus EVERY contract, signed. A short leg subtracts, which is the only way
+  // the column can be added up — and two legs that offset net to nothing without either disappearing from the rows.
+  //
+  // "Every" is load-bearing, and getting it wrong is this project's oldest defect wearing new clothes. Summing only
+  // the contracts that could be valued makes an empty list total zero, so a group of shares plus three contracts
+  // nobody could price would print the share figure alone — identical on the page to a group whose contracts are
+  // worth nothing, and short by however much they are actually worth. That is exactly how `overview()` once reported
+  // a portfolio short by a whole account, by treating a null total as a zero. A total covers all of its parts or it
+  // is unknown, so one unvaluable contract makes the group's figure null and the row says so.
   const shareValue = holding ? holding.shares * price : null;
   const shareCost = holding?.averageCost == null ? null : holding.averageCost * holding.shares;
   const valued = contracts.filter(c => c.value);
-  const optionValue = valued.reduce((n, c) => n + c.value!.value, 0);
-  const optionGain = valued.every(c => c.value!.gain !== null) ? valued.reduce((n, c) => n + c.value!.gain!, 0) : null;
-  const value = shareValue === null && !valued.length ? null : (shareValue ?? 0) + optionValue;
+  const allValued = valued.length === contracts.length;
+  const optionValue = allValued ? valued.reduce((n, c) => n + c.value!.value, 0) : null;
+  const optionGain = allValued && valued.every(c => c.value!.gain !== null)
+    ? valued.reduce((n, c) => n + c.value!.gain!, 0) : null;
+  const value = optionValue === null ? null : shareValue === null && !contracts.length ? null : (shareValue ?? 0) + optionValue;
   const shareGain = shareCost === null || shareValue === null ? null : shareValue - shareCost;
   const gain = contracts.length === 0 ? shareGain
     : optionGain === null || (holding && shareGain === null) ? null : (shareGain ?? 0) + optionGain;
@@ -380,7 +395,7 @@ function row(entry: ReportHolding, id: string): string {
     <td class="num">${money(holding?.averageCost ?? null)}</td>
     <td class="num">${money(price)}<span class="dist">${escape(priceNote(levels))}</span></td>
     <td class="num">${money(value, 0)}</td>
-    <td class="num ${gain !== null && gain < 0 ? "down" : "up"}">${money(gain, 0)}<span class="dist">${percent(gainPct)}</span></td>
+    <td class="num ${gain === null ? "" : gain < 0 ? "down" : "up"}">${money(gain, 0)}<span class="dist">${percent(gainPct)}</span></td>
     <td class="level">${zone(support, toSupport)}</td>
     <td class="level">${zone(resistance, toResistance)}</td>
   </tr>
@@ -446,6 +461,17 @@ function account(a: ReportAccount, scope: number): string {
       : a.skipped || a.truncated
         ? `No positions could be read for this account, so none are listed.${named ? ` Counted in the account value above: ${named}.` : ""}`
         : `This account holds no stocks.${named ? ` Counted in the account value above, but not listed here: ${named}.` : ""}`);
+  }
+  // Listing the contracts took the options class out of `others`, and with it the only sentence that ever said the
+  // contract read stopped early or dropped rows. The reader then sees N rows and takes them for the whole book —
+  // which is worse than the count this note replaced, because rows look complete in a way a number does not.
+  if (listed && typeof a.options === "object") {
+    const { count, positions, skipped: dropped, truncated: more } = a.options;
+    if (more) notes.push(`This account holds more contracts than one report can page through; beyond the ${count} listed below, the rest are not shown.`);
+    if (dropped) notes.push(`${dropped} contract row${dropped === 1 ? "" : "s"} could not be read and ${dropped === 1 ? "is" : "are"} not listed — the ${count} below ${count === 1 ? "is" : "are"} what could be.`);
+    // The contracts came back but none of them survived the normalizer: the options figure stands with nothing
+    // beneath it, and the table would otherwise imply the account holds no contracts at all.
+    if (!positions && !dropped && !more) notes.push("No contract rows came back for this account's options figure.");
   }
   // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
   // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.

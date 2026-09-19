@@ -48,6 +48,10 @@ const number = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 const positive = (v: unknown): number | null => { const n = number(v); return n !== null && n > 0 ? n : null; };
+/** Like `positive`, but a verified **zero** survives as zero. A cost basis of nothing is a real basis — it permits a
+ *  dollar gain and forbids a percentage — and mapping it to `null` says "the provider did not tell us", which is a
+ *  different fact that reads the same on the page. */
+const nonNegative = (v: unknown): number | null => { const n = number(v); return n !== null && n >= 0 ? n : null; };
 /** The last four digits, and nothing else. A label also carries the account type so two accounts ending in the same
  *  four digits are still tellable apart, and an ordinal if even that collides. */
 const masked = (accountNumber: string) => `••••${accountNumber.slice(-4)}`;
@@ -182,14 +186,33 @@ export async function sealed<T>(action: () => Promise<T>): Promise<T> {
 export interface OptionHolding {
   optionId: string;
   underlying: string;
-  direction: "long" | "short";
-  contracts: number;
   expiry: string;
+  contracts: number;
+  /** `null` when the row did not say which way round it is. The sign of both the market value and the P&L comes from
+   *  here, so a contract without it cannot be valued — but it can still be named, counted and listed. */
+  direction: "long" | "short" | null;
+  /** Contracts-to-shares for the premium. `null` when unreadable — again a bar to valuing the contract, not to
+   *  reporting that it is held. */
+  multiplier: number | null;
+  /** Average opening premium per quoted unit. `null` is "not given"; `0` is a verified zero basis. */
   averageCostPerShare: number | null;
-  multiplier: number;
+  /** What could not be read on this row, when something could not. Its presence means: do not put a value on this
+   *  contract. Its absence means every field needed for the arithmetic was there.
+   *
+   *  A row used to be dropped outright when any of these was missing, which left the graceful-failure path with
+   *  nothing to rescue — a missing multiplier prevents VALUATION; it does not erase a known underlying, quantity and
+   *  expiry. In a one-position account the difference is the whole report. */
+  incomplete?: string[];
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** A date that exists. The pattern alone accepts 2026-02-30 and 2026-13-45, and an expiry is not a decorative
+ *  field — it is what tells a held contract from an expired one. */
+const isDate = (s: string): boolean => {
+  if (!DATE.test(s)) return false;
+  const parsed = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === s;
+};
 
 /** Open option positions, rebuilt field by field like every other account read. A row that cannot be read as a
  *  position is dropped and counted rather than guessed: a made-up contract is worse than a missing one.
@@ -209,15 +232,25 @@ export function normalizeOptionHoldings(raw: unknown): { holdings: OptionHolding
     const optionId = typeof row?.option_id === "string" ? row.option_id : "";
     const underlying = typeof row?.chain_symbol === "string" ? row.chain_symbol.trim().toUpperCase() : "";
     const expiry = typeof row?.expiration_date === "string" ? row.expiration_date : "";
+    // Identity. Without these a contract cannot be named, deduplicated against another account's copy of it, or
+    // looked up — there is nothing to report, so the row is dropped and counted.
+    if (!UUID.test(optionId) || !SYMBOL.test(underlying) || !isDate(expiry)) { skipped++; continue; }
+
+    // Valuation. Each of these is load-bearing for a money figure and none of them is load-bearing for saying the
+    // contract is held. Missing ones are named, and the contract is listed without a value rather than dropped.
+    const incomplete: string[] = [];
     const direction = row?.type === "short" ? "short" : row?.type === "long" ? "long" : null;
+    if (!direction) incomplete.push("direction");
     const multiplier = positive(row?.trade_value_multiplier);
-    // Every one of these is load-bearing for a money figure, so a row missing any of them is dropped rather than
-    // defaulted. A contract of unknown direction or unknown multiplier cannot be valued, only guessed at.
-    if (!UUID.test(optionId) || !SYMBOL.test(underlying) || !DATE.test(expiry) || !direction || multiplier === null) {
-      skipped++; continue;
-    }
-    holdings.push({ optionId, underlying, direction, contracts: Math.abs(contracts), expiry,
-      averageCostPerShare: positive(row?.average_price), multiplier });
+    if (multiplier === null) incomplete.push("multiplier");
+    // Robinhood reports a positive quantity and puts the direction in `type`, so a negative one means the two
+    // disagree about something. Taking its absolute value turned that disagreement into a confident holding; it is
+    // now reported, and the contract is not valued off a number whose convention is in doubt.
+    if (contracts < 0) incomplete.push("quantity sign");
+
+    holdings.push({ optionId, underlying, expiry, contracts: Math.abs(contracts), direction, multiplier,
+      averageCostPerShare: nonNegative(row?.average_price),
+      ...(incomplete.length ? { incomplete } : {}) });
   }
   const cursor = typeof data?.next === "string" ? data.next : typeof data?.next_cursor === "string" ? data.next_cursor : null;
   return { holdings, skipped, cursor };
@@ -255,4 +288,310 @@ export async function readOptionHoldings(broker: Pick<RobinhoodConnection, "acco
     if (++pages >= MAX_POSITION_PAGES && cursor) { truncated = true; break; }
   } while (cursor);
   return { holdings, skipped, truncated };
+}
+
+/** A contract's terms. The strike and the right live here, not on the position — they are looked up by `option_id`.
+ *
+ *  ⚠️ `type` means two different things across the two objects and they are merged: on a POSITION it is
+ *  `long`/`short`, on an INSTRUMENT it is `call`/`put`. Each is mapped to its own name at the boundary —
+ *  `direction` and `right` — and a bare `type` never travels past this normalizer. Overwriting one with the other
+ *  loses the direction, and a lost direction inverts a short's profit and loss. */
+export interface OptionInstrument {
+  optionId: string;
+  strike: number;
+  right: "call" | "put";
+  /** The chain the contract belongs to, which is not always the underlying's own symbol. */
+  chainSymbol: string;
+  multiplier: number | null;
+  underlyingType: string;
+}
+
+/** Why this contract's strike may NOT be drawn against the underlying's price axis, or null when it may.
+ *
+ *  Anything suggesting the deliverable is not the standard 100 shares withholds the marker. **A multiplier of 100
+ *  is not proof that it is**: an OCC adjustment after a reverse split can leave strike $5 and multiplier 100 while
+ *  the deliverable becomes 10 shares — exercise costs $500 and the stock must clear $50, so a "$5" line drawn
+ *  against a $6 stock states the opposite of the truth.
+ *
+ *  This payload does not carry the deliverable, so standard terms cannot be *verified* here, only contradicted. The
+ *  rule is conservative for that reason: every available signal must look ordinary, and anything missing or unusual
+ *  withholds the marker. The strike still appears in the row — it simply is not drawn as though comparable. */
+export function strikeNotComparable(instrument: OptionInstrument, underlying: string): string | null {
+  if (instrument.multiplier !== 100) return "a non-standard contract multiplier";
+  // The OCC convention: an adjustment opens a NEW chain whose symbol carries a numeric suffix — NVDA1, NVDA2 — so a
+  // trailing digit is the one signal this payload actually offers that the deliverable may not be 100 ordinary
+  // shares. A convention, not proof, which is why it withholds the marker rather than asserting anything.
+  //
+  // This previously compared `instrument.chainSymbol` against the underlying it was called with, which could never
+  // differ: a position row carries only `chain_symbol`, the grouping keys on it, and the same value came back in as
+  // the second argument. The guard was dead at every live call site and green in a unit test that passed the two
+  // apart by hand — the exact defect an integration test exists to catch.
+  if (/\d$/.test(instrument.chainSymbol)) return `${instrument.chainSymbol} is an adjusted chain, so its deliverable may not be 100 shares`;
+  if (instrument.chainSymbol && instrument.chainSymbol !== underlying) return `it trades in the ${instrument.chainSymbol} chain, not ${underlying}`;
+  if (instrument.underlyingType && instrument.underlyingType !== "equity") return `its underlying is ${instrument.underlyingType}, not an equity`;
+  return null;
+}
+
+export function normalizeOptionInstruments(raw: unknown): { instruments: OptionInstrument[]; skipped: number } {
+  const data = (raw as any)?.data;
+  const rows = Array.isArray(data?.instruments) ? data.instruments : Array.isArray(data?.results) ? data.results : null;
+  if (!rows) throw new Error("Option instruments unavailable");
+  const instruments: OptionInstrument[] = [];
+  let skipped = 0;
+  for (const row of rows) {
+    const optionId = typeof row?.id === "string" ? row.id : "";
+    const strike = positive(row?.strike_price);
+    const right = row?.type === "call" ? "call" : row?.type === "put" ? "put" : null;
+    // Strike and right are the whole reason for this call. A row without them identifies nothing, and a contract
+    // with no instrument is rendered from what its position already knows rather than from a guess.
+    if (!UUID.test(optionId) || strike === null || !right) { skipped++; continue; }
+    instruments.push({ optionId, strike, right,
+      chainSymbol: typeof row?.chain_symbol === "string" ? row.chain_symbol.trim().toUpperCase() : "",
+      multiplier: positive(row?.trade_value_multiplier),
+      underlyingType: typeof row?.underlying_type === "string" ? row.underlying_type.trim().toLowerCase() : "" });
+  }
+  return { instruments, skipped };
+}
+
+/** Identifying contracts is its own budget, not a share of the charting one.
+ *
+ *  Tying the two together was the central mistake in the first version of this slice: strike and call/put are basic
+ *  inventory fields, so a contract on the twenty-first underlying would have carried no strike even with a
+ *  perfectly working lookup — the founder's own complaint, one cap away. Nothing here truncates the positions
+ *  already read; a limit reached means some contracts are listed without their terms, and the page says which
+ *  limit it was. */
+export const MAX_INSTRUMENT_IDS = 200;
+export const INSTRUMENT_BATCH = 25;
+/** One underlying can carry hundreds of distinct strikes and expirations, so a per-underlying bound is no bound at
+ *  all on the calls: if the provider turns out not to parse a comma-separated list, every id falls back to its own
+ *  request. This caps that fallback rather than discovering the ceiling in production. */
+export const MAX_INSTRUMENT_RETRIES = 60;
+
+export interface InstrumentLookup {
+  found: Map<string, OptionInstrument>;
+  /** Asked for and not returned, after the individual retries. These are listed without their terms. */
+  missing: Set<string>;
+  /** Never asked about, because a budget ran out first. A different sentence from `missing`: one is the provider
+   *  declining to answer, the other is this report declining to ask. */
+  unasked: Set<string>;
+  /** A subset of `missing`: the provider DID send a row for these and it could not be read. Kept apart because
+   *  blaming the provider's silence for a shape Astra failed to parse points the reader at the wrong thing — and
+   *  because a rename on the provider's side lands here, where it can be noticed. */
+  unreadable: Set<string>;
+}
+
+/** Look contracts up by id, in batches, reconciling what came back against what was asked for.
+ *
+ *  **Reconcile by id, never by row count.** A response can hold the count steady while missing a requested contract
+ *  — a duplicate row, or an id neither asked for nor expected — and a count check would call that a complete answer.
+ *
+ *  Comma-separation is not proven: the only live evidence is `{ids: "a,a"}` returning one row, which is consistent
+ *  with the comma being parsed and equally with the whole string being treated as a single id that matched nothing.
+ *  The reconcile-and-retry shape is correct either way and self-heals if the provider changes. `cache` is carried
+ *  across accounts for the life of one report, because the same contract can be held in two of them, and it
+ *  remembers failures as well as successes so an unavailable contract is not paid for twice. */
+export async function readOptionInstruments(
+  broker: Pick<RobinhoodConnection, "read">,
+  ids: readonly string[],
+  cache: Map<string, OptionInstrument | null> = new Map(),
+): Promise<InstrumentLookup> {
+  const found = new Map<string, OptionInstrument>(), missing = new Set<string>(), unasked = new Set<string>();
+  const unreadable = new Set<string>();
+  const wanted: string[] = [];
+  for (const id of new Set(ids)) {
+    if (!cache.has(id)) { wanted.push(id); continue; }
+    const hit = cache.get(id)!;
+    if (hit) found.set(id, hit); else missing.add(id);
+  }
+  // Over budget: ask about as many as it allows and name the rest as unasked, rather than either dropping them
+  // silently or spending an unbounded number of calls on one report.
+  const ask = wanted.slice(0, MAX_INSTRUMENT_IDS);
+  for (const id of wanted.slice(MAX_INSTRUMENT_IDS)) unasked.add(id);
+
+  const outstanding: string[] = [];
+  for (let i = 0; i < ask.length; i += INSTRUMENT_BATCH) {
+    const batch = ask.slice(i, i + INSTRUMENT_BATCH);
+    try {
+      const { instruments } = normalizeOptionInstruments(await broker.read("get_option_instruments", { ids: batch.join(",") }));
+      const back = new Map(instruments.map(x => [x.optionId, x]));
+      for (const id of batch) {
+        const hit = back.get(id);
+        if (hit) { found.set(id, hit); cache.set(id, hit); } else outstanding.push(id);
+      }
+    } catch (error) {
+      // The boundary refusing this tool, or the connection reporting itself closed, is not a fact about any
+      // contract — it is a fact about the connection, and swallowing it would spend sixty more refused calls and
+      // then tell the reader the provider declined to identify their positions. The positions read rethrows these
+      // for exactly this reason; this read did not, which is how a misconfigured allowlist would have looked like
+      // Robinhood's fault on the page.
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      // Any other batch failure says nothing about the individual contracts in it — the retry pass decides that.
+      outstanding.push(...batch);
+    }
+  }
+
+  let retries = 0;
+  for (const id of outstanding) {
+    if (retries >= MAX_INSTRUMENT_RETRIES) { unasked.add(id); continue; }
+    retries++;
+    try {
+      const { instruments, skipped } = normalizeOptionInstruments(await broker.read("get_option_instruments", { ids: id }));
+      const hit = instruments.find(x => x.optionId === id);
+      if (hit) { found.set(id, hit); cache.set(id, hit); }
+      else {
+        // A row that came back and could not be read is not a row that never came. Both leave the contract without
+        // terms, but only one of them is the provider's silence, and the page says which.
+        if (skipped) unreadable.add(id);
+        missing.add(id); cache.set(id, null);
+      }
+    } catch (error) {
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      missing.add(id); cache.set(id, null);
+    }
+  }
+  return { found, missing, unasked, unreadable };
+}
+
+/** What a held contract is worth and what it has made, with the sign in the right places.
+ *
+ *  "Invert the P&L for a short" is not enough to build from, and was the instruction this replaced: the sign has to
+ *  reach the market VALUE too. A short's position is a liability — closing it costs money — so its market value is
+ *  negative. Correct P&L beside a positive short value still overstates the account by twice the premium.
+ *
+ *  With `q` the contract count, `m` the premium multiplier, `a` the average opening premium per quoted unit, `p` the
+ *  current mark, and `s` = +1 long / −1 short:
+ *
+ *      value = s·q·m·p        basis = s·q·m·a        gain = s·q·m·(p − a)
+ *
+ *  Four contracts opened at $6.20 and marked $7.85 at multiplier 100: the long is $3,140 and +$660; the short is
+ *  −$3,140 and −$660, against $2,480 of opening credit.
+ *
+ *  Returns null when the contract cannot be valued rather than valuing it wrongly — an unknown direction or
+ *  multiplier, or no mark. The contract is still listed; it simply carries no money figure. */
+export interface OptionValuation {
+  /** Signed. Negative for a short position, which is an obligation and not an asset. */
+  value: number;
+  /** Signed opening premium. Negative for a short: a credit received, not an amount paid. */
+  basis: number | null;
+  gain: number | null;
+  /** Gain as a percentage **of the opening premium** — which is neither return on collateral nor return on capital,
+   *  and must be labelled for what it is wherever it is shown. Divided by the ABSOLUTE basis: dividing a short's
+   *  gain by its negative signed basis reverses the sign and reports a profit as a loss. Null for a zero basis,
+   *  where a dollar gain is meaningful and a percentage is not. */
+  gainPctOfPremium: number | null;
+}
+export function valueOption(holding: OptionHolding, mark: number | null): OptionValuation | null {
+  const { direction, multiplier, contracts, averageCostPerShare: a } = holding;
+  if (holding.incomplete?.length || !direction || multiplier === null || mark === null) return null;
+  const sign = direction === "short" ? -1 : 1;
+  const units = contracts * multiplier;
+  const value = sign * units * mark;
+  if (a === null) return { value, basis: null, gain: null, gainPctOfPremium: null };
+  const basis = sign * units * a;
+  const gain = sign * units * (mark - a);
+  return { value, basis, gain, gainPctOfPremium: a === 0 ? null : gain / Math.abs(basis) * 100 };
+}
+
+/** A contract's current price, from `get_option_quotes`.
+ *
+ *  The provider returns a live `quote` and a settled `close` as two separate objects, which is the same distinction
+ *  the report already draws for shares — so an option's price carries the existing provenance discipline rather than
+ *  a parallel one. Both are kept; the renderer says which it is showing.
+ *
+ *  Rebuilt field by field like every other read, and that matters more here than usual: the payload also carries
+ *  `chance_of_profit_long` and `chance_of_profit_short`, the provider's estimate of whether a held position will make
+ *  money. That is a prediction about the user's own position wearing the clothes of a measurement, and this product
+ *  does not make it. It is not dropped at the renderer — it never enters a type, because a field that exists is a
+ *  field something eventually prints. The greeks are out of scope for the same reason: nothing needs them yet. */
+export interface OptionMark {
+  optionId: string;
+  /** The mark, and when the quote behind it was taken. */
+  mark: number | null;
+  markAt: string | null;
+  /** The last settled close and its session. Null when the provider flagged the row `interpolated` — a padded bar is
+   *  not a close, exactly as in the daily bars, where trusting one discarded six years of real history. */
+  close: number | null;
+  closeDate: string | null;
+}
+
+export function normalizeOptionQuotes(raw: unknown): { marks: Map<string, OptionMark>; skipped: number } {
+  const rows = Array.isArray((raw as any)?.data?.results) ? (raw as any).data.results : null;
+  if (!rows) throw new Error("Option quotes unavailable");
+  const marks = new Map<string, OptionMark>();
+  let skipped = 0;
+  for (const row of rows) {
+    const quote = row?.quote, close = row?.close;
+    // Either object can carry the id, and a row is useless without one: the server returns rows positionally and
+    // does not deduplicate, so position is not an identity and the id is the only thing to key on.
+    const optionId = typeof quote?.instrument_id === "string" ? quote.instrument_id
+      : typeof close?.instrument_id === "string" ? close.instrument_id : "";
+    if (!UUID.test(optionId)) { skipped++; continue; }
+    // Only an explicit `false` is trusted. An absent or non-boolean flag is not evidence the bar is real, and a
+    // padded bar reaching a money column is the failure that once discarded six years of history.
+    const settled = close?.interpolated === false ? positive(close?.price) : null;
+    // A price travels with the session it came from, or it does not travel. Keeping a number whose timestamp could
+    // not be read would render a bare figure in a column whose entire discipline is saying which session it is —
+    // and a reader cannot tell a stale mark from a live one without it.
+    const markAt = typeof quote?.updated_at === "string" ? quote.updated_at : null;
+    const closeDate = typeof close?.date === "string" && isDate(close.date) ? close.date : null;
+    marks.set(optionId, {
+      optionId,
+      mark: markAt === null ? null : positive(quote?.mark_price),
+      markAt,
+      close: closeDate === null ? null : settled,
+      // Both directions. A date with no price behind it misleads as much as a price with no date — it implies a
+      // close was read on that session when the row was padded or unreadable.
+      closeDate: closeDate === null || settled === null ? null : closeDate,
+    });
+  }
+  return { marks, skipped };
+}
+
+/** Marks for a set of contracts. Same reconcile-by-id discipline as the instrument lookup, and the same reason: a
+ *  response can come back the right length and still be missing what was asked for.
+ *
+ *  Deduped before sending, because the server does NOT deduplicate — asking for one id twice returned two rows, so a
+ *  duplicate in the batch spends a slot in the budget and buys nothing. A contract with no mark is not an error; it
+ *  is a contract shown with its cost and quantity and no value, which is better than a value inferred from cost. */
+export const QUOTE_BATCH = 20;
+/** Its own cap, not the instrument lookup's borrowed. They bound different reads for different reasons, and one
+ *  constant serving both hides that a change to either is a change to the other. */
+export const MAX_QUOTE_IDS = 200;
+export async function readOptionMarks(
+  broker: Pick<RobinhoodConnection, "read">,
+  ids: readonly string[],
+  cache: Map<string, OptionMark | null> = new Map(),
+): Promise<{ marks: Map<string, OptionMark>; unpriced: Set<string>; unasked: Set<string> }> {
+  const marks = new Map<string, OptionMark>(), unpriced = new Set<string>(), unasked = new Set<string>();
+  // Carried across accounts like the instrument cache, and for a sharper reason: the same contract held in two
+  // accounts quoted twice can come back at two different marks with two different timestamps, and the page would
+  // show one contract at two prices. It is also what makes the cap below per-REPORT rather than per-account.
+  const fresh: string[] = [];
+  for (const id of new Set(ids)) {
+    if (!cache.has(id)) { fresh.push(id); continue; }
+    const hit = cache.get(id)!;
+    if (hit) marks.set(id, hit); else unpriced.add(id);
+  }
+  const wanted = fresh.slice(0, MAX_QUOTE_IDS);
+  // Declining to ask is not the provider declining to answer. Collapsing the two told a reader their broker had no
+  // price for a contract this report never asked about — the distinction the instruments path already draws.
+  for (const id of fresh.slice(MAX_QUOTE_IDS)) unasked.add(id);
+  for (let i = 0; i < wanted.length; i += QUOTE_BATCH) {
+    const batch = wanted.slice(i, i + QUOTE_BATCH);
+    try {
+      const { marks: back } = normalizeOptionQuotes(await broker.read("get_option_quotes", { instrument_ids: batch }));
+      for (const id of batch) {
+        const hit = back.get(id);
+        if (hit) { marks.set(id, hit); cache.set(id, hit); } else { unpriced.add(id); cache.set(id, null); }
+      }
+    } catch (error) {
+      // The boundary refusing this tool is a fact about the connection, not about any contract — the same reason
+      // the positions and instruments reads rethrow it rather than blaming the provider on the page.
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      // Not cached: a batch that failed says nothing durable about its contracts, and caching the failure would
+      // deny them a second chance in the next account that holds them.
+      for (const id of batch) unpriced.add(id);
+    }
+  }
+  return { marks, unpriced, unasked };
 }

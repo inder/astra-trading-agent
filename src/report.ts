@@ -7,12 +7,43 @@
 // Nothing here reads anything. It is handed positions and levels that were already computed, and turns them into a
 // page — so adding a column or a second chart later changes this file and nothing about how an account is read.
 import { createHash } from "node:crypto";
-import type { Holding, AccountTotals } from "./portfolio.ts";
+import type { Holding, AccountTotals, OptionValuation } from "./portfolio.ts";
 import type { Levels, Zone, Frame, Gap, TrendLine } from "./levels.ts";
 
 export interface Point { time: string; value: number }
+/** One held contract, as the page shows it. The terms — strike and right — are absent when the instrument lookup
+ *  could not supply them; the row still renders from what the position knows, because a contract that carries value
+ *  must never be dropped for want of a label. */
+export interface ReportContract {
+  expiry: string;
+  contracts: number;
+  direction: "long" | "short" | null;
+  right: "call" | "put" | null;
+  strike: number | null;
+  multiplier: number | null;
+  /** Premium per quoted unit, as opened. */
+  averageCostPerShare: number | null;
+  /** The current price, and when it was taken. A contract's price and its underlying's last trade are two different
+   *  clocks, and the page says both rather than implying one time for the row. */
+  mark: number | null;
+  markAt: string | null;
+  /** Which number `mark` is: the provider's live mark, or the last settled close. They are different facts and a
+   *  contract priced from Friday's close beside one priced this morning must not read as the same kind of number. */
+  markSource?: "mark" | "close" | null;
+  value: OptionValuation | null;
+  /** Why this row carries no terms, or no value, when it does not. */
+  note?: string;
+  /** Why this contract's strike is not drawn on the chart, when it is not. */
+  strikeNotDrawn?: string;
+}
+
+/** One **underlying** and everything held in it: the share position if there is one, the contracts if there are any,
+ *  and the levels they are all read against. A group may have no shares at all — one of the founder's accounts holds
+ *  only options — which is why `holding` is optional and `symbol` is not. */
 export interface ReportHolding {
-  holding: Holding;
+  symbol: string;
+  holding?: Holding;
+  contracts?: ReportContract[];
   /** Absent when the stock's history could not be read; the row still appears, saying so. */
   levels?: Levels;
   /** Closes, oldest first, for every frame to be drawn from: the daily series, and the weekly one when a weekly
@@ -32,8 +63,11 @@ export interface ReportAccount {
    *  read that failed, a grant without the tool, and a read that returned rows every one of which was unreadable.
    *  The last is the one that matters — the normalizer is keyed field by field to a payload shape, and a provider
    *  that renames a field does not error, it drops every row. A count would then say "no options" to someone who
-   *  holds options, with nothing on the page to notice it by. */
-  options?: { count: number; skipped: number; truncated: boolean } | "unreadable";
+   *  holds options, with nothing on the page to notice it by.
+   *
+   *  `count` is contracts; `positions` is the rows they arrived in. Both are needed because they answer different
+   *  questions and a single number has been read as the wrong one: four contracts in one row is not one contract. */
+  options?: { count: number; positions: number; skipped: number; truncated: boolean } | "unreadable";
 }
 export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
 
@@ -73,17 +107,25 @@ function priceNote(levels: Levels, short = false): string {
  *  count that stopped early, and a count with rows it could not parse. */
 function optionNote(options: NonNullable<ReportAccount["options"]>, value: number): string {
   if (options === "unreadable") return "the contracts behind it could not be read";
-  const { count, skipped, truncated } = options;
+  const { count, positions, skipped, truncated } = options;
   if (!count && skipped) return `none of its ${skipped} contract row${skipped === 1 ? "" : "s"} could be read`;
-  // No rows at all, nothing dropped, and yet the account is worth something in options: the provider is disagreeing
-  // with itself, and "0 open contracts" would take one side of that and state it as fact. This is also the shape an
+  // No rows at all, nothing dropped, and yet the account reports an options figure: the provider is disagreeing with
+  // itself, and "0 open contracts" would take one side of that and state it as fact. This is also the shape an
   // unanticipated payload wrapper produces — rows arriving somewhere the reader does not look — so it is the one
   // remaining way a drift could be reported as a number rather than as a doubt.
-  if (!count && value > 0) return "no contract rows came back for it";
+  //
+  // Tested on the figure being non-zero rather than positive. A short book's options value is NEGATIVE, so `> 0`
+  // sent exactly the account most likely to be misread — one carrying written contracts — down the path that says
+  // nothing at all. And zero is not proof of an empty book either: a long and a short that offset report zero while
+  // two contracts stand open. So the sentence below hedges on the figure, and the count governs.
+  if (!count && Math.abs(value) >= 0.5) return "no contract rows came back for it";
   const contracts = `${count}${truncated ? "+" : ""} open contract${count === 1 && !truncated ? "" : "s"}`;
-  if (truncated) return `${contracts}, more than one report can page through`;
-  if (skipped) return `${contracts}, and ${skipped} row${skipped === 1 ? "" : "s"} that could not be read`;
-  return contracts;
+  // Rows only where they differ from contracts. "4 open contracts across 1 position" earns its words; "across 4
+  // positions" beside 4 contracts is noise.
+  const across = positions && positions !== count ? `${contracts} across ${positions} position${positions === 1 ? "" : "s"}` : contracts;
+  if (truncated) return `${across}, more than one report can page through`;
+  if (skipped) return `${across}, and ${skipped} row${skipped === 1 ? "" : "s"} that could not be read`;
+  return across;
 }
 
 /** The frame a report row is drawn from: the one the levels engine chose, which is the longest daily window with
@@ -111,7 +153,9 @@ function atrsAway(frame: Frame | undefined, price: number): number {
 /** A chart with room to read it: price, the zones as labelled bands, unfilled gaps, the trend line, and a price
  *  scale. Drawn at a fixed viewBox and scaled by CSS, so it is equally legible on screen and on paper. */
 const W = 960, H = 380, PAD_B = 22, PAD_T = 26;
-function chart(points: Point[], frame: Frame, price: number, label: string, cost: number | null, priceLabel: string): string {
+interface StrikeMark { value: number; label: string }
+function chart(points: Point[], frame: Frame, price: number, label: string, cost: number | null, priceLabel: string,
+               strikes: StrikeMark[] = []): string {
   if (points.length < 2) return `<p class="note">Not enough history to draw ${escape(label)}.</p>`;
   const values = points.map(p => p.value);
   // Only the nearest zones are drawn. Twenty bands is not a chart, it is a wall — the rest are in get_levels.
@@ -121,11 +165,21 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   // Room for the longest label there will actually be, rather than a guess that the text then overflows.
   const width = (text: string) => text.length * 6.2 + 12;
   const PAD_R = Math.round(Math.min(260, Math.max(96, ...zones.map(z => width(`${money(z.lo)}–${z.hi.toFixed(2)} ${z.tests} held`)),
-    width(`${money(price)} ${priceLabel}`), ...(cost ? [width(`${money(cost)} your cost (off scale)`)] : []))));
+    width(`${money(price)} ${priceLabel}`), ...strikes.map(s => width(`${s.label} (off scale)`)),
+    ...(cost ? [width(`${money(cost)} your cost (off scale)`)] : []))));
   const plot = W - PAD_R, plotH = H - PAD_B - PAD_T;
-  const marks = [price, ...(cost ? [cost] : [])];
-  const lo = Math.min(...values, ...zones.map(z => z.lo), ...gaps.map(g => g.lo), ...marks);
-  const hi = Math.max(...values, ...zones.map(z => z.hi), ...gaps.map(g => g.hi), ...marks);
+  // The price history is what the chart is FOR. A share cost or a held strike far outside it stretches the axis
+  // until the series itself is a flat line at one edge — a $310 cost against a $130 market price, or a strike bought
+  // far out of the money. So a mark joins the domain only when it is near the data that is being drawn, and
+  // otherwise is drawn clamped to the edge and labelled as off scale. The current price always joins it: a chart
+  // that does not reach today's price is not a chart of this holding.
+  const dataLo = Math.min(...values, ...zones.map(z => z.lo), ...gaps.map(g => g.lo));
+  const dataHi = Math.max(...values, ...zones.map(z => z.hi), ...gaps.map(g => g.hi));
+  const slack = (dataHi - dataLo) * 0.25 || 1;
+  const near = (v: number) => v >= dataLo - slack && v <= dataHi + slack;
+  const marks = [price, ...[...(cost === null ? [] : [cost]), ...strikes.map(s => s.value)].filter(near)];
+  const lo = Math.min(dataLo, ...marks);
+  const hi = Math.max(dataHi, ...marks);
   const pad = (hi - lo) * 0.06 || 1;
   const top = hi + pad, bottom = Math.max(0, lo - pad), span = top - bottom || 1;
   const x = (i: number) => (i / (points.length - 1)) * plot;
@@ -134,13 +188,24 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
 
   // Labels are placed top to bottom and pushed apart when they would overlap, so two zones a few cents apart are
   // still both readable rather than printed on top of one another.
+  const MIN_Y = PAD_T, MAX_Y = H - 4, APART = 13;
   const placed: number[] = [];
+  const collisions = (y: number) => placed.filter(taken => Math.abs(y - taken) < APART);
   const freeY = (want: number) => {
-    let y = Math.min(H - 4, Math.max(PAD_T, want));
+    const start = Math.min(MAX_Y, Math.max(MIN_Y, want));
+    let y = start;
     // Re-check after each nudge: moving clear of one label can move onto the next.
-    for (let guard = 0; guard < 40 && placed.some(taken => Math.abs(y - taken) < 13); guard++) {
-      y = Math.max(...placed.filter(taken => Math.abs(y - taken) < 13)) + 13;
+    for (let guard = 0; guard < 40 && collisions(y).length; guard++) y = Math.max(...collisions(y)) + APART;
+    // Nudging ran out of chart. The clamp above bounds where the search STARTS; every nudge since has moved down
+    // without a bound, which is how labels came to be written below the viewBox — where they are not clipped or
+    // warned about, simply not drawn. Search upward from where the label was wanted instead.
+    if (y > MAX_Y) {
+      y = start;
+      for (let guard = 0; guard < 40 && collisions(y).length; guard++) y = Math.min(...collisions(y)) - APART;
     }
+    // Both directions full. A label overlapping another inside the chart is hard to read; one outside it is
+    // invisible, and takes its band's price with it. Prefer the overlap.
+    y = Math.min(MAX_Y, Math.max(MIN_Y, y));
     placed.push(y);
     return y;
   };
@@ -181,6 +246,14 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   <path class="line" d="${points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(p.value).toFixed(1)}`).join(" ")}"/>
   ${cost ? `<line class="cost" x1="0" y1="${at(cost).toFixed(1)}" x2="${plot}" y2="${at(cost).toFixed(1)}"/>
   <text class="costlabel" x="${plot + 6}" y="${costY.toFixed(1)}">${money(cost)} your cost${cost < bottom || cost > top ? " (off scale)" : ""}</text>` : ""}
+  ${strikes.map(s => {
+    // Drawn against the UNDERLYING's price axis, which is the only axis here. A strike is not a breakeven and is
+    // never labelled as one — a $130 call bought at $6.20 breaks even at $136.20, and nothing on this chart says
+    // otherwise because nothing on it mentions breakeven at all.
+    const sy = at(s.value);
+    return `<g class="strike"><line x1="0" y1="${sy.toFixed(1)}" x2="${plot}" y2="${sy.toFixed(1)}"/>` +
+      `<text x="${plot + 6}" y="${freeY(sy + 3.5).toFixed(1)}">${escape(s.label)}${s.value < bottom || s.value > top ? " (off scale)" : ""}</text></g>`;
+  }).join("\n  ")}
   <line class="now" x1="0" y1="${at(price).toFixed(1)}" x2="${plot}" y2="${at(price).toFixed(1)}"/>
   <text class="nowlabel" x="${plot + 6}" y="${priceY.toFixed(1)}">${money(price)} ${escape(priceLabel)}</text>
   ${dates.map((i, n) => `<text class="date" x="${Math.min(plot - 30, Math.max(2, x(i))).toFixed(1)}" y="${H - 6}" text-anchor="${n === 0 ? "start" : n === 1 ? "middle" : "end"}">${escape(day(points[i]!.time))}</text>`).join("\n  ")}
@@ -189,38 +262,137 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
 
 /** The expandable technicals for one holding: every timeframe the engine computed, as tabs. `details` and radio
  *  inputs, so there is no script — the page prints, and whatever is left open prints open. */
-function technicals(symbol: string, levels: Levels, series: { daily: Point[]; weekly?: Point[] }, cost: number | null, id: string): string {
+function technicals(symbol: string, levels: Levels, series: { daily: Point[]; weekly?: Point[] }, cost: number | null,
+                    id: string, contracts: ReportContract[] = []): string {
   const frames = levels.frames;
+  // One marker per DISTINCT strike, carrying the contracts it covers. Several expirations, and calls and puts, can
+  // share a strike — drawing each separately stacks identical lines, and a label reading only "$130" would not say
+  // which of them it belongs to. A strike whose terms are not comparable to the share price is deliberately absent:
+  // its row says the strike and says why it is not drawn.
+  const byStrike = new Map<number, string[]>();
+  for (const c of contracts) {
+    if (c.strike === null || c.strikeNotDrawn) continue;
+    const held = byStrike.get(c.strike) ?? [];
+    held.push(`${c.contracts}× ${expiryDay(c.expiry)}${c.right ? ` ${c.right}` : ""}${c.direction ? ` ${c.direction}` : ""}`);
+    byStrike.set(c.strike, held);
+  }
+  const strikes = [...byStrike].map(([value, held]) => ({ value, label: `${money(value)} strike · ${held.join(", ")}` }));
   const pane = (frame: Frame) => {
     if (frame.unavailable) return `<div class="pane"><p class="note">${escape(frame.unavailable)}</p></div>`;
     const source = frame.bar === "week" ? series.weekly ?? [] : series.daily;
     const from = Math.max(0, source.findIndex(p => p.time >= frame.start));
     const bar = frame.bar === "week" ? "week" : "day";
-    return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost, priceNote(levels, true))}
-      <p class="legend">${frame.sinceListing ? `<strong>Short window: this holds ${frame.sessions} ${bar}${frame.sessions === 1 ? "" : "s"} of trading, because ${escape(symbol)} was listed inside it${source[from] ? ` and its history starts ${escape(day(source[from]!.time))}` : ""}.</strong> ` : ""}Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s traded into it without closing through. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
+    return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost, priceNote(levels, true), strikes)}
+      <p class="legend">${frame.sinceListing ? `<strong>Short window: this holds ${frame.sessions} ${bar}${frame.sessions === 1 ? "" : "s"} of trading${source[from] ? `, because the history available for ${escape(symbol)} starts ${escape(day(source[from]!.time))}` : ""} — later than this window opens, so it is not a full one.</strong> ` : ""}Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s reached it — trading into it, or within a small tolerance of it — without closing through. Consecutive ${bar}s each count, and the count is taken over the same bars the zone was built from, so it is a record of this window, not a score. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
   };
   const selected = Math.max(0, frames.findIndex(x => x.timeframe === levels.defaultTimeframe));
-  return `<details class="technicals"><summary>Technicals — price, cost and levels<span class="chev" aria-hidden="true"></span></summary>
+  // The axis is the UNDERLYING's price. An option premium never goes on it, so the label says whose price this is —
+  // "price, cost and levels" was ambiguous the moment a group had no shares to cost.
+  const heading = `Underlying price, levels${cost === null ? "" : ", your share cost"}${strikes.length ? " and held strikes" : ""}`;
+  return `<details class="technicals"><summary>${escape(heading)}<span class="chev" aria-hidden="true"></span></summary>
   <div class="tabs">
     ${frames.map((f, i) => `<input type="radio" name="tf-${id}" id="tf-${id}-${i}"${i === selected ? " checked" : ""}><label for="tf-${id}-${i}">${escape(f.label)}</label>`).join("\n    ")}
     <div class="panes">${frames.map(pane).join("\n")}</div>
   </div></details>`;
 }
 
+/** How a contract is named in a row: everything that identifies it, in the order it is spoken. An unidentified
+ *  contract still gets a name from what the position knows — never a strike of 0 and never a blank. */
+function contractName(c: ReportContract, symbol: string): string {
+  const terms = c.strike !== null && c.right ? `${money(c.strike)} ${c.right}` : "contract";
+  const side = c.direction ?? "";
+  return `${symbol} ${expiryDay(c.expiry)} ${terms}${side ? ` · ${side}` : ""}`;
+}
+/** An expiry as a reader says it. Full date, not a shorthand: two contracts a year apart must not read alike. */
+function expiryDay(expiry: string): string {
+  const parsed = new Date(`${expiry}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime()) ? expiry
+    : parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+/** One contract, beneath its underlying.
+ *
+ *  The last two columns are the underlying's levels and belong to the group's own row, so a contract spans them with
+ *  the one relationship that IS the contract's: where its strike sits against the stock. A strike is not a breakeven
+ *  and is never described as one. */
+function contractRow(c: ReportContract, symbol: string, price: number | null): string {
+  const v = c.value;
+  // The premium column is per quoted unit, like the stock's cost per share — the contract's own multiplier is named
+  // only when it is not the standard 100, where a reader would otherwise multiply by the wrong number.
+  const multiplier = c.multiplier !== null && c.multiplier !== 100 ? `<span class="dist">×${c.multiplier} per contract</span>` : "";
+  // A magnitude with a direction in words, so no signed percentage ever sits in front of "below" — which reads as a
+  // contradiction and, worse, as a number whose sign means something it does not.
+  //
+  // The reason is shown whenever there is one, not only when the strike is missing. A contract whose terms were
+  // found but whose direction could not be read shows a dash in three money columns, and a dash with no sentence
+  // beside it is the shape this report treats as a defect everywhere else.
+  const placed = c.strike !== null && price !== null && price !== 0
+    ? `strike ${money(c.strike)} is ${(Math.abs((c.strike - price) / price) * 100).toFixed(1)}% ${c.strike >= price ? "above" : "below"} the price`
+      + (c.strikeNotDrawn ? ` · not drawn: ${escape(c.strikeNotDrawn)}` : "")
+    : c.strike !== null ? `strike ${money(c.strike)}` : "";
+  const strikeNote = [placed, c.note ? escape(c.note) : ""].filter(Boolean).join(" · ")
+    || escape("contract details unavailable");
+  return `<tr class="contract">
+    <th scope="row">${escape(contractName(c, symbol))}</th>
+    <td class="num">${c.contracts.toLocaleString("en-US")}${multiplier}</td>
+    <td class="num">${money(c.averageCostPerShare)}</td>
+    <td class="num">${c.mark === null ? "—" : money(c.mark)}${
+      c.mark === null || !c.markAt ? "" : `<span class="dist">${escape(
+        c.markSource === "close" ? `close ${day(c.markAt)}` : `mark ${easternTime(c.markAt)} ET`)}</span>`}</td>
+    <td class="num">${v ? money(v.value, 0) : "—"}</td>
+    <td class="num ${v?.gain == null ? "" : v.gain < 0 ? "down" : "up"}">${v?.gain === null || v === null ? "—" : money(v.gain, 0)}${
+      v?.gainPctOfPremium == null ? "" : `<span class="dist">${percent(v.gainPctOfPremium)} of premium</span>`}</td>
+    <td class="level" colspan="2">${strikeNote}</td>
+  </tr>`;
+}
+
 function row(entry: ReportHolding, id: string): string {
-  const { holding, levels, series = { daily: [] }, unavailable } = entry;
-  const symbol = escape(holding.symbol);
+  const { symbol: raw, holding, levels, series = { daily: [] }, unavailable, contracts = [] } = entry;
+  const symbol = escape(raw);
   if (!levels || unavailable) {
-    return `<tr class="holding"><th scope="row">${symbol}</th>
-      <td class="num">${holding.shares.toLocaleString("en-US")}</td>
-      <td class="num">${money(holding.averageCost)}</td>
-      <td class="num" colspan="5">${escape(unavailable ?? "no price history")}</td></tr>`;
+    // No levels for the underlying. The contracts are still held and are still listed — the stock's price history is
+    // what could not be read, not the account's positions.
+    return `<tr class="holding${holding ? "" : " optionsonly"}"><th scope="row">${symbol}</th>
+      <td class="num">${holding ? holding.shares.toLocaleString("en-US") : `<span class="dist">no shares</span>`}</td>
+      <td class="num">${money(holding?.averageCost ?? null)}</td>
+      <td class="num" colspan="5">${escape(unavailable ?? "no price history")}</td></tr>
+      ${contracts.map(c => contractRow(c, raw, null)).join("\n")}`;
   }
   const frame = shown(levels), price = levels.price;
-  const value = holding.shares * price;
-  const cost = holding.averageCost === null ? null : holding.averageCost * holding.shares;
-  const gain = cost === null ? null : value - cost;
-  const gainPct = cost === null || cost === 0 ? null : (gain! / cost) * 100;
+  // The group's money is the share position plus EVERY contract, signed. A short leg subtracts, which is the only way
+  // the column can be added up — and two legs that offset net to nothing without either disappearing from the rows.
+  //
+  // "Every" is load-bearing, and getting it wrong is this project's oldest defect wearing new clothes. Summing only
+  // the contracts that could be valued makes an empty list total zero, so a group of shares plus three contracts
+  // nobody could price would print the share figure alone — identical on the page to a group whose contracts are
+  // worth nothing, and short by however much they are actually worth. That is exactly how `overview()` once reported
+  // a portfolio short by a whole account, by treating a null total as a zero. A total covers all of its parts or it
+  // is unknown, so one unvaluable contract makes the group's figure null and the row says so.
+  const shareValue = holding ? holding.shares * price : null;
+  const shareCost = holding?.averageCost == null ? null : holding.averageCost * holding.shares;
+  const valued = contracts.filter(c => c.value);
+  const allValued = valued.length === contracts.length;
+  const optionValue = allValued ? valued.reduce((n, c) => n + c.value!.value, 0) : null;
+  const optionGain = allValued && valued.every(c => c.value!.gain !== null)
+    ? valued.reduce((n, c) => n + c.value!.gain!, 0) : null;
+  const value = optionValue === null ? null : shareValue === null && !contracts.length ? null : (shareValue ?? 0) + optionValue;
+  const shareGain = shareCost === null || shareValue === null ? null : shareValue - shareCost;
+  const gain = contracts.length === 0 ? shareGain
+    : optionGain === null || (holding && shareGain === null) ? null : (shareGain ?? 0) + optionGain;
+  // A percentage only where one denominator covers the whole figure. Premium and share cost are different
+  // denominators, so a mixed group's percentage would be a number with no meaning behind it.
+  const gainPct = contracts.length || shareCost === null || shareCost === 0 || shareGain === null
+    ? null : (shareGain / shareCost) * 100;
+  // Why the total above is a dash, on the line the dash is on. Each contract already says why IT has no value, but
+  // a reader looking at the group's figure should not have to infer the cause from the rows beneath it.
+  // Two different causes, and one word covered both: a contract with no price at all, and one priced but not
+  // valuable because a field it needs could not be read. The row beneath says which; the group note should not
+  // guess.
+  const unvalued = contracts.filter(c => !c.value);
+  const unpriced = unvalued.filter(c => c.mark === null).length;
+  const why = unpriced === unvalued.length ? "not priced" : unpriced === 0 ? "not valued" : "not priced or valued";
+  const unpricedNote = value !== null || !unvalued.length ? ""
+    : `<span class="dist">${unvalued.length} of ${contracts.length} contract${contracts.length === 1 ? "" : "s"} ${why}</span>`;
   const { support, resistance, toSupport, toResistance } = nearest(frame, price);
   const away = atrsAway(frame, price);
   const near = away <= 1;
@@ -228,22 +400,28 @@ function row(entry: ReportHolding, id: string): string {
   const zone = (z: Zone | undefined, distance: number | null) => z
     ? `<span class="zone">${money(z.lo)}–${z.hi.toFixed(2)}</span><span class="dist">${percent(distance)} · held ${z.tests}</span>`
     : "—";
-  return `<tr class="holding${near ? " near" : ""}">
+  // With no shares there is no cell for the underlying's own price, and a contract's Price column is its PREMIUM —
+  // putting the stock price there would be a category error. So the group's row carries the stock's price, its
+  // provenance and its levels, and says plainly that no shares are held rather than showing a dash for a quantity.
+  const shares = holding ? holding.shares.toLocaleString("en-US") : `<span class="dist">no shares</span>`;
+  return `<tr class="holding${near ? " near" : ""}${holding ? "" : " optionsonly"}">
     <th scope="row">${symbol}${near ? `<span class="flag" title="Within one average daily range of this level">near ${side}</span>` : ""}</th>
-    <td class="num">${holding.shares.toLocaleString("en-US")}</td>
-    <td class="num">${money(holding.averageCost)}</td>
+    <td class="num">${shares}</td>
+    <td class="num">${money(holding?.averageCost ?? null)}</td>
     <td class="num">${money(price)}<span class="dist">${escape(priceNote(levels))}</span></td>
-    <td class="num">${money(value, 0)}</td>
-    <td class="num ${gain !== null && gain < 0 ? "down" : "up"}">${money(gain, 0)}<span class="dist">${percent(gainPct)}</span></td>
+    <td class="num">${money(value, 0)}${unpricedNote}</td>
+    <td class="num ${gain === null ? "" : gain < 0 ? "down" : "up"}">${money(gain, 0)}${
+      gainPct === null ? "" : `<span class="dist">${percent(gainPct)}</span>`}</td>
     <td class="level">${zone(support, toSupport)}</td>
     <td class="level">${zone(resistance, toResistance)}</td>
   </tr>
+  ${contracts.map(c => contractRow(c, raw, price)).join("\n")}
   <tr class="expand"><td colspan="8">${
     // Beside the row, not inside the disclosure. A caveat folded into a collapsed section is not shown to anyone
     // reading the table, and print drops unopened sections entirely — so it would be absent from exactly the copy
     // someone keeps. The numbers it qualifies are on the line above it.
     levels.warnings.length ? `<p class="note">${levels.warnings.map(w => escape(w)).join(" ")}</p>` : ""
-  }${technicals(holding.symbol, levels, series, holding.averageCost, id)}</td></tr>`;
+  }${technicals(raw, levels, series, holding?.averageCost ?? null, id, contracts)}</td></tr>`;
 }
 
 function account(a: ReportAccount, scope: number): string {
@@ -257,7 +435,7 @@ function account(a: ReportAccount, scope: number): string {
     return Number.isFinite(away) ? away : Number.MAX_SAFE_INTEGER;
   };
   const rows = [...a.holdings].sort((x, y) =>
-    distance(x) - distance(y) || x.holding.symbol.localeCompare(y.holding.symbol));
+    distance(x) - distance(y) || x.symbol.localeCompare(y.symbol));
   const unpriced = rows.filter(r => !r.levels).length;
   const value = a.totals.value;
   // What the account value holds that this header has not named. The classes come from a frozen list, so anything
@@ -273,24 +451,50 @@ function account(a: ReportAccount, scope: number): string {
   if (a.truncated) notes.push("This account has more holdings than one report can page through; the rest are not shown.");
   // The header now names every class Robinhood reports a value for, so the gap can be named rather than lumped.
   // The table lists stocks; anything else the account holds is stated above it and said here in words.
-  const others = a.totals.byClass.filter(c => c.label !== "Stocks");
-  if (others.length) {
+  // What the table actually holds now, which decides everything this note may claim. Contracts are listed, so the
+  // options class must not be named among the things that are NOT listed — the note said so while they sat on the
+  // rows beneath it.
+  const listed = rows.some(r => r.contracts?.length);
+  const shares = rows.some(r => r.holding);
+  const others = a.totals.byClass.filter(c => c.label !== "Stocks" && !(listed && c.label === "Options"));
+  const contents = shares && listed ? "this account's stocks and option contracts"
+    : listed ? "this account's option contracts" : "this account's stocks";
+  if (others.length || listed) {
     // A colon list rather than a sentence: "options" is plural and "crypto" is not, so any is/are agreement is wrong
-    // for one of them. And an account can hold no stocks at all — one of the founder's does — where a note opening
-    // "the table below lists this account's stocks" describes an empty table.
-    // The options line says what is known about the contracts behind it — including when that is nothing, and
-    // including when some rows could not be read. A number with no qualifier is a claim; these say which claim.
+    // for one of them. The options entry, where it still appears, says what is known about the contracts behind the
+    // figure — a number with no qualifier is a claim; these say which claim.
     const named = others.map(c => c.label === "Options" && a.options !== undefined
       ? `options (${money(c.value, 0)}, ${optionNote(a.options, c.value)})`
       : `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
+    const elsewhere = named ? ` Also counted in the account value above, but not listed here: ${named}.` : "";
+    // With no rows there is no table below — it is suppressed, not empty — so a sentence pointing at one sends the
+    // reader looking for something that is not on the page. And an empty list is not evidence of an empty account:
+    // it is also what every row failing to parse produces, which is why the wording turns on `a.skipped` rather than
+    // claiming from absence. Saying "holds no stocks" in the same paragraph that says holdings were dropped states
+    // two different things as one fact.
     notes.push(rows.length
-      ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
-      : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);
+      ? `The table below lists ${contents}.${elsewhere}`
+      : a.skipped || a.truncated
+        ? `No positions could be read for this account, so none are listed.${named ? ` Counted in the account value above: ${named}.` : ""}`
+        : `This account holds no stocks.${named ? ` Counted in the account value above, but not listed here: ${named}.` : ""}`);
+  }
+  // Listing the contracts took the options class out of `others`, and with it the only sentence that ever said the
+  // contract read stopped early or dropped rows. The reader then sees N rows and takes them for the whole book —
+  // which is worse than the count this note replaced, because rows look complete in a way a number does not.
+  if (listed && typeof a.options === "object") {
+    const { count, positions, skipped: dropped, truncated: more } = a.options;
+    if (more) notes.push(`This account holds more contracts than one report can page through; beyond the ${count} listed below, the rest are not shown.`);
+    if (dropped) notes.push(`${dropped} contract row${dropped === 1 ? "" : "s"} could not be read and ${dropped === 1 ? "is" : "are"} not listed — the ${count} below ${count === 1 ? "is" : "are"} what could be.`);
   }
   // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
   // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.
   // Saying the total excludes them would misstate a money figure.
-  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? "" : "s"} below could not be priced, so ${unpriced === 1 ? "it shows" : "they show"} no value, gain or levels — ${unpriced === 1 ? "it is" : "they are"} still counted in the figures above.`);
+  // Two different facts, and one sentence used to cover both: a holding this report chose not to chart, and one
+  // whose history could not be read. Blaming a price read that was never attempted sends a reader to the broker.
+  const uncharted = rows.filter(r => !r.levels && r.unavailable?.startsWith("not charted")).length;
+  const unreadable = unpriced - uncharted;
+  if (uncharted) notes.push(`${uncharted} holding${uncharted === 1 ? "" : "s"} below ${uncharted === 1 ? "is" : "are"} not charted by this report, so ${uncharted === 1 ? "it shows" : "they show"} no value, gain or levels — ${uncharted === 1 ? "it is" : "they are"} still counted in the figures above.`);
+  if (unreadable) notes.push(`${unreadable} holding${unreadable === 1 ? "" : "s"} below could not be priced, so ${unreadable === 1 ? "it shows" : "they show"} no value, gain or levels — ${unreadable === 1 ? "it is" : "they are"} still counted in the figures above.`);
   return `<section class="account">
   <header>
     <h2>${escape(a.label)}</h2>
@@ -319,29 +523,40 @@ export interface PortfolioOverview {
   accounts: { label: string; value: number | null; holdings: number; byClass: { label: string; value: number }[] }[];
   totalValue: number | null;
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];
-  best: { symbol: string; gainPct: number }[]; worst: { symbol: string; gainPct: number }[];
+  /** The extremes of unrealized percentage gain and loss — named for the arithmetic they are, not as "best" and
+   *  "worst", which these were called until an external review pointed out that the chat reads these fields aloud.
+   *  A product that will not characterize a position as good or bad on the page must not do it in the sentence
+   *  either, and a ranking with a superlative on it is a judgement about what deserves attention.
+   *
+   *  The account is named because the same symbol held in two accounts has two different cost bases, so a bare
+   *  symbol with a percentage beside it is ambiguous exactly where the number matters. */
+  largestGains: { symbol: string; account: string; gainPct: number }[];
+  largestLosses: { symbol: string; account: string; gainPct: number }[];
   unreadable: string[];
   /** Accounts whose totals could not be read. While this is non-empty the portfolio totals are null, not partial. */
   unreadableAccounts: string[];
 }
 export function overview(input: ReportInput): PortfolioOverview {
-  const near: PortfolioOverview["near"] = [], gains: { symbol: string; gainPct: number }[] = [], unreadable: string[] = [];
+  const near: PortfolioOverview["near"] = [], gains: PortfolioOverview["largestGains"] = [], unreadable: string[] = [];
   // A total is the sum of every account or it is nothing. Treating one unreadable account as zero produces a number
   // that looks like the whole portfolio and is short by an account — and the chat is told to read this figure out.
   // A missing total is answerable ("I couldn't read one account"); a quietly understated one is not.
   const sum = (pick: (a: ReportAccount) => number | null) =>
     input.accounts.every(a => pick(a) !== null) ? input.accounts.reduce((n, a) => n + pick(a)!, 0) : null;
   for (const account of input.accounts) for (const entry of account.holdings) {
-    const { holding, levels } = entry;
-    if (!levels) { unreadable.push(holding.symbol); continue; }
+    const { symbol, holding, levels } = entry;
+    if (!levels) { unreadable.push(symbol); continue; }
     const frame = shown(levels);
-    if (holding.averageCost) gains.push({ symbol: holding.symbol, gainPct: (levels.price - holding.averageCost) / holding.averageCost * 100 });
+    // Share gains only. A contract's percentage is over its opening premium, which is a different denominator, and
+    // ranking the two together would compare numbers that do not mean the same thing.
+    if (holding?.averageCost) gains.push({ symbol, account: account.label,
+      gainPct: (levels.price - holding.averageCost) / holding.averageCost * 100 });
     if (atrsAway(frame, levels.price) > 1) continue;
     const { support, resistance, toSupport, toResistance } = nearest(frame, levels.price);
     const closerToSupport = support && (!resistance || Math.abs(toSupport ?? Infinity) <= Math.abs(toResistance ?? Infinity));
     const zone = closerToSupport ? support : resistance;
     if (!zone) continue;
-    near.push({ symbol: holding.symbol, side: closerToSupport ? "support" : "resistance",
+    near.push({ symbol, side: closerToSupport ? "support" : "resistance",
       zone: `${money(zone.lo)}–${zone.hi.toFixed(2)}`, distancePct: Number(((closerToSupport ? toSupport : toResistance) ?? 0).toFixed(1)), tests: zone.tests });
   }
   const ranked = [...gains].sort((a, b) => b.gainPct - a.gainPct).map(g => ({ ...g, gainPct: Number(g.gainPct.toFixed(1)) }));
@@ -349,7 +564,8 @@ export function overview(input: ReportInput): PortfolioOverview {
     // byClass rides along so the chat can say "and $84,000 of that is options" without the report being open.
     accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, holdings: a.holdings.length, byClass: a.totals.byClass })),
     totalValue: sum(a => a.totals.value),
-    near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
+    near, largestGains: ranked.slice(0, 3),
+    largestLosses: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
     unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }
 
@@ -380,11 +596,11 @@ export function portfolioReport(input: ReportInput): string {
   :root { color-scheme: light dark;
     --ink: #10171c; --muted: #5a6b70; --rule: #d6dedc; --ground: #fbfcfc; --panel: #fff;
     --up: #10715a; --down: #b03a2c; --support: #0b7c75; --resistance: #a2650f;
-    --support-fill: rgba(11,124,117,.13); --resistance-fill: rgba(162,101,15,.13); }
+    --support-fill: rgba(11,124,117,.13); --resistance-fill: rgba(162,101,15,.13); --strike: #6c4ab6; }
   @media (prefers-color-scheme: dark) { :root {
     --ink: #dce5e3; --muted: #8a9c9e; --rule: #24333a; --ground: #0d1316; --panel: #11191d;
     --up: #1fd286; --down: #e86a57; --support: #33c9be; --resistance: #e4a548;
-    --support-fill: rgba(51,201,190,.16); --resistance-fill: rgba(228,165,72,.16); } }
+    --support-fill: rgba(51,201,190,.16); --resistance-fill: rgba(228,165,72,.16); --strike: #b49be8; } }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 32px 28px 56px; background: var(--ground); color: var(--ink);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
@@ -413,6 +629,12 @@ export function portfolioReport(input: ReportInput): string {
   .flag { margin-left: 7px; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--resistance);
     border: 1px solid currentColor; border-radius: 999px; padding: 1px 6px; vertical-align: 2px; }
   tr.holding > * { border-top: 1px solid var(--rule); }
+  tr.contract > * { padding-top: 4px; font-size: 13px; color: var(--muted); }
+  tr.contract th { font-weight: 500; padding-left: 22px; font-size: 13px; }
+  tr.contract .num, tr.contract .level { color: var(--ink); }
+  tr.contract .level { font-size: 11px; color: var(--muted); }
+  /* An underlying held only in options has no share quantity to show, and a dash there reads as a failed read. */
+  tr.optionsonly th { font-style: normal; }
   tr.chart td { padding: 2px 8px 12px; }
   /* Technicals: a details element and radio tabs, so the page needs no script and prints as it is left. */
   tr.expand td { padding: 0 8px 10px; }
@@ -450,6 +672,9 @@ export function portfolioReport(input: ReportInput): string {
   .chart .trend.tentative { stroke-dasharray: 5 4; }
   .chart .title { fill: var(--ink); font-weight: 650; font-size: 12px; }
   .chart .cost { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 2 3; }
+  /* A held strike: the underlying's own axis, drawn differently from the zones so it is never read as one. */
+  .chart .strike line { stroke: var(--strike); stroke-width: 1.2; stroke-dasharray: 7 3; }
+  .chart .strike text { fill: var(--strike); }
   .chart .costlabel { fill: var(--muted); }
   .legend { color: var(--muted); font-size: 11px; margin: 4px 0 8px; }
   footer { color: var(--muted); font-size: 12px; margin-top: 26px; }
@@ -460,12 +685,13 @@ export function portfolioReport(input: ReportInput): string {
   .actions button:hover, .actions a:hover { border-color: var(--ink); }
   @media print {
     :root { --ink: #000; --muted: #444; --rule: #bbb; --ground: #fff; --panel: #fff;
-      --up: #000; --down: #000; --support-fill: #eee; --resistance-fill: #e4e4e4; }
+      --up: #000; --down: #000; --support-fill: #eee; --resistance-fill: #e4e4e4; --strike: #444; }
     body { padding: 0; font-size: 11pt; }
     .actions { display: none; }
     .account { break-inside: auto; page-break-inside: auto; border: 0; padding: 0; margin-bottom: 18pt; }
-    tr.holding { break-inside: avoid; page-break-inside: avoid; }
-    tr.holding, tr.expand { break-after: auto; page-break-after: auto; }
+    tr.holding, tr.contract { break-inside: avoid; page-break-inside: avoid; }
+    tr.holding { break-after: avoid; page-break-after: avoid; }
+    tr.expand { break-after: auto; page-break-after: auto; }
     .account + .account { break-before: page; page-break-before: always; }
     /* A chart prints only where one was opened, and only the timeframe that was chosen — opening a holding must not
        quietly put four charts on paper. The tab labels go, so the chart's own title carries the timeframe. */
@@ -498,8 +724,10 @@ ${accounts}
 "last trade" are single trades later than the last close Robinhood has published — which is why one can appear here
 before today's close does — and they are not closing prices. Distances are measured from the price shown to the
 nearest edge of a zone. Support and resistance are computed by fixed rules from settled daily bars, or from weekly
-bars on the five-year chart, and never from a trade after the last close; "held 24" counts how many bars traded into
-that zone without closing through it — a record of what happened, not a probability that it happens again. Nothing
+bars on the five-year chart. No zone is drawn from a trade later than the last settled close, though a later price does
+decide which of them are shown and which side of it they fall on. "Held 24" counts how many bars reached that zone —
+entering it, or coming within a small tolerance — without closing through it: a record of what happened in this window,
+not a probability that it happens again. A held strike is drawn against the underlying's price, and is not a breakeven. Nothing
 here is a recommendation to buy or sell, and Astra places no orders.</footer>
 <script>${script}</script>
 </body></html>`;

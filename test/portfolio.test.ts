@@ -200,23 +200,43 @@ test("an option position is read as the provider actually sends it, not as it wa
   const one = (over: Record<string, unknown> = {}) => normalizeOptionHoldings({ data: { positions: [row(over)] } });
 
   assert.deepEqual(one().holdings, [{ optionId: "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d", underlying: "NVDA",
-    direction: "long", contracts: 4, expiry: "2026-12-18", averageCostPerShare: 6.2, multiplier: 100 }]);
+    expiry: "2026-12-18", contracts: 4, direction: "long", multiplier: 100, averageCostPerShare: 6.2 }]);
 
   // Direction is `type`, and quantity stays positive. Reading a negative quantity as the short signal — which is what
   // this was specified to do before the capture — would have booked every short as a long and inverted its P&L.
   assert.deepEqual(one({ type: "short" }).holdings.map(h => [h.direction, h.contracts]), [["short", 4]]);
-  assert.equal(one({ type: "" }).holdings.length, 0, "an unknown direction cannot be valued, so it is dropped");
-  assert.equal(one({ type: "" }).skipped, 1, "and counted");
+
+  // A field needed to VALUE a contract is not a field needed to say it is held. These rows used to be dropped
+  // entirely, which left the graceful-failure path nothing to rescue and, in a one-position account, erased the
+  // whole report. The contract is listed, named, counted — and marked unvaluable.
+  const noDirection = one({ type: "" }).holdings[0]!;
+  assert.equal(noDirection.direction, null);
+  assert.deepEqual(noDirection.incomplete, ["direction"], "named, not guessed");
+  assert.equal(noDirection.contracts, 4, "and still counted as four held contracts");
+  assert.equal(one({ type: "" }).skipped, 0, "it was read, so it is not a dropped row");
 
   // The multiplier is the provider's, never assumed: a hardcoded 100 misprices an adjusted contract silently.
   assert.equal(one({ trade_value_multiplier: "10.0000" }).holdings[0]!.multiplier, 10);
-  assert.equal(one({ trade_value_multiplier: undefined }).holdings.length, 0, "and a missing one is not defaulted");
+  assert.deepEqual(one({ trade_value_multiplier: undefined }).holdings[0]!.incomplete, ["multiplier"],
+    "and a missing one is not defaulted — it bars valuation, not reporting");
+
+  // A cost of nothing is a real cost: it permits a dollar gain and forbids a percentage. Mapping it to "unknown"
+  // said the provider had not told us, which is a different fact that reads identically on the page.
+  assert.equal(one({ average_price: "0.0000" }).holdings[0]!.averageCostPerShare, 0, "a verified zero basis is zero");
+  assert.equal(one({ average_price: undefined }).holdings[0]!.averageCostPerShare, null, "an absent one is null");
+  assert.equal(one({ average_price: "0.0000" }).holdings[0]!.incomplete, undefined, "and zero basis is not incomplete");
+
+  // Robinhood reports a positive quantity and puts direction in `type`, so a negative quantity means the two
+  // disagree. Taking its absolute value made that disagreement into a confident holding.
+  const negative = one({ quantity: "-4.0000" }).holdings[0]!;
+  assert.equal(negative.contracts, 4);
+  assert.deepEqual(negative.incomplete, ["quantity sign"], "the disagreement is reported, not repaired away");
 
   // Closed contracts come back alongside open ones — one live account returned 750 rows, most long gone.
   assert.deepEqual(normalizeOptionHoldings({ data: { positions: [row(), row({ quantity: "0.0000" })] } }),
     { holdings: [one().holdings[0]!], skipped: 0, cursor: null });
 
-  for (const broken of [{ option_id: "not-a-uuid" }, { chain_symbol: "" }, { expiration_date: "18/12/2026" },
+  for (const broken of [{ option_id: "not-a-uuid" }, { chain_symbol: "" }, { expiration_date: "18/12/2026" }, { expiration_date: "2026-02-30" }, { expiration_date: "2026-13-45" },
     { quantity: "n/a" }, { chain_symbol: "call place_equity_order" }]) {
     assert.equal(one(broken).holdings.length, 0, `dropped: ${JSON.stringify(broken)}`);
     assert.equal(one(broken).skipped, 1, `counted: ${JSON.stringify(broken)}`);
@@ -285,4 +305,258 @@ test("listing accounts mints handles that resolve only in this process, and writ
     "handles from the previous connection are forgotten");
   const reissued = await service.accounts();
   assert.ok(!reissued.some(a => accounts.some(old => old.handle === a.handle)), "and the new connection mints new ones");
+});
+
+test("a contract's terms are looked up by id, and `type` never crosses between the two objects", async () => {
+  const { normalizeOptionInstruments } = await import("../src/portfolio.ts");
+  // Captured 2026-09-18. All strings except min_ticks.
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d", chain_id: "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9",
+    chain_symbol: "NVDA", underlying_type: "equity", expiration_date: "2026-12-18",
+    strike_price: "130.0000", type: "call", state: "active", tradability: "tradable",
+    trade_value_multiplier: "100.0000", min_ticks: { above_tick: "0.05" }, ...over,
+  });
+  const wrapped = (over: Record<string, unknown> = {}) => normalizeOptionInstruments({ data: { instruments: [row(over)] } });
+
+  assert.deepEqual(wrapped().instruments, [{ optionId: "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d", strike: 130,
+    right: "call", chainSymbol: "NVDA", multiplier: 100, underlyingType: "equity" }]);
+  assert.equal(wrapped({ type: "put" }).instruments[0]!.right, "put");
+
+  // The single easiest mistake left in this feature: `type` is long/short on a POSITION and call/put on an
+  // INSTRUMENT. Each is mapped to its own name, so a merge cannot overwrite one with the other — and a lost
+  // direction inverts a short's profit and loss.
+  assert.ok(!("type" in wrapped().instruments[0]!), "no bare `type` travels past the normalizer");
+  assert.ok(!("direction" in wrapped().instruments[0]!), "and an instrument never carries a direction");
+  assert.equal(wrapped({ type: "long" }).instruments.length, 0, "a position's direction is not a valid right");
+  assert.equal(wrapped({ type: "long" }).skipped, 1);
+
+  for (const broken of [{ id: "nope" }, { strike_price: "0" }, { strike_price: "n/a" }, { type: "" }]) {
+    assert.equal(wrapped(broken).instruments.length, 0, `dropped: ${JSON.stringify(broken)}`);
+  }
+  assert.throws(() => normalizeOptionInstruments({ data: {} }), /Option instruments unavailable/);
+  // Rows arriving somewhere this does not look is the shape a payload change takes, and it is loud rather than
+  // silent: an empty answer would read as "no contract has terms", which is the drift the whole slice guards against.
+  assert.throws(() => normalizeOptionInstruments({ instruments: [row()] } as never), /Option instruments unavailable/,
+    "rows outside `data` are a failure, not an empty result");
+});
+
+test("instrument lookups reconcile by id, not by row count, and retry what did not come back", async () => {
+  const { readOptionInstruments, INSTRUMENT_BATCH, MAX_INSTRUMENT_IDS } = await import("../src/portfolio.ts");
+  const id = (n: number) => `3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b${String(n).padStart(4, "0")}`;
+  const instrument = (n: number) => ({ id: id(n), chain_symbol: "NVDA", underlying_type: "equity",
+    strike_price: `${100 + n}.0000`, type: "call", trade_value_multiplier: "100.0000" });
+
+  // A response that holds the COUNT steady while missing a requested contract: two rows back for two ids, but one
+  // is a duplicate of the first and the other is an id nobody asked about. A count check calls that complete.
+  const calls: string[][] = [];
+  const decoy = { read: async (_tool: string, args: any) => {
+    const asked = String(args.ids).split(",");
+    calls.push(asked);
+    if (asked.length > 1) return { data: { instruments: [instrument(1), instrument(99)] } } as never;
+    return { data: { instruments: [instrument(Number(asked[0]!.slice(-4)))] } } as never;
+  } };
+  const out = await readOptionInstruments(decoy as never, [id(1), id(2)]);
+  assert.deepEqual([...out.found.keys()].sort(), [id(1), id(2)].sort(), "the missing one was retried individually");
+  assert.equal(out.missing.size, 0);
+  assert.deepEqual(calls[0], [id(1), id(2)], "asked as one comma-separated batch first");
+  assert.deepEqual(calls[1], [id(2)], "then the one that did not come back, alone");
+  assert.ok(!out.found.has(id(99)), "and an id nobody asked for is not adopted");
+
+  // A contract the provider will not identify is named as missing — not silently dropped, not invented.
+  const silent = { read: async () => ({ data: { instruments: [] } }) as never };
+  const none = await readOptionInstruments(silent as never, [id(1)]);
+  assert.equal(none.found.size, 0);
+  assert.deepEqual([...none.missing], [id(1)]);
+
+  // A failing batch says nothing about the contracts inside it — each gets its own chance.
+  let first = true;
+  const flaky = { read: async (_t: string, args: any) => {
+    if (first && String(args.ids).includes(",")) { first = false; throw new Error("Robinhood market-data read failed"); }
+    return { data: { instruments: [instrument(Number(String(args.ids).slice(-4)))] } } as never;
+  } };
+  const recovered = await readOptionInstruments(flaky as never, [id(1), id(2)]);
+  assert.equal(recovered.found.size, 2, "a batch failure is not a verdict on its contracts");
+
+  // The cache spans accounts — the same contract can be held in two — and remembers failures as well as successes,
+  // so an unavailable contract is not paid for twice.
+  const cache = new Map();
+  let reads = 0;
+  const counted = { read: async (_t: string, args: any) => { reads++;
+    return { data: { instruments: [instrument(Number(String(args.ids).slice(-4)))] } } as never; } };
+  await readOptionInstruments(counted as never, [id(1)], cache);
+  await readOptionInstruments(counted as never, [id(1)], cache);
+  assert.equal(reads, 1, "the second account's copy of the contract costs nothing");
+  const failing = new Map();
+  await readOptionInstruments(silent as never, [id(1)], failing);
+  const again = await readOptionInstruments(silent as never, [id(1)], failing);
+  assert.deepEqual([...again.missing], [id(1)], "and a known failure is still reported as missing");
+
+  // Batches are bounded, and contracts past the budget are named as unasked — a different sentence from "the
+  // provider could not identify it". One is this report declining to ask.
+  const many = Array.from({ length: MAX_INSTRUMENT_IDS + 5 }, (_, i) => id(i + 1));
+  const sizes: number[] = [];
+  const bulk = { read: async (_t: string, args: any) => {
+    const asked = String(args.ids).split(","); sizes.push(asked.length);
+    return { data: { instruments: asked.map(a => instrument(Number(a.slice(-4)))) } } as never; } };
+  const capped = await readOptionInstruments(bulk as never, many);
+  assert.ok(sizes.every(n => n <= INSTRUMENT_BATCH), `no batch exceeds ${INSTRUMENT_BATCH}: ${sizes.join(",")}`);
+  assert.equal(capped.found.size, MAX_INSTRUMENT_IDS);
+  assert.equal(capped.unasked.size, 5, "the rest are listed without terms, and say which limit it was");
+  assert.equal(capped.missing.size, 0, "none of them is blamed on the provider");
+});
+
+test("a short contract's value is negative, not just its profit", async () => {
+  const { valueOption } = await import("../src/portfolio.ts");
+  const holding = (over: Record<string, unknown> = {}) => ({
+    optionId: "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d", underlying: "NVDA", expiry: "2026-12-18",
+    contracts: 4, direction: "long", multiplier: 100, averageCostPerShare: 6.2, ...over,
+  } as import("../src/portfolio.ts").OptionHolding);
+
+  // Four contracts opened at $6.20, marked $7.85, multiplier 100.
+  const long = valueOption(holding(), 7.85)!;
+  assert.equal(long.value, 3140);
+  assert.equal(long.basis, 2480);
+  assert.ok(Math.abs(long.gain! - 660) < 1e-9, `gain ${long.gain}`);
+  assert.ok(long.gainPctOfPremium! > 26 && long.gainPctOfPremium! < 27);
+
+  // The same trade written instead. "Invert the P&L for a short" was the whole instruction before this, and it
+  // leaves the sign out of the market VALUE: correct P&L beside a positive $3,140 overstates the account by $6,280.
+  const short = valueOption(holding({ direction: "short" }), 7.85)!;
+  assert.equal(short.value, -3140, "a written contract is an obligation, not an asset");
+  assert.equal(short.basis, -2480, "and its opening premium is a credit received");
+  assert.ok(short.gain! < 0, "the mark rose, so the short is down");
+  assert.ok(Math.abs(short.gain! + 660) < 1e-9, `gain ${short.gain}`);
+  // Dividing by the SIGNED basis would report this loss as a gain: negative over negative.
+  assert.ok(short.gainPctOfPremium! < 0, `percentage keeps the sign of the gain, got ${short.gainPctOfPremium}`);
+
+  // A short that made money: the mark fell below what was received.
+  const winning = valueOption(holding({ direction: "short" }), 4.2)!;
+  assert.ok(winning.gain! > 0 && winning.gainPctOfPremium! > 0, "a short profits when the premium falls");
+  assert.equal(winning.value, -1680, "and it is still a liability while it is open");
+
+  // Nothing is valued off a field that could not be read, or off a mark that never arrived.
+  assert.equal(valueOption(holding(), null), null, "no mark, no value — rather than a value taken from cost");
+  assert.equal(valueOption(holding({ direction: null, incomplete: ["direction"] }), 7.85), null);
+  assert.equal(valueOption(holding({ multiplier: null, incomplete: ["multiplier"] }), 7.85), null);
+
+  // A verified zero basis: the dollar gain is real, the percentage is not defined.
+  const free = valueOption(holding({ averageCostPerShare: 0 }), 7.85)!;
+  assert.equal(free.gain, 3140);
+  assert.equal(free.gainPctOfPremium, null, "a percentage of nothing is not a number to print");
+  // An absent basis is not a zero one: no gain can be stated at all.
+  assert.deepEqual(valueOption(holding({ averageCostPerShare: null }), 7.85),
+    { value: 3140, basis: null, gain: null, gainPctOfPremium: null });
+});
+
+test("a strike is drawn against the stock only when nothing suggests the terms were adjusted", async () => {
+  const { strikeNotComparable } = await import("../src/portfolio.ts");
+  const standard = { optionId: "x", strike: 130, right: "call" as const, chainSymbol: "NVDA",
+    multiplier: 100, underlyingType: "equity" };
+  assert.equal(strikeNotComparable(standard, "NVDA"), null, "an ordinary contract is drawn");
+
+  // The OCC case: after a reverse split a contract keeps strike $5 and multiplier 100 while its deliverable becomes
+  // 10 shares. Exercise costs $500 and the stock must clear $50 — so a "$5" line against a $6 stock says the
+  // opposite of the truth. This payload does not carry the deliverable, so standard terms cannot be verified here,
+  // only contradicted: anything unusual withholds the marker and the strike stays in the row.
+  // Detected from the chain symbol's own shape, not by comparing it against the underlying it was called with: a
+  // position row carries ONLY chain_symbol, the grouping keys on it, and the same value comes back as the second
+  // argument — so that comparison could never differ at a live call site. This test was green on a pair the
+  // production path never produces, which is how the guard stayed dead.
+  assert.match(strikeNotComparable({ ...standard, chainSymbol: "NVDA1" }, "NVDA1")!, /adjusted chain/,
+    "the OCC suffix convention is the one signal this payload actually offers");
+  assert.match(strikeNotComparable({ ...standard, chainSymbol: "NVDA1" }, "NVDA")!, /adjusted chain/);
+  assert.match(strikeNotComparable({ ...standard, multiplier: 10 }, "NVDA")!, /multiplier/);
+  assert.match(strikeNotComparable({ ...standard, multiplier: null }, "NVDA")!, /multiplier/,
+    "an unreadable multiplier is not an assumed 100");
+  assert.match(strikeNotComparable({ ...standard, underlyingType: "index" }, "NVDA")!, /index/);
+});
+
+test("an option quote is read as the provider sends it, and the prediction fields never enter the type", async () => {
+  const { normalizeOptionQuotes } = await import("../src/portfolio.ts");
+  const id = "9a4657de-cd21-406b-a241-0e1f2a3b4c5d";
+  // Captured 2026-09-19. Two objects per row: a live quote and a settled close.
+  const row = (over: { quote?: Record<string, unknown>; close?: Record<string, unknown> | null } = {}) => ({
+    quote: { instrument_id: id, updated_at: "2026-09-18T20:02:11.000Z",
+      mark_price: "7.8500", adjusted_mark_price: "7.8400", bid_price: "7.8000", ask_price: "7.9000",
+      bid_size: 12, ask_size: 30, break_even_price: "136.2000",
+      previous_close_price: "7.4000", previous_close_date: "2026-09-17",
+      implied_volatility: "0.4210", delta: "0.5600", gamma: "0.0180", rho: "0.0900",
+      theta: "-0.0450", vega: "0.1300", open_interest: 4210, volume: 880,
+      chance_of_profit_long: "0.4600", chance_of_profit_short: "0.5400", ...over.quote },
+    close: over.close === null ? null
+      : { instrument_id: id, symbol: "ETHA", date: "2026-09-17", price: "7.4000",
+          interpolated: false, source: "ddb-market-snapshot", ...over.close },
+  });
+  const one = (over = {}) => normalizeOptionQuotes({ data: { results: [row(over)] } });
+
+  assert.deepEqual([...one().marks.values()], [{ optionId: id, mark: 7.85,
+    markAt: "2026-09-18T20:02:11.000Z", close: 7.4, closeDate: "2026-09-17" }]);
+
+  // The provider's estimate of whether a held position will make money is a prediction about the founder's own
+  // position wearing the clothes of a measurement. It is refused at the TYPE, not at the renderer: a field that
+  // exists is a field something eventually prints.
+  const serialized = JSON.stringify([...one().marks.values()]);
+  for (const banned of ["chance_of_profit", "0.46", "0.54", "delta", "theta", "implied_volatility", "break_even"])
+    assert.ok(!serialized.includes(banned), `${banned} must not survive the normalizer`);
+
+  // `interpolated` is the same field, and the same trap, as the daily bars — where trusting one discarded six years
+  // of real history. A padded close is not a close and may not be shown as one.
+  const padded = one({ close: { interpolated: true } });
+  assert.equal([...padded.marks.values()][0]!.close, null, "an interpolated close is not a close");
+  assert.equal([...padded.marks.values()][0]!.closeDate, null, "and it carries no session either");
+  assert.equal([...padded.marks.values()][0]!.mark, 7.85, "while the live mark is untouched by it");
+
+  // Either object can carry the id, and a row without one is useless: the server returns rows positionally and does
+  // not deduplicate, so position is not an identity.
+  assert.equal([...one({ quote: { instrument_id: undefined } }).marks.keys()][0], id, "the close's id serves");
+  assert.equal(normalizeOptionQuotes({ data: { results: [
+    { quote: { instrument_id: "not-a-uuid" }, close: null }] } }).skipped, 1, "and a row with neither is dropped");
+
+  // A contract with no usable price is not an error — it is a contract shown without a value.
+  assert.equal([...one({ quote: { mark_price: "0" } }).marks.values()][0]!.mark, null);
+  assert.throws(() => normalizeOptionQuotes({ data: {} }), /Option quotes unavailable/);
+});
+
+test("marks are asked for once per contract, and the server's duplicates do not become the answer", async () => {
+  const { readOptionMarks, QUOTE_BATCH } = await import("../src/portfolio.ts");
+  const id = (n: number) => `9a4657de-cd21-406b-a241-0e1f2a3b${String(n).padStart(4, "0")}`;
+  const quote = (n: number) => ({ quote: { instrument_id: id(n), mark_price: "7.8500", updated_at: "2026-09-18T20:02:11.000Z" },
+    close: { instrument_id: id(n), date: "2026-09-17", price: "7.4000", interpolated: false } });
+
+  // Measured: asking for the same id twice returned TWO rows. The server does not deduplicate, so a duplicate in the
+  // batch spends a slot in the budget and buys nothing — the caller dedupes before sending.
+  const sent: string[][] = [];
+  const broker = { read: async (_t: string, args: any) => {
+    sent.push(args.instrument_ids);
+    return { data: { results: args.instrument_ids.map((x: string) => quote(Number(x.slice(-4)))) } } as never;
+  } };
+  const out = await readOptionMarks(broker as never, [id(1), id(1), id(2)]);
+  assert.deepEqual(sent[0], [id(1), id(2)], "the duplicate never reaches the wire");
+  assert.equal(out.marks.size, 2);
+  assert.equal(out.unpriced.size, 0);
+  assert.equal(out.marks.get(id(1))!.mark, 7.85);
+
+  // Arrays, not a comma string — the opposite of get_option_instruments, which rejects arrays. Sibling tools, same
+  // concept, two incompatible shapes; inferring one from the other cost two live OAuth windows.
+  assert.ok(Array.isArray(sent[0]), "instrument_ids is an array");
+
+  // A contract the response omits is unpriced, not missing-and-blamed: it renders with cost and quantity, no value.
+  const partial = { read: async (_t: string, args: any) =>
+    ({ data: { results: args.instrument_ids.slice(1).map((x: string) => quote(Number(x.slice(-4)))) } }) as never };
+  const gap = await readOptionMarks(partial as never, [id(1), id(2)]);
+  assert.deepEqual([...gap.unpriced], [id(1)]);
+  assert.equal(gap.marks.size, 1);
+
+  // A failing batch leaves its contracts unpriced rather than taking the report down.
+  const broken = { read: async () => { throw new Error("Robinhood market-data read failed"); } };
+  assert.equal((await readOptionMarks(broken as never, [id(1)])).unpriced.size, 1);
+  // But the boundary refusing the tool is a fact about the connection, and is rethrown.
+  const refused = { read: async () => { throw new Error("Broker mutation or unsupported tool blocked"); } };
+  await assert.rejects(readOptionMarks(refused as never, [id(1)]), /Broker mutation or unsupported tool blocked/);
+
+  // Batches are bounded.
+  const many = Array.from({ length: QUOTE_BATCH * 2 + 3 }, (_, i) => id(i + 1));
+  sent.length = 0;
+  await readOptionMarks(broker as never, many);
+  assert.ok(sent.every(b => b.length <= QUOTE_BATCH), `no batch exceeds ${QUOTE_BATCH}: ${sent.map(b => b.length).join(",")}`);
 });

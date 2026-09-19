@@ -92,7 +92,12 @@ test("technicals expand to a readable chart, one per timeframe, with no script t
   }
   assert.ok(html.length < 250_000, `a one-holding report is ${Math.round(html.length / 1024)} KB, not megabytes`);
   // No library, no fonts, no network: a printed page must not depend on anything being reachable.
-  assert.ok(!/https?:\/\//.test(html.replace(/xmlns="[^"]*"/g, "")), "nothing is fetched");
+  // An `xmlns` is a namespace identifier, never fetched — including inside the percent-encoded data URI the
+  // favicon rides in, where the quotes around it are %22. Strip both spellings, then the assertion is about real
+  // network references and nothing else.
+  const noNamespaces = html.replace(/xmlns=(?:"[^"]*"|%22[^%]*%22)/g, "");
+  assert.ok(!/https?:\/\//.test(noNamespaces), "nothing is fetched");
+  assert.match(html, /<link rel="icon" href="data:image\/svg\+xml,/, "and the icon travels with the page");
 });
 
 test("no chart label is written outside its own chart, however crowded the chart is", () => {
@@ -780,4 +785,31 @@ test("the whole option path runs end to end: three reads, one group, a priced co
   for (const banned of ["chance_of_profit", "chance of profit", "break_even", "delta", "gamma", "vega", "theta", "rho"])
     assert.ok(!new RegExp(banned, "i").test(html), `${banned} must not reach the page`);
   assert.ok(!reads.some(r => /order|cancel|place|exercise/.test(r)), "and no tool that moves anything was called");
+});
+
+test("the report wears the product's own mark, and the copy cannot drift from the source", async () => {
+  const { readFileSync } = await import("node:fs");
+  const root = new URL("..", import.meta.url).pathname;
+  const source = readFileSync(root + "docs/assets/astra-mark.svg", "utf8").trim();
+  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  const href = html.match(/<link rel="icon" href="([^"]+)"/)?.[1];
+  assert.ok(href, "the page links an icon");
+  assert.ok(href!.startsWith("data:image/svg+xml,"), "carried in the page, not fetched");
+
+  // The renderer holds its own copy of the mark because nothing in that module touches the filesystem — which is
+  // what lets the whole report be exercised without one. The cost of that choice is two places to change, so this
+  // is the check that makes the second one impossible to forget.
+  const decoded = decodeURIComponent(href!.slice("data:image/svg+xml,".length));
+  const shape = (s: string) => s.replace(/\s+/g, " ").trim();
+  assert.equal(shape(decoded), shape(source),
+    "src/report.ts's inlined mark no longer matches docs/assets/astra-mark.svg");
+
+  // A saved page keeps its icon: the "Save this page" link hands the reader this exact file, and an icon fetched
+  // from anywhere would be missing from precisely the copy someone keeps.
+  assert.ok(!/href="[^"]*\.(svg|png|ico)"/.test(html), "no icon is referenced by path");
+  // And the page's own policy would forbid fetching one anyway — `default-src 'none'` with `img-src data:`.
+  const policy = html.match(/content-security-policy" content="([^"]+)"/)![1]!;
+  assert.match(policy, /default-src 'none'/);
+  assert.match(policy, /img-src data:/, "which is what makes a data-URI icon the only form that works");
 });

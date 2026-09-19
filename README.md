@@ -11,7 +11,7 @@ model; this server provides validated tools and durable run records.
 Independent project, not affiliated with OpenAI or Robinhood. The MCP server is
 model-agnostic; its name does not require a particular model or provider.
 
-**Version 0.4 adds reading your real accounts: a printable portfolio report** —
+**Version 0.5 lists your option contracts too: the report covers the whole account** —
 cost basis, profit and loss, and the support and resistance around each holding on
 an expandable chart. Reading is all it does: the same code allowlist that blocks
 order tools governs every account call, and no tool Astra can reach places one.
@@ -289,7 +289,7 @@ is a recommendation: it reports what the rules found.
 
 **You:** Buy 100 shares of NVDA in my IRA.
 
-> **Astra:** I can't place an order, in any account. My code allows nine Robinhood calls: six for market data, and three for reading your accounts, balances and positions when you ask about them. Nothing that places, changes or cancels an order is reachable, whatever Robinhood's consent screen grants. I can add NVDA to a paper plan instead, which simulates the trade and moves no money.
+> **Astra:** I can't place an order, in any account. My code allows ten Robinhood calls: six for market data, and four for reading your accounts, balances and positions when you ask about them. Nothing that places, changes or cancels an order is reachable, whatever Robinhood's consent screen grants. I can add NVDA to a paper plan instead, which simulates the trade and moves no money.
 
 **You:** HPE is sitting on support. Should I buy it here?
 
@@ -452,7 +452,7 @@ the chat client if strategies need to continue after the chat disconnects.
 
 No tools execute shell commands, accept arbitrary filesystem paths or submit
 brokerage orders. The upstream client enforces two runtime allowlists — six
-market-data reads, and the three account reads the portfolio report needs — even
+market-data reads, and the four account reads the portfolio report needs — even
 though Robinhood's single scope also advertises order tools. Account reads are
 made only when you ask about your accounts, and return masked labels rather than
 account numbers. `list_accounts` reads names and status; `get_portfolio_report`

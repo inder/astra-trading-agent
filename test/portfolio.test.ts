@@ -623,3 +623,48 @@ test("a class worth something renders as a header figure and is named as not lis
   // And the header adds up, so nothing is left for the remainder line to report.
   assert.ok(!/Not itemized/.test(html), "a fully itemized account has no remainder");
 });
+
+test("the documentation's count of the boundary matches the boundary", async () => {
+  // The allowlist counts are stated in prose in four places, including inside Astra's own spoken refusal — the one
+  // sentence whose whole job is to tell the user exactly what it can reach. All four drifted when the option read
+  // was added: the docs said nine tools and three account reads while the code held ten and four, and a docs pass
+  // that rewrote the sentences *beside* them did not catch it. Nothing was checking.
+  //
+  // A number a human has to remember to update is a number that goes stale. This is the mechanical gate, per the
+  // project's own rule that a recurrence earns a check rather than another paragraph.
+  const { readFileSync } = await import("node:fs");
+  const root = new URL("..", import.meta.url).pathname;
+  const read = (f: string) => readFileSync(root + f, "utf8");
+
+  const total = MARKET_READS.length + ACCOUNT_READS.length;
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve"] as const;
+  const totalWord = words[total], marketWord = words[MARKET_READS.length], accountWord = words[ACCOUNT_READS.length];
+
+  for (const [file, claims] of [
+    ["README.md", [`allows ${totalWord} Robinhood calls`, `${marketWord} for market data`,
+      `${accountWord} for reading your accounts`, `the ${accountWord} account reads`]],
+    ["docs/READINESS.md", [`except the ${totalWord} on the allowlists`]],
+    ["docs/ARCHITECTURE.md", [`these ${totalWord} are the whole boundary`]],
+  ] as const) {
+    const text = read(file);
+    for (const claim of claims)
+      assert.ok(text.includes(claim), `${file} must say "${claim}" — the code holds ${total} tools (${MARKET_READS.length} market, ${ACCOUNT_READS.length} account)`);
+  }
+
+  // And the account reads are named, not just counted, in the two files that assert the boundary's contents. A
+  // count staying right while a read is swapped for another is the failure the element-by-element pin exists for,
+  // and the prose must not be weaker than the test.
+  // Whitespace-normalized: prose wraps, and a list broken across two lines is the same claim.
+  const named = ACCOUNT_READS.map(t => `\`${t}\``).join(", ");
+  for (const file of ["SECURITY.md", "docs/ARCHITECTURE.md"])
+    assert.ok(read(file).replace(/\s+/g, " ").includes(named),
+      `${file} must name the account reads exactly: ${named}`);
+
+  // The version the docs announce is the version that ships.
+  const version = JSON.parse(read("package.json")).version as string;
+  const minor = version.split(".").slice(0, 2).join(".");
+  assert.ok(read("docs/READINESS.md").startsWith(`# Readiness — version ${minor}`),
+    `READINESS must be headed version ${minor}`);
+  assert.ok(read("README.md").includes(`**Version ${minor} `), `README must announce version ${minor}`);
+});

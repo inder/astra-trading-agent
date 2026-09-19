@@ -1,4 +1,4 @@
-# Readiness — version 0.4
+# Readiness — version 0.5
 
 The local end-to-end PAPER workflow is implemented: credential-free discovery,
 configuration, independent browser authorization, continuously scheduled runs,
@@ -34,7 +34,7 @@ contracts that cannot be sold before the close. A timer test verifies progress w
 client driving each tick. CI repeats typecheck and tests on Node 24 and 26.
 
 For the account path, tests assert that every one of the 73 tools Robinhood's scope
-granted is refused except the nine on the allowlists, that provider text and hostile
+granted is refused except the ten on the allowlists, that provider text and hostile
 account-type strings cannot reach the model or the page, that a malformed holding is
 dropped and counted rather than guessed, and that an error names no account. For the
 report: that it lands only under the data directory at mode `0600`, that a second

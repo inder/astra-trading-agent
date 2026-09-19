@@ -584,6 +584,29 @@ export interface PortfolioOverview {
   accounts: { label: string; value: number | null; holdings: number; byClass: { label: string; value: number }[] }[];
   totalValue: number | null;
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];
+  /** Zones the price closed through, recently, and did not give back.
+   *
+   *  This array is the point of the whole feature. The founder's complaint was not about the page — it was about
+   *  what the chat says: *"you are right to say they are just above support, but they have also broken out."* That
+   *  sentence comes from `near` above, and a page fix alone would have left it exactly as it was.
+   *
+   *  **Each record carries what stands above the stock as well**, because a model handed only a break will say "it
+   *  broke out" and stop — the same flattening, inverted. A stock that cleared one ceiling usually has another, and
+   *  the two facts travel together or the summary misleads by omission.
+   *
+   *  Nouns for events and counts, and nothing comparative. A field name is an instruction to whatever model reads
+   *  this: anything called `signal`, `strength` or `score` would be spoken as a recommendation no matter what the
+   *  page says. The founder's own read — that a breakout is "a better/bigger signal" — is his to make, not the
+   *  product's to assert. */
+  broke: { symbol: string; account: string; zone: string; direction: "above" | "below"; on: string;
+    closes: number; testsBefore: number;
+    /** The nearest zone still standing above the price, or null when nothing prior is. Present so the sentence
+     *  cannot be "INTC broke out" full stop. */
+    resistanceAbove: string | null }[];
+  /** Stocks with no prior high above them in the window their levels were measured over. Window-scoped on purpose:
+   *  a longer frame can legitimately show a band overhead, and the summary must not claim more than the engine
+   *  measured. */
+  clearAbove: { symbol: string; account: string; window: string }[];
   /** The extremes of unrealized percentage gain and loss — named for the arithmetic they are, not as "best" and
    *  "worst", which these were called until an external review pointed out that the chat reads these fields aloud.
    *  A product that will not characterize a position as good or bad on the page must not do it in the sentence
@@ -599,6 +622,7 @@ export interface PortfolioOverview {
 }
 export function overview(input: ReportInput): PortfolioOverview {
   const near: PortfolioOverview["near"] = [], gains: PortfolioOverview["largestGains"] = [], unreadable: string[] = [];
+  const broke: PortfolioOverview["broke"] = [], clearAbove: PortfolioOverview["clearAbove"] = [];
   // A total is the sum of every account or it is nothing. Treating one unreadable account as zero produces a number
   // that looks like the whole portfolio and is short by an account — and the chat is told to read this figure out.
   // A missing total is answerable ("I couldn't read one account"); a quietly understated one is not.
@@ -612,6 +636,27 @@ export function overview(input: ReportInput): PortfolioOverview {
     // ranking the two together would compare numbers that do not mean the same thing.
     if (holding?.averageCost) gains.push({ symbol, account: account.label,
       gainPct: (levels.price - holding.averageCost) / holding.averageCost * 100 });
+    // Both facts, gathered before the proximity filter below — a break is worth saying whether or not the price
+    // happens to be sitting on something today, and `near`'s one-ATR test is about proximity, not about history.
+    const band = (z: Zone) => `${money(z.lo)}–${z.hi.toFixed(2)}`;
+    const ceiling = (frame?.resistance ?? []).find(z => z.lo > levels.price
+      && !(z.members.length > 0 && z.members.every(m => m.fromRecentBar)));
+    // ONE break per holding, not one per zone. A price that moves up through a shelf of levels in a single stretch
+    // clears several at once — the fixture here produces two, on the same date, under the same ceiling — and a
+    // model handed both narrates both, which is noise dressed as detail.
+    //
+    // The one kept is the most-tested: the level that was actually holding the price back, which is what "the range
+    // it was stuck in" means. It is also the discriminator measured during B1, where a steady climb scored 1 and a
+    // real range scored 20.
+    const broken = (frame?.support ?? [])
+      .filter(z => z.broke?.recent && !z.broke.backInsideOn)
+      .sort((x, y) => y.broke!.testsBefore - x.broke!.testsBefore)[0];
+    if (broken) broke.push({ symbol, account: account.label, zone: band(broken),
+      direction: broken.broke!.direction, on: broken.broke!.on, closes: broken.broke!.closes,
+      testsBefore: broken.broke!.testsBefore, resistanceAbove: ceiling ? band(ceiling) : null });
+    if (frame?.overhead && !frame.overhead.zones && !frame.overhead.gaps && !frame.overhead.line)
+      clearAbove.push({ symbol, account: account.label, window: frame.label });
+
     if (atrsAway(frame, levels.price) > 1) continue;
     const { support, resistance, toSupport, toResistance } = nearest(frame, levels.price);
     const closerToSupport = support && (!resistance || Math.abs(toSupport ?? Infinity) <= Math.abs(toResistance ?? Infinity));
@@ -625,7 +670,7 @@ export function overview(input: ReportInput): PortfolioOverview {
     // byClass rides along so the chat can say "and $84,000 of that is options" without the report being open.
     accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, holdings: a.holdings.length, byClass: a.totals.byClass })),
     totalValue: sum(a => a.totals.value),
-    near, largestGains: ranked.slice(0, 3),
+    near, broke, clearAbove, largestGains: ranked.slice(0, 3),
     largestLosses: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
     unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }

@@ -980,3 +980,75 @@ test("the chart marks the session a zone was broken, and never a session it does
   // longer one is written past the viewBox and silently lost.
   assert.ok(!/class="s"[^>]*>[\s\S]{0,200}since /.test(panes[0] ?? ""), "the band label is unchanged");
 });
+
+test("the spoken summary carries the break AND what still stands above it", async () => {
+  // Where the founder's complaint actually lives. "You are right to say they are just above support, but they have
+  // also broken out" is a sentence about what the CHAT said, not what the page showed — it comes from `near`, and a
+  // page fix alone would have left it word for word.
+  const Z = (lo: number, hi: number, tests: number, broke?: Zone["broke"]): Zone =>
+    ({ id: "Z", lo, hi, tests, last: "2026-09-15", members: [], ...(broke ? { broke } : {}) });
+  const brk = { direction: "above" as const, on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 };
+  const framed = (sup: Zone[], res: Zone[], overhead: Analysis["overhead"]) =>
+    ({ ...computed, frames: computed.frames.map(f => ({ ...f, support: sup, resistance: res, overhead })) });
+
+  const capped = overview({ accounts: [account({ holdings: [{ symbol: "INTC",
+    holding: { symbol: "INTC", shares: 100, averageCost: 100 },
+    levels: framed([Z(124, 125.4, 3, brk)], [Z(131, 133, 9)], { zones: 1, gaps: 0, line: false }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(capped.broke.length, 1);
+  assert.equal(capped.broke[0]!.zone, "$124.00–125.40");
+  assert.equal(capped.broke[0]!.on, "2026-09-03");
+  assert.equal(capped.broke[0]!.testsBefore, 14);
+  // The half that stops the summary being "INTC broke out" full stop. A model handed only a break says only that,
+  // which is the same flattening the founder complained about, inverted.
+  assert.equal(capped.broke[0]!.resistanceAbove, "$131.00–133.00", "what it still has over it travels with it");
+  assert.equal(capped.clearAbove.length, 0);
+
+  // And the other half of the pair: broke out with nothing prior above.
+  const clear = overview({ accounts: [account({ holdings: [{ symbol: "RBRK",
+    holding: { symbol: "RBRK", shares: 100, averageCost: 100 },
+    levels: framed([Z(124, 125.4, 3, brk)], [], { zones: 0, gaps: 0, line: false }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+  assert.equal(clear.broke[0]!.resistanceAbove, null, "nothing prior above it, stated as null rather than omitted");
+  assert.equal(clear.clearAbove.length, 1);
+  assert.ok(clear.clearAbove[0]!.window.length > 0, "and the window is named, because a longer one may disagree");
+  assert.equal(clear.clearAbove[0]!.account, "••••0000 individual",
+    "with the account, since the same symbol in two accounts is two rows");
+});
+
+test("one break per holding, and it is the level that was actually holding", async () => {
+  // A price moving up through a shelf clears several levels in one stretch — the shared fixture produces two, on the
+  // same date, under the same ceiling. A model handed both narrates both. The one kept is the most-tested, which is
+  // what "the range it was stuck in" means and the measure that separates a range from a level passed in a trend.
+  const Z = (lo: number, hi: number, tests: number, testsBefore: number): Zone =>
+    ({ id: "Z", lo, hi, tests, last: "2026-09-15", members: [],
+      broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore } });
+  const view = overview({ accounts: [account({ holdings: [{ symbol: "FIXA",
+    holding: { symbol: "FIXA", shares: 100, averageCost: 100 },
+    levels: { ...computed, frames: computed.frames.map(f => ({ ...f,
+      support: [Z(120, 121, 3, 2), Z(124, 125.4, 3, 14), Z(118, 119, 3, 5)], resistance: [],
+      overhead: { zones: 0, gaps: 0, line: false } })) },
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(view.broke.length, 1, "one holding, one break");
+  assert.equal(view.broke[0]!.testsBefore, 14, "the level that turned the price back most often, not the nearest");
+});
+
+test("nothing the chat is handed reads as a recommendation", async () => {
+  // A field name is an instruction to whatever model reads this. The founder's own read — that a breakout is "a
+  // better/bigger signal" — is his to make; the product does not assert it, on the page or in the sentence.
+  const Z = (lo: number, hi: number): Zone => ({ id: "Z", lo, hi, tests: 9, last: "2026-09-15", members: [],
+    broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 } });
+  const view = overview({ accounts: [account({ holdings: [{ symbol: "FIXA",
+    holding: { symbol: "FIXA", shares: 100, averageCost: 100 },
+    levels: { ...computed, frames: computed.frames.map(f => ({ ...f, support: [Z(124, 125.4)], resistance: [],
+      overhead: { zones: 0, gaps: 0, line: false } })) }, series: { daily: series } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" });
+  const spoken = JSON.stringify(view);
+  for (const banned of ["signal", "strength", "score", "opportunity", "bullish", "bearish", "important",
+    "strong", "weak", "best", "worst", "buy", "sell", "target", "breakout"])
+    assert.ok(!new RegExp(`"[^"]*${banned}`, "i").test(spoken), `no field named for "${banned}"`);
+  // Small enough to narrate: this is a paragraph's worth of facts, not the report.
+  assert.ok(spoken.length < 1400, `${spoken.length} bytes`);
+});

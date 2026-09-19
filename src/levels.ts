@@ -482,7 +482,10 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
   // reports clear air for exactly the stock that just made some. A zone with any prior structure in it keeps at
   // least one member that is not from a recent bar, so nothing real is erased.
   const overhead = {
-    zones: resistanceZones.filter(z => !z.members.every(m => m.fromRecentBar)).length,
+    // `[].every(...)` is true, so a memberless zone would read as "all of it is the price's own footprint" and be
+    // dropped from what stands overhead — reporting clear air above a real ceiling. Members are required before
+    // anything can be concluded about all of them.
+    zones: resistanceZones.filter(z => !(z.members.length > 0 && z.members.every(m => m.fromRecentBar))).length,
     gaps: gaps.filter(g => g.side === "resistance" && !g.filling).length,
     line: !!resistanceLine && resistanceLine.nextValue > price,
   };

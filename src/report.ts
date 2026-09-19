@@ -137,9 +137,17 @@ function optionNote(options: NonNullable<ReportAccount["options"]>, value: numbe
  *  zone is shown to a reader or measured against — because a page that draws the exclusion in one place and not the
  *  other reports clear air in its summary and a ceiling in its table, for the same stock, on the same run. */
 const ownFootprint = (z: Zone): boolean => z.members.length > 0 && z.members.every(m => m.fromRecentBar);
-/** The frame as a reader should see it: prior structure only. */
+/** The frame as a reader should see it: prior structure only, on BOTH sides.
+ *
+ *  Symmetric because the distortion is. `zoneSide` seeds the support side from the last bars' LOWS exactly as it
+ *  seeds resistance from their highs, so a stock making new lows every session shows its own last bar as the
+ *  support beneath it — measured on a 300-bar decline: "$180.20–180.20 −0.1% · held 1", a floor that held against
+ *  itself. Filtering one side and not the other would have fixed the stock breaking out and left the stock falling
+ *  with a floor under it that is not there, which is the worse of the two to get wrong. */
 const prior = (frame: Frame | undefined): Frame | undefined =>
-  frame && { ...frame, resistance: (frame.resistance ?? []).filter(z => !ownFootprint(z)) };
+  frame && { ...frame,
+    resistance: (frame.resistance ?? []).filter(z => !ownFootprint(z)),
+    support: (frame.support ?? []).filter(z => !ownFootprint(z)) };
 const shown = (levels: Levels): Frame | undefined =>
   levels.frames.find(f => f.timeframe === levels.defaultTimeframe && !f.unavailable) ?? levels.frames.find(f => !f.unavailable);
 

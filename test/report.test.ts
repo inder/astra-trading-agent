@@ -25,7 +25,10 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /••••0000 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
-  assert.match(html, /−0\.2%/, "a negative is shown with a minus, not a bracket");
+  // The convention, not a particular distance: a minus sign, never accountants' brackets. Pinning one value made
+  // this fail when the nearest support changed — and it changed for a good reason, the old one being formed
+  // entirely from the last three bars' lows, which is the price's own footprint rather than a level under it.
+  assert.match(html, /−\d+\.\d%/, "a negative is shown with a minus, not a bracket");
   assert.ok(!/\(\$[\d,]/.test(html), "and never in accountants' brackets");
   assert.match(html, /FIXA/);
   assert.match(html, /120/, "shares");
@@ -1088,4 +1091,20 @@ test("a stock's own last bar is not a ceiling over it, on the page or in the sen
   assert.equal(spoken.clearAbove.length, 1, "the summary says clear air too");
   assert.ok(!spoken.near.some(x => x.side === "resistance"),
     "and never reports the stock as near a resistance that is its own last session");
+
+  // The mirror, because the distortion is symmetric: `zoneSide` seeds support from the last bars' LOWS exactly as
+  // it seeds resistance from their highs. A stock making new lows every session was shown its own last bar as the
+  // floor beneath it — measured at "$180.20–180.20 −0.1% · held 1", a level that had held against itself. This is
+  // the worse of the two sides to get wrong: it puts a floor under a falling stock that is not there.
+  const falling = Array.from({ length: climb }, (_, i) => 300 - i * 0.4);
+  const downBars = { time, open: falling, close: falling,
+    high: falling.map(v => v + 0.8), low: falling.map(v => v - 0.2) };
+  const down = computeLevels(downBars, settings());
+  const downCells = [...portfolioReport({ accounts: [account({ holdings: [{ symbol: "FALL",
+    holding: { symbol: "FALL", shares: 1, averageCost: 1 }, levels: down,
+    series: { daily: time.map((t, i) => ({ time: t, value: falling[i]! })) } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" }).matchAll(/<td class="level">([\s\S]*?)<\/td>/g)]
+    .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  assert.match(downCells[0]!, /none in this window/, "no floor is invented from the stock's own last bar");
+  assert.ok(!/held 1\b/.test(downCells[0]!));
 });

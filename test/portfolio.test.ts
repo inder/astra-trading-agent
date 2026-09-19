@@ -458,7 +458,13 @@ test("a strike is drawn against the stock only when nothing suggests the terms w
   // 10 shares. Exercise costs $500 and the stock must clear $50 — so a "$5" line against a $6 stock says the
   // opposite of the truth. This payload does not carry the deliverable, so standard terms cannot be verified here,
   // only contradicted: anything unusual withholds the marker and the strike stays in the row.
-  assert.match(strikeNotComparable({ ...standard, chainSymbol: "NVDA1" }, "NVDA")!, /NVDA1 chain/);
+  // Detected from the chain symbol's own shape, not by comparing it against the underlying it was called with: a
+  // position row carries ONLY chain_symbol, the grouping keys on it, and the same value comes back as the second
+  // argument — so that comparison could never differ at a live call site. This test was green on a pair the
+  // production path never produces, which is how the guard stayed dead.
+  assert.match(strikeNotComparable({ ...standard, chainSymbol: "NVDA1" }, "NVDA1")!, /adjusted chain/,
+    "the OCC suffix convention is the one signal this payload actually offers");
+  assert.match(strikeNotComparable({ ...standard, chainSymbol: "NVDA1" }, "NVDA")!, /adjusted chain/);
   assert.match(strikeNotComparable({ ...standard, multiplier: 10 }, "NVDA")!, /multiplier/);
   assert.match(strikeNotComparable({ ...standard, multiplier: null }, "NVDA")!, /multiplier/,
     "an unreadable multiplier is not an assumed 100");

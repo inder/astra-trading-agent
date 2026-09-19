@@ -145,6 +145,7 @@ export class TradingAgentService {
       // One cache for the whole report, not one per account: the same contract can be held in two accounts, and it
       // remembers failures as well as successes so an unavailable contract is not paid for twice.
       const instrumentCache = new Map<string, OptionInstrument | null>();
+      const markCache = new Map<string, OptionMark | null>();
       for (const [index, accountNumber] of numbers.entries()) {
         const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
         const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
@@ -181,7 +182,7 @@ export class TradingAgentService {
         const terms = contracts.length ? await readOptionInstruments(this.broker, contracts.map(c => c.optionId), instrumentCache) : null;
         // Pricing is a third budget, separate again from identifying and from charting. A contract that could not be
         // identified is still worth marking, and one that could not be marked is still worth listing.
-        const priced = contracts.length ? await readOptionMarks(this.broker, contracts.map(c => c.optionId)) : null;
+        const priced = contracts.length ? await readOptionMarks(this.broker, contracts.map(c => c.optionId), markCache) : null;
         // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
         // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
         // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
@@ -204,10 +205,15 @@ export class TradingAgentService {
         // not signed — a long and a short that offset are a large position to look at, not a $0 one, and ranking by
         // a signed sum would sort a big written book below a tiny bought one.
         const groupSize = (g: { holding?: Holding; contracts: OptionHolding[] }) => {
-          const shares = !g.holding ? 0 : g.holding.averageCost === null ? Number.MAX_SAFE_INTEGER : g.holding.shares * g.holding.averageCost;
-          const premium = g.contracts.reduce((n, c) =>
-            n + (c.averageCostPerShare === null || c.multiplier === null ? 0 : c.averageCostPerShare * c.multiplier * c.contracts), 0);
-          return shares === Number.MAX_SAFE_INTEGER ? shares : shares + premium;
+          // A cost the provider did not give is not a cost of zero, on either leg. Ranking an unknown share cost to
+          // the top and an unknown premium to the bottom applied opposite rules to the same absence — and put an
+          // options-only group whose premium was withheld silently last in line for a chart.
+          const unknown = (g.holding && g.holding.averageCost === null)
+            || g.contracts.some(c => c.averageCostPerShare === null || c.multiplier === null);
+          if (unknown) return Number.MAX_SAFE_INTEGER;
+          const shares = g.holding ? g.holding.shares * g.holding.averageCost! : 0;
+          const premium = g.contracts.reduce((n, c) => n + c.averageCostPerShare! * c.multiplier! * c.contracts, 0);
+          return shares + premium;
         };
         const charted = new Set([...bySymbol]
           .sort(([as, a], [bs, b]) => groupSize(b) - groupSize(a) || as.localeCompare(bs))
@@ -223,8 +229,9 @@ export class TradingAgentService {
               : quote?.close != null ? { mark: quote.close, markAt: quote.closeDate, markSource: "close" as const }
               : { mark: null, markAt: null, markSource: null };
             const priceNote = mark.mark !== null ? ""
-              : priced?.unpriced.has(c.optionId) ? "no price came back for this contract"
-              : quote ? "the provider sent no usable price for this contract" : "";
+              : priced?.unasked.has(c.optionId) ? "not priced within this report's limit"
+              : quote ? "the provider sent no usable price for this contract"
+              : priced?.unpriced.has(c.optionId) ? "no price came back for this contract" : "";
             const note = instrument ? undefined
               : terms?.unasked.has(c.optionId) ? "terms not fetched within this report's limit"
               : terms?.unreadable.has(c.optionId) ? "this contract's terms came back in a shape Astra could not read"

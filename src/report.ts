@@ -385,9 +385,14 @@ function row(entry: ReportHolding, id: string): string {
     ? null : (shareGain / shareCost) * 100;
   // Why the total above is a dash, on the line the dash is on. Each contract already says why IT has no value, but
   // a reader looking at the group's figure should not have to infer the cause from the rows beneath it.
-  const unvalued = contracts.length - valued.length;
-  const unpricedNote = value !== null || !unvalued ? ""
-    : `<span class="dist">${unvalued} of ${contracts.length} contract${contracts.length === 1 ? "" : "s"} not priced</span>`;
+  // Two different causes, and one word covered both: a contract with no price at all, and one priced but not
+  // valuable because a field it needs could not be read. The row beneath says which; the group note should not
+  // guess.
+  const unvalued = contracts.filter(c => !c.value);
+  const unpriced = unvalued.filter(c => c.mark === null).length;
+  const why = unpriced === unvalued.length ? "not priced" : unpriced === 0 ? "not valued" : "not priced or valued";
+  const unpricedNote = value !== null || !unvalued.length ? ""
+    : `<span class="dist">${unvalued.length} of ${contracts.length} contract${contracts.length === 1 ? "" : "s"} ${why}</span>`;
   const { support, resistance, toSupport, toResistance } = nearest(frame, price);
   const away = atrsAway(frame, price);
   const near = away <= 1;
@@ -480,9 +485,6 @@ function account(a: ReportAccount, scope: number): string {
     const { count, positions, skipped: dropped, truncated: more } = a.options;
     if (more) notes.push(`This account holds more contracts than one report can page through; beyond the ${count} listed below, the rest are not shown.`);
     if (dropped) notes.push(`${dropped} contract row${dropped === 1 ? "" : "s"} could not be read and ${dropped === 1 ? "is" : "are"} not listed — the ${count} below ${count === 1 ? "is" : "are"} what could be.`);
-    // The contracts came back but none of them survived the normalizer: the options figure stands with nothing
-    // beneath it, and the table would otherwise imply the account holds no contracts at all.
-    if (!positions && !dropped && !more) notes.push("No contract rows came back for this account's options figure.");
   }
   // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
   // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.
@@ -689,7 +691,7 @@ export function portfolioReport(input: ReportInput): string {
     .account { break-inside: auto; page-break-inside: auto; border: 0; padding: 0; margin-bottom: 18pt; }
     tr.holding, tr.contract { break-inside: avoid; page-break-inside: avoid; }
     tr.holding { break-after: avoid; page-break-after: avoid; }
-    tr.holding, tr.expand { break-after: auto; page-break-after: auto; }
+    tr.expand { break-after: auto; page-break-after: auto; }
     .account + .account { break-before: page; page-break-before: always; }
     /* A chart prints only where one was opened, and only the timeframe that was chosen — opening a holding must not
        quietly put four charts on paper. The tab labels go, so the chart's own title carries the timeframe. */

@@ -681,3 +681,103 @@ test("a contract that cannot be valued says why, even when its terms are known",
   assert.match(html, /FIXA Dec 18, 2026 \$44\.00 call\b/, "and the contract is still named by its terms");
   assert.ok(!/call · null|· long · short/.test(html), "with no direction invented for it");
 });
+
+test("the whole option path runs end to end: three reads, one group, a priced contract row", async t => {
+  // The gap a re-review found. Every other integration test leaves `optionPositionsAvailable` falsy, so `contracts`
+  // stays empty and the wiring between the three reads and the rendered row executes in NO test — the pieces are
+  // unit-tested and the glue is not. That is where a mistake hides: every unit test passes and the page quietly
+  // shows the wrong thing. It is also how the adjusted-contract guard stayed dead for three commits, green in a
+  // unit test that hand-fed it a pair the production path never produces.
+  const dataDirectory = mkdtempSync(join(tmpdir(), "astra-report-options-"));
+  const barPayload = (symbol: string) => ({ data: { results: [{ symbol, interval: "day", bounds: "regular",
+    bars: bars.time.map((t, i) => ({ begins_at: `${t}T00:00:00Z`, open_price: String(bars.open[i]), high_price: String(bars.high[i]),
+      low_price: String(bars.low[i]), close_price: String(bars.close[i]), volume: "1000", session: "reg" })) }] } });
+  const contractId = "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c5d";
+  const shortId = "3a4b5c6d-7e8f-4a1b-9c2d-0e1f2a3b4c99";
+  const reads: string[] = [];
+  const asked: Record<string, unknown[]> = {};
+  const broker = {
+    accountRead: async (tool: string) => {
+      reads.push(tool);
+      if (tool === "get_accounts") return { data: { accounts: [{ account_number: "100000000", brokerage_account_type: "individual", is_default: true }] } };
+      if (tool === "get_portfolio") return { data: { portfolio: { total_value: "60000", cash: "1000", equity_value: "50000", options_value: "9000" } } };
+      if (tool === "get_option_positions") return { data: { positions: [
+        // Captured shape: direction is `type`, quantity stays positive, the strike and right are NOT here.
+        { option_id: contractId, chain_symbol: "FIXA", type: "long", quantity: "4.0000", average_price: "6.2000",
+          expiration_date: "2026-12-18", trade_value_multiplier: "100.0000" },
+        // A short on the same underlying, so the group's money has to carry a sign through the whole pipeline.
+        { option_id: shortId, chain_symbol: "FIXA", type: "short", quantity: "2.0000", average_price: "3.1000",
+          expiration_date: "2026-11-20", trade_value_multiplier: "100.0000" },
+      ] } };
+      return { data: { positions: [{ symbol: "FIXA", quantity: "120", average_buy_price: "41.22" }], next_cursor: null } };
+    },
+    read: async (tool: string, args: any) => {
+      reads.push(tool);
+      (asked[tool] ??= []).push(args);
+      if (tool === "get_option_instruments") {
+        const ids = String(args.ids).split(",");
+        return { data: { instruments: ids.map(id => ({ id, chain_symbol: "FIXA", underlying_type: "equity",
+          expiration_date: "2026-12-18", strike_price: id === shortId ? "38.0000" : "44.0000",
+          type: id === shortId ? "put" : "call", state: "active", tradability: "tradable",
+          trade_value_multiplier: "100.0000" })) } };
+      }
+      if (tool === "get_option_quotes") {
+        return { data: { results: args.instrument_ids.map((id: string) => ({
+          quote: { instrument_id: id, mark_price: id === shortId ? "2.4000" : "7.8500", updated_at: "2026-09-16T20:02:11.000Z" },
+          close: { instrument_id: id, symbol: "FIXA", date: "2026-09-15", price: "7.4000", interpolated: false },
+        })) } };
+      }
+      return barPayload(args.symbols[0]);
+    },
+    status: () => ({ state: "connected", accountListAvailable: true, accountToolsAvailable: true,
+      optionPositionsAvailable: true, connectionId: "c1", paperDataAvailable: true }),
+    close: async () => {},
+  } as any;
+  const service = new TradingAgentService(dataDirectory, undefined, broker,
+    { ready: () => true, clock: () => Date.parse("2026-09-16T12:00:00Z"), auto: false });
+  t.after(async () => { await service.close(); rmSync(dataDirectory, { recursive: true, force: true }); });
+
+  const [chosen] = await service.accounts();
+  const written = await service.portfolioReport([chosen!.handle]);
+  const html = readFileSync(written.path, "utf8");
+
+  // All three reads happened, and the shapes they were asked with are the ones the provider actually accepts —
+  // which are NOT the same shape as each other, and inferring one from the other cost two live OAuth windows.
+  for (const tool of ["get_option_positions", "get_option_instruments", "get_option_quotes"])
+    assert.ok(reads.includes(tool), `${tool} was read`);
+  assert.equal(typeof (asked["get_option_instruments"]![0] as any).ids, "string", "instruments take a comma string");
+  assert.ok(Array.isArray((asked["get_option_quotes"]![0] as any).instrument_ids), "quotes take an array");
+
+  // Shares and contracts merged into ONE group under their underlying, not three separate rows.
+  assert.equal(written.holdings, 1, "one underlying, not one row per position");
+  assert.equal((html.match(/<tr class="holding/g) ?? []).length, 1);
+  assert.equal((html.match(/<tr class="contract">/g) ?? []).length, 2);
+
+  // The long contract, priced from the live mark, with its own clock — not the underlying's.
+  assert.match(html, /FIXA Dec 18, 2026 \$44\.00 call · long/);
+  assert.match(html, /\$7\.85<span class="dist">mark Sep 16, 4:02 PM ET<\/span>/, "the mark carries its own timestamp");
+  assert.match(html, /\$3,140/, "4 contracts × 100 × $7.85");
+
+  // The short. Value negative, P&L positive (the mark fell from $3.10 to $2.40) — the sign has to survive the
+  // instrument merge, where `type` means long/short on one object and call/put on the other.
+  assert.match(html, /FIXA Nov 20, 2026 \$38\.00 put · short/, "direction survived the merge with the instrument");
+  assert.match(html, /−\$480/, "a written contract is a liability: 2 × 100 × $2.40, negative");
+  // Group total: shares + long − short, all valued, so a number rather than a dash.
+  const shares = 120 * computed.price;
+  assert.ok(html.includes(`$${Math.round(shares + 3140 - 480).toLocaleString("en-US")}`),
+    `the group totals ${Math.round(shares + 3140 - 480)}`);
+  assert.ok(!/contracts? not priced|not valued/.test(html), "nothing is unpriced in this fixture");
+
+  // The strike is drawn against the underlying's own chart, once per distinct strike.
+  assert.match(html, /<g class="strike">/);
+  assert.match(html, /\$44\.00 strike · 4× Dec 18, 2026 call long/);
+  assert.match(html, /\$38\.00 strike · 2× Nov 20, 2026 put short/);
+
+  // The account note names what the table holds, and does not list options among things NOT listed.
+  assert.match(html, /The table below lists this account&#39;s stocks and option contracts\./);
+  assert.ok(!/not listed here: options/.test(html));
+  // And nothing the provider sends that predicts an outcome reaches the page.
+  for (const banned of ["chance_of_profit", "chance of profit", "break_even", "delta", "gamma", "vega", "theta", "rho"])
+    assert.ok(!new RegExp(banned, "i").test(html), `${banned} must not reach the page`);
+  assert.ok(!reads.some(r => /order|cancel|place|exercise/.test(r)), "and no tool that moves anything was called");
+});

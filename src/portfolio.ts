@@ -318,9 +318,16 @@ export interface OptionInstrument {
  *  withholds the marker. The strike still appears in the row — it simply is not drawn as though comparable. */
 export function strikeNotComparable(instrument: OptionInstrument, underlying: string): string | null {
   if (instrument.multiplier !== 100) return "a non-standard contract multiplier";
-  // An adjustment generally opens a new chain whose symbol carries a suffix (NVDA1), so a chain symbol that is not
-  // the underlying's own is the one hint in this payload that the terms may have been adjusted.
-  if (instrument.chainSymbol !== underlying) return `it trades in the ${instrument.chainSymbol} chain, not ${underlying}`;
+  // The OCC convention: an adjustment opens a NEW chain whose symbol carries a numeric suffix — NVDA1, NVDA2 — so a
+  // trailing digit is the one signal this payload actually offers that the deliverable may not be 100 ordinary
+  // shares. A convention, not proof, which is why it withholds the marker rather than asserting anything.
+  //
+  // This previously compared `instrument.chainSymbol` against the underlying it was called with, which could never
+  // differ: a position row carries only `chain_symbol`, the grouping keys on it, and the same value came back in as
+  // the second argument. The guard was dead at every live call site and green in a unit test that passed the two
+  // apart by hand — the exact defect an integration test exists to catch.
+  if (/\d$/.test(instrument.chainSymbol)) return `${instrument.chainSymbol} is an adjusted chain, so its deliverable may not be 100 shares`;
+  if (instrument.chainSymbol && instrument.chainSymbol !== underlying) return `it trades in the ${instrument.chainSymbol} chain, not ${underlying}`;
   if (instrument.underlyingType && instrument.underlyingType !== "equity") return `its underlying is ${instrument.underlyingType}, not an equity`;
   return null;
 }
@@ -519,13 +526,22 @@ export function normalizeOptionQuotes(raw: unknown): { marks: Map<string, Option
     const optionId = typeof quote?.instrument_id === "string" ? quote.instrument_id
       : typeof close?.instrument_id === "string" ? close.instrument_id : "";
     if (!UUID.test(optionId)) { skipped++; continue; }
-    const settled = close?.interpolated === true ? null : positive(close?.price);
+    // Only an explicit `false` is trusted. An absent or non-boolean flag is not evidence the bar is real, and a
+    // padded bar reaching a money column is the failure that once discarded six years of history.
+    const settled = close?.interpolated === false ? positive(close?.price) : null;
+    // A price travels with the session it came from, or it does not travel. Keeping a number whose timestamp could
+    // not be read would render a bare figure in a column whose entire discipline is saying which session it is —
+    // and a reader cannot tell a stale mark from a live one without it.
+    const markAt = typeof quote?.updated_at === "string" ? quote.updated_at : null;
+    const closeDate = typeof close?.date === "string" && isDate(close.date) ? close.date : null;
     marks.set(optionId, {
       optionId,
-      mark: positive(quote?.mark_price),
-      markAt: typeof quote?.updated_at === "string" ? quote.updated_at : null,
-      close: settled,
-      closeDate: settled !== null && typeof close?.date === "string" && isDate(close.date) ? close.date : null,
+      mark: markAt === null ? null : positive(quote?.mark_price),
+      markAt,
+      close: closeDate === null ? null : settled,
+      // Both directions. A date with no price behind it misleads as much as a price with no date — it implies a
+      // close was read on that session when the row was padded or unreadable.
+      closeDate: closeDate === null || settled === null ? null : closeDate,
     });
   }
   return { marks, skipped };
@@ -538,28 +554,44 @@ export function normalizeOptionQuotes(raw: unknown): { marks: Map<string, Option
  *  duplicate in the batch spends a slot in the budget and buys nothing. A contract with no mark is not an error; it
  *  is a contract shown with its cost and quantity and no value, which is better than a value inferred from cost. */
 export const QUOTE_BATCH = 20;
+/** Its own cap, not the instrument lookup's borrowed. They bound different reads for different reasons, and one
+ *  constant serving both hides that a change to either is a change to the other. */
+export const MAX_QUOTE_IDS = 200;
 export async function readOptionMarks(
   broker: Pick<RobinhoodConnection, "read">,
   ids: readonly string[],
-): Promise<{ marks: Map<string, OptionMark>; unpriced: Set<string> }> {
-  const marks = new Map<string, OptionMark>(), unpriced = new Set<string>();
-  const distinct = [...new Set(ids)];
-  const wanted = distinct.slice(0, MAX_INSTRUMENT_IDS);
-  for (const id of distinct.slice(MAX_INSTRUMENT_IDS)) unpriced.add(id);
+  cache: Map<string, OptionMark | null> = new Map(),
+): Promise<{ marks: Map<string, OptionMark>; unpriced: Set<string>; unasked: Set<string> }> {
+  const marks = new Map<string, OptionMark>(), unpriced = new Set<string>(), unasked = new Set<string>();
+  // Carried across accounts like the instrument cache, and for a sharper reason: the same contract held in two
+  // accounts quoted twice can come back at two different marks with two different timestamps, and the page would
+  // show one contract at two prices. It is also what makes the cap below per-REPORT rather than per-account.
+  const fresh: string[] = [];
+  for (const id of new Set(ids)) {
+    if (!cache.has(id)) { fresh.push(id); continue; }
+    const hit = cache.get(id)!;
+    if (hit) marks.set(id, hit); else unpriced.add(id);
+  }
+  const wanted = fresh.slice(0, MAX_QUOTE_IDS);
+  // Declining to ask is not the provider declining to answer. Collapsing the two told a reader their broker had no
+  // price for a contract this report never asked about — the distinction the instruments path already draws.
+  for (const id of fresh.slice(MAX_QUOTE_IDS)) unasked.add(id);
   for (let i = 0; i < wanted.length; i += QUOTE_BATCH) {
     const batch = wanted.slice(i, i + QUOTE_BATCH);
     try {
       const { marks: back } = normalizeOptionQuotes(await broker.read("get_option_quotes", { instrument_ids: batch }));
       for (const id of batch) {
         const hit = back.get(id);
-        if (hit) marks.set(id, hit); else unpriced.add(id);
+        if (hit) { marks.set(id, hit); cache.set(id, hit); } else { unpriced.add(id); cache.set(id, null); }
       }
     } catch (error) {
       // The boundary refusing this tool is a fact about the connection, not about any contract — the same reason
       // the positions and instruments reads rethrow it rather than blaming the provider on the page.
       if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      // Not cached: a batch that failed says nothing durable about its contracts, and caching the failure would
+      // deny them a second chance in the next account that holds them.
       for (const id of batch) unpriced.add(id);
     }
   }
-  return { marks, unpriced };
+  return { marks, unpriced, unasked };
 }

@@ -604,9 +604,14 @@ const ASTRA_MARK = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="6
   </g>
 </svg>`;
 /** Percent-encoded rather than base64: an SVG data URI stays human-readable in the markup, so a reader viewing
- *  source can see exactly what the icon is instead of an opaque blob. Only the characters that would end the
- *  attribute or be read as a fragment are escaped. */
-const ASTRA_ICON = `data:image/svg+xml,${ASTRA_MARK.replace(/[#%"'<>]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).replace(/\s+/g, " ")}`;
+ *  source can see exactly what the icon is instead of an opaque blob.
+ *
+ *  The escape set covers what would end the attribute (`"`), be read as markup (`<`, `>`), start a fragment (`#`),
+ *  begin an escape of its own (`%`), or be decoded before the URI parser ever sees it (`&`). The last one is the
+ *  only one today's mark does not contain, and it is the reason to keep it: an `&amp;` added to the description
+ *  later would be HTML-decoded to a bare `&`, leaving malformed XML and no icon — and the drift test cannot catch
+ *  that, because it URL-decodes the attribute without HTML-decoding it first. */
+const ASTRA_ICON = `data:image/svg+xml,${ASTRA_MARK.replace(/[#%"'<>&]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).replace(/\s+/g, " ")}`;
 
 /** The whole report. Self-contained: no network, no fonts to fetch, and one small script for the print button whose
  *  hash is named in the page's own policy, so nothing else can run even if something got into the markup. */
@@ -617,9 +622,9 @@ export function portfolioReport(input: ReportInput): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Portfolio levels — ${escape(day(input.generatedAt.slice(0, 10)))}</title>
-<link rel="icon" href="${ASTRA_ICON}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="content-security-policy" content="${REPORT_CSP}">
+<link rel="icon" href="${ASTRA_ICON}">
 <style>
   :root { color-scheme: light dark;
     --ink: #10171c; --muted: #5a6b70; --rule: #d6dedc; --ground: #fbfcfc; --panel: #fff;

@@ -57,10 +57,12 @@ No real-account readiness or trading performance is claimed.
 
 - Trading is PAPER only: no real orders and no live flag. Real accounts are read,
   but only read — balances, equity positions and option positions, when asked, for the portfolio
-  report. Its profit and loss is unrealized and covers the stocks held now, with
-  every other class the account holds stated at the value Robinhood reports for
-  it rather than listed; realized
-  P&L, transaction history and account-wide return are not read.
+  report. Its profit and loss is unrealized and covers the stocks and option
+  contracts held now; a contract's gain is stated against the premium it was
+  opened at, which is neither return on collateral nor on capital. Crypto,
+  futures, event contracts, fixed income and mutual funds are stated at the value
+  Robinhood reports for each rather than listed, because nothing itemizes them.
+  Realized P&L, transaction history and account-wide return are not read.
 - Assumed ask/bid fills, no execution guarantees, partial fills or actual fees.
   P&L excludes fees; missing marks are unavailable, never zero-valued marks.
 - Polling (default one second) is not streaming. Latency and the freshness/gap

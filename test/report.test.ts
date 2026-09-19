@@ -789,7 +789,8 @@ test("the whole option path runs end to end: three reads, one group, a priced co
 
 test("the report wears the product's own mark, and the copy cannot drift from the source", async () => {
   const { readFileSync } = await import("node:fs");
-  const root = new URL("..", import.meta.url).pathname;
+  const { fileURLToPath } = await import("node:url");
+  const root = fileURLToPath(new URL("..", import.meta.url));
   const source = readFileSync(root + "docs/assets/astra-mark.svg", "utf8").trim();
   const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
 

@@ -280,7 +280,7 @@ function technicals(symbol: string, levels: Levels, series: { daily: Point[]; we
     const from = Math.max(0, source.findIndex(p => p.time >= frame.start));
     const bar = frame.bar === "week" ? "week" : "day";
     return `<div class="pane">${chart(source.slice(from), frame, levels.price, `${symbol} · ${frame.label}`, cost, priceNote(levels, true), strikes)}
-      <p class="legend">${frame.sinceListing ? `<strong>Short window: this holds ${frame.sessions} ${bar}${frame.sessions === 1 ? "" : "s"} of trading, because ${escape(symbol)} was listed inside it${source[from] ? ` and its history starts ${escape(day(source[from]!.time))}` : ""}.</strong> ` : ""}Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s traded into it without closing through. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
+      <p class="legend">${frame.sinceListing ? `<strong>Short window: this holds ${frame.sessions} ${bar}${frame.sessions === 1 ? "" : "s"} of trading${source[from] ? `, because the history available for ${escape(symbol)} starts ${escape(day(source[from]!.time))}` : ""} — later than this window opens, so it is not a full one.</strong> ` : ""}Measured on ${bar === "week" ? "weekly" : "daily"} bars: a ${bar} moves ${money(frame.atr)} on average, and that sets how wide these zones are. The nearest three zones on each side are drawn — shaded below the price is support, above it resistance — and each is labelled with how many ${bar}s reached it — trading into it, or within a small tolerance of it — without closing through. Consecutive ${bar}s each count, and the count is taken over the same bars the zone was built from, so it is a record of this window, not a score. A dashed box is a gap the price has not traded back into. Changing the tab changes the window the rules looked at, so the zones change with it.</p></div>`;
   };
   const selected = Math.max(0, frames.findIndex(x => x.timeframe === levels.defaultTimeframe));
   // The axis is the UNDERLYING's price. An option premium never goes on it, so the label says whose price this is —
@@ -450,7 +450,12 @@ function account(a: ReportAccount, scope: number): string {
   // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
   // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.
   // Saying the total excludes them would misstate a money figure.
-  if (unpriced) notes.push(`${unpriced} holding${unpriced === 1 ? "" : "s"} below could not be priced, so ${unpriced === 1 ? "it shows" : "they show"} no value, gain or levels — ${unpriced === 1 ? "it is" : "they are"} still counted in the figures above.`);
+  // Two different facts, and one sentence used to cover both: a holding this report chose not to chart, and one
+  // whose history could not be read. Blaming a price read that was never attempted sends a reader to the broker.
+  const uncharted = rows.filter(r => !r.levels && r.unavailable?.startsWith("not charted")).length;
+  const unreadable = unpriced - uncharted;
+  if (uncharted) notes.push(`${uncharted} holding${uncharted === 1 ? "" : "s"} below ${uncharted === 1 ? "is" : "are"} not charted by this report, so ${uncharted === 1 ? "it shows" : "they show"} no value, gain or levels — ${uncharted === 1 ? "it is" : "they are"} still counted in the figures above.`);
+  if (unreadable) notes.push(`${unreadable} holding${unreadable === 1 ? "" : "s"} below could not be priced, so ${unreadable === 1 ? "it shows" : "they show"} no value, gain or levels — ${unreadable === 1 ? "it is" : "they are"} still counted in the figures above.`);
   return `<section class="account">
   <header>
     <h2>${escape(a.label)}</h2>
@@ -680,8 +685,10 @@ ${accounts}
 "last trade" are single trades later than the last close Robinhood has published — which is why one can appear here
 before today's close does — and they are not closing prices. Distances are measured from the price shown to the
 nearest edge of a zone. Support and resistance are computed by fixed rules from settled daily bars, or from weekly
-bars on the five-year chart, and never from a trade after the last close; "held 24" counts how many bars traded into
-that zone without closing through it — a record of what happened, not a probability that it happens again. Nothing
+bars on the five-year chart. No zone is drawn from a trade later than the last settled close, though a later price does
+decide which of them are shown and which side of it they fall on. "Held 24" counts how many bars reached that zone —
+entering it, or coming within a small tolerance — without closing through it: a record of what happened in this window,
+not a probability that it happens again. A held strike is drawn against the underlying's price, and is not a breakeven. Nothing
 here is a recommendation to buy or sell, and Astra places no orders.</footer>
 <script>${script}</script>
 </body></html>`;

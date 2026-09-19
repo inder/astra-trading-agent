@@ -23,10 +23,13 @@ export interface ReportContract {
   multiplier: number | null;
   /** Premium per quoted unit, as opened. */
   averageCostPerShare: number | null;
-  /** The current mark, and when it was taken. A contract's mark and its underlying's last trade are two different
+  /** The current price, and when it was taken. A contract's price and its underlying's last trade are two different
    *  clocks, and the page says both rather than implying one time for the row. */
   mark: number | null;
   markAt: string | null;
+  /** Which number `mark` is: the provider's live mark, or the last settled close. They are different facts and a
+   *  contract priced from Friday's close beside one priced this morning must not read as the same kind of number. */
+  markSource?: "mark" | "close" | null;
   value: OptionValuation | null;
   /** Why this row carries no terms, or no value, when it does not. */
   note?: string;
@@ -333,7 +336,9 @@ function contractRow(c: ReportContract, symbol: string, price: number | null): s
     <th scope="row">${escape(contractName(c, symbol))}</th>
     <td class="num">${c.contracts.toLocaleString("en-US")}${multiplier}</td>
     <td class="num">${money(c.averageCostPerShare)}</td>
-    <td class="num">${c.mark === null ? "—" : money(c.mark)}${c.markAt ? `<span class="dist">mark ${escape(easternTime(c.markAt) + " ET")}</span>` : ""}</td>
+    <td class="num">${c.mark === null ? "—" : money(c.mark)}${
+      c.mark === null || !c.markAt ? "" : `<span class="dist">${escape(
+        c.markSource === "close" ? `close ${day(c.markAt)}` : `mark ${easternTime(c.markAt)} ET`)}</span>`}</td>
     <td class="num">${v ? money(v.value, 0) : "—"}</td>
     <td class="num ${v?.gain == null ? "" : v.gain < 0 ? "down" : "up"}">${v?.gain === null || v === null ? "—" : money(v.gain, 0)}${
       v?.gainPctOfPremium == null ? "" : `<span class="dist">${percent(v.gainPctOfPremium)} of premium</span>`}</td>
@@ -378,6 +383,11 @@ function row(entry: ReportHolding, id: string): string {
   // denominators, so a mixed group's percentage would be a number with no meaning behind it.
   const gainPct = contracts.length || shareCost === null || shareCost === 0 || shareGain === null
     ? null : (shareGain / shareCost) * 100;
+  // Why the total above is a dash, on the line the dash is on. Each contract already says why IT has no value, but
+  // a reader looking at the group's figure should not have to infer the cause from the rows beneath it.
+  const unvalued = contracts.length - valued.length;
+  const unpricedNote = value !== null || !unvalued ? ""
+    : `<span class="dist">${unvalued} of ${contracts.length} contract${contracts.length === 1 ? "" : "s"} not priced</span>`;
   const { support, resistance, toSupport, toResistance } = nearest(frame, price);
   const away = atrsAway(frame, price);
   const near = away <= 1;
@@ -394,8 +404,9 @@ function row(entry: ReportHolding, id: string): string {
     <td class="num">${shares}</td>
     <td class="num">${money(holding?.averageCost ?? null)}</td>
     <td class="num">${money(price)}<span class="dist">${escape(priceNote(levels))}</span></td>
-    <td class="num">${money(value, 0)}</td>
-    <td class="num ${gain === null ? "" : gain < 0 ? "down" : "up"}">${money(gain, 0)}<span class="dist">${percent(gainPct)}</span></td>
+    <td class="num">${money(value, 0)}${unpricedNote}</td>
+    <td class="num ${gain === null ? "" : gain < 0 ? "down" : "up"}">${money(gain, 0)}${
+      gainPct === null ? "" : `<span class="dist">${percent(gainPct)}</span>`}</td>
     <td class="level">${zone(support, toSupport)}</td>
     <td class="level">${zone(resistance, toResistance)}</td>
   </tr>

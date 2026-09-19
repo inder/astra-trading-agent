@@ -484,3 +484,82 @@ export function valueOption(holding: OptionHolding, mark: number | null): Option
   const gain = sign * units * (mark - a);
   return { value, basis, gain, gainPctOfPremium: a === 0 ? null : gain / Math.abs(basis) * 100 };
 }
+
+/** A contract's current price, from `get_option_quotes`.
+ *
+ *  The provider returns a live `quote` and a settled `close` as two separate objects, which is the same distinction
+ *  the report already draws for shares — so an option's price carries the existing provenance discipline rather than
+ *  a parallel one. Both are kept; the renderer says which it is showing.
+ *
+ *  Rebuilt field by field like every other read, and that matters more here than usual: the payload also carries
+ *  `chance_of_profit_long` and `chance_of_profit_short`, the provider's estimate of whether a held position will make
+ *  money. That is a prediction about the user's own position wearing the clothes of a measurement, and this product
+ *  does not make it. It is not dropped at the renderer — it never enters a type, because a field that exists is a
+ *  field something eventually prints. The greeks are out of scope for the same reason: nothing needs them yet. */
+export interface OptionMark {
+  optionId: string;
+  /** The mark, and when the quote behind it was taken. */
+  mark: number | null;
+  markAt: string | null;
+  /** The last settled close and its session. Null when the provider flagged the row `interpolated` — a padded bar is
+   *  not a close, exactly as in the daily bars, where trusting one discarded six years of real history. */
+  close: number | null;
+  closeDate: string | null;
+}
+
+export function normalizeOptionQuotes(raw: unknown): { marks: Map<string, OptionMark>; skipped: number } {
+  const rows = Array.isArray((raw as any)?.data?.results) ? (raw as any).data.results : null;
+  if (!rows) throw new Error("Option quotes unavailable");
+  const marks = new Map<string, OptionMark>();
+  let skipped = 0;
+  for (const row of rows) {
+    const quote = row?.quote, close = row?.close;
+    // Either object can carry the id, and a row is useless without one: the server returns rows positionally and
+    // does not deduplicate, so position is not an identity and the id is the only thing to key on.
+    const optionId = typeof quote?.instrument_id === "string" ? quote.instrument_id
+      : typeof close?.instrument_id === "string" ? close.instrument_id : "";
+    if (!UUID.test(optionId)) { skipped++; continue; }
+    const settled = close?.interpolated === true ? null : positive(close?.price);
+    marks.set(optionId, {
+      optionId,
+      mark: positive(quote?.mark_price),
+      markAt: typeof quote?.updated_at === "string" ? quote.updated_at : null,
+      close: settled,
+      closeDate: settled !== null && typeof close?.date === "string" && isDate(close.date) ? close.date : null,
+    });
+  }
+  return { marks, skipped };
+}
+
+/** Marks for a set of contracts. Same reconcile-by-id discipline as the instrument lookup, and the same reason: a
+ *  response can come back the right length and still be missing what was asked for.
+ *
+ *  Deduped before sending, because the server does NOT deduplicate — asking for one id twice returned two rows, so a
+ *  duplicate in the batch spends a slot in the budget and buys nothing. A contract with no mark is not an error; it
+ *  is a contract shown with its cost and quantity and no value, which is better than a value inferred from cost. */
+export const QUOTE_BATCH = 20;
+export async function readOptionMarks(
+  broker: Pick<RobinhoodConnection, "read">,
+  ids: readonly string[],
+): Promise<{ marks: Map<string, OptionMark>; unpriced: Set<string> }> {
+  const marks = new Map<string, OptionMark>(), unpriced = new Set<string>();
+  const distinct = [...new Set(ids)];
+  const wanted = distinct.slice(0, MAX_INSTRUMENT_IDS);
+  for (const id of distinct.slice(MAX_INSTRUMENT_IDS)) unpriced.add(id);
+  for (let i = 0; i < wanted.length; i += QUOTE_BATCH) {
+    const batch = wanted.slice(i, i + QUOTE_BATCH);
+    try {
+      const { marks: back } = normalizeOptionQuotes(await broker.read("get_option_quotes", { instrument_ids: batch }));
+      for (const id of batch) {
+        const hit = back.get(id);
+        if (hit) marks.set(id, hit); else unpriced.add(id);
+      }
+    } catch (error) {
+      // The boundary refusing this tool is a fact about the connection, not about any contract — the same reason
+      // the positions and instruments reads rethrow it rather than blaming the provider on the page.
+      if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
+      for (const id of batch) unpriced.add(id);
+    }
+  }
+  return { marks, unpriced };
+}

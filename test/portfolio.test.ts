@@ -464,3 +464,93 @@ test("a strike is drawn against the stock only when nothing suggests the terms w
     "an unreadable multiplier is not an assumed 100");
   assert.match(strikeNotComparable({ ...standard, underlyingType: "index" }, "NVDA")!, /index/);
 });
+
+test("an option quote is read as the provider sends it, and the prediction fields never enter the type", async () => {
+  const { normalizeOptionQuotes } = await import("../src/portfolio.ts");
+  const id = "9a4657de-cd21-406b-a241-0e1f2a3b4c5d";
+  // Captured 2026-09-19. Two objects per row: a live quote and a settled close.
+  const row = (over: { quote?: Record<string, unknown>; close?: Record<string, unknown> | null } = {}) => ({
+    quote: { instrument_id: id, updated_at: "2026-09-18T20:02:11.000Z",
+      mark_price: "7.8500", adjusted_mark_price: "7.8400", bid_price: "7.8000", ask_price: "7.9000",
+      bid_size: 12, ask_size: 30, break_even_price: "136.2000",
+      previous_close_price: "7.4000", previous_close_date: "2026-09-17",
+      implied_volatility: "0.4210", delta: "0.5600", gamma: "0.0180", rho: "0.0900",
+      theta: "-0.0450", vega: "0.1300", open_interest: 4210, volume: 880,
+      chance_of_profit_long: "0.4600", chance_of_profit_short: "0.5400", ...over.quote },
+    close: over.close === null ? null
+      : { instrument_id: id, symbol: "ETHA", date: "2026-09-17", price: "7.4000",
+          interpolated: false, source: "ddb-market-snapshot", ...over.close },
+  });
+  const one = (over = {}) => normalizeOptionQuotes({ data: { results: [row(over)] } });
+
+  assert.deepEqual([...one().marks.values()], [{ optionId: id, mark: 7.85,
+    markAt: "2026-09-18T20:02:11.000Z", close: 7.4, closeDate: "2026-09-17" }]);
+
+  // The provider's estimate of whether a held position will make money is a prediction about the founder's own
+  // position wearing the clothes of a measurement. It is refused at the TYPE, not at the renderer: a field that
+  // exists is a field something eventually prints.
+  const serialized = JSON.stringify([...one().marks.values()]);
+  for (const banned of ["chance_of_profit", "0.46", "0.54", "delta", "theta", "implied_volatility", "break_even"])
+    assert.ok(!serialized.includes(banned), `${banned} must not survive the normalizer`);
+
+  // `interpolated` is the same field, and the same trap, as the daily bars — where trusting one discarded six years
+  // of real history. A padded close is not a close and may not be shown as one.
+  const padded = one({ close: { interpolated: true } });
+  assert.equal([...padded.marks.values()][0]!.close, null, "an interpolated close is not a close");
+  assert.equal([...padded.marks.values()][0]!.closeDate, null, "and it carries no session either");
+  assert.equal([...padded.marks.values()][0]!.mark, 7.85, "while the live mark is untouched by it");
+
+  // Either object can carry the id, and a row without one is useless: the server returns rows positionally and does
+  // not deduplicate, so position is not an identity.
+  assert.equal([...one({ quote: { instrument_id: undefined } }).marks.keys()][0], id, "the close's id serves");
+  assert.equal(normalizeOptionQuotes({ data: { results: [
+    { quote: { instrument_id: "not-a-uuid" }, close: null }] } }).skipped, 1, "and a row with neither is dropped");
+
+  // A contract with no usable price is not an error — it is a contract shown without a value.
+  assert.equal([...one({ quote: { mark_price: "0" } }).marks.values()][0]!.mark, null);
+  assert.throws(() => normalizeOptionQuotes({ data: {} }), /Option quotes unavailable/);
+});
+
+test("marks are asked for once per contract, and the server's duplicates do not become the answer", async () => {
+  const { readOptionMarks, QUOTE_BATCH } = await import("../src/portfolio.ts");
+  const id = (n: number) => `9a4657de-cd21-406b-a241-0e1f2a3b${String(n).padStart(4, "0")}`;
+  const quote = (n: number) => ({ quote: { instrument_id: id(n), mark_price: "7.8500", updated_at: "2026-09-18T20:02:11.000Z" },
+    close: { instrument_id: id(n), date: "2026-09-17", price: "7.4000", interpolated: false } });
+
+  // Measured: asking for the same id twice returned TWO rows. The server does not deduplicate, so a duplicate in the
+  // batch spends a slot in the budget and buys nothing — the caller dedupes before sending.
+  const sent: string[][] = [];
+  const broker = { read: async (_t: string, args: any) => {
+    sent.push(args.instrument_ids);
+    return { data: { results: args.instrument_ids.map((x: string) => quote(Number(x.slice(-4)))) } } as never;
+  } };
+  const out = await readOptionMarks(broker as never, [id(1), id(1), id(2)]);
+  assert.deepEqual(sent[0], [id(1), id(2)], "the duplicate never reaches the wire");
+  assert.equal(out.marks.size, 2);
+  assert.equal(out.unpriced.size, 0);
+  assert.equal(out.marks.get(id(1))!.mark, 7.85);
+
+  // Arrays, not a comma string — the opposite of get_option_instruments, which rejects arrays. Sibling tools, same
+  // concept, two incompatible shapes; inferring one from the other cost two live OAuth windows.
+  assert.ok(Array.isArray(sent[0]), "instrument_ids is an array");
+
+  // A contract the response omits is unpriced, not missing-and-blamed: it renders with cost and quantity, no value.
+  const partial = { read: async (_t: string, args: any) =>
+    ({ data: { results: args.instrument_ids.slice(1).map((x: string) => quote(Number(x.slice(-4)))) } }) as never };
+  const gap = await readOptionMarks(partial as never, [id(1), id(2)]);
+  assert.deepEqual([...gap.unpriced], [id(1)]);
+  assert.equal(gap.marks.size, 1);
+
+  // A failing batch leaves its contracts unpriced rather than taking the report down.
+  const broken = { read: async () => { throw new Error("Robinhood market-data read failed"); } };
+  assert.equal((await readOptionMarks(broken as never, [id(1)])).unpriced.size, 1);
+  // But the boundary refusing the tool is a fact about the connection, and is rethrown.
+  const refused = { read: async () => { throw new Error("Broker mutation or unsupported tool blocked"); } };
+  await assert.rejects(readOptionMarks(refused as never, [id(1)]), /Broker mutation or unsupported tool blocked/);
+
+  // Batches are bounded.
+  const many = Array.from({ length: QUOTE_BATCH * 2 + 3 }, (_, i) => id(i + 1));
+  sent.length = 0;
+  await readOptionMarks(broker as never, many);
+  assert.ok(sent.every(b => b.length <= QUOTE_BATCH), `no batch exceeds ${QUOTE_BATCH}: ${sent.map(b => b.length).join(",")}`);
+});

@@ -6,7 +6,8 @@ import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type DroppedBars, type EquityMarketQuote } from "./market-data.ts";
 import { BOUNDARY_ERRORS, MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, readOptionHoldings,
-  readOptionInstruments, sealed, strikeNotComparable, type AccountSummary, type Holding, type OptionHolding, type OptionInstrument } from "./portfolio.ts";
+  readOptionInstruments, readOptionMarks, sealed, strikeNotComparable, valueOption,
+  type AccountSummary, type Holding, type OptionHolding, type OptionInstrument, type OptionMark } from "./portfolio.ts";
 import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportContract, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
@@ -178,6 +179,9 @@ export class TradingAgentService {
         // Contract terms are identified on their own budget, before charting decides anything. Strike and call/put
         // are inventory fields: a contract must not lose its name because its underlying fell outside the chart cap.
         const terms = contracts.length ? await readOptionInstruments(this.broker, contracts.map(c => c.optionId), instrumentCache) : null;
+        // Pricing is a third budget, separate again from identifying and from charting. A contract that could not be
+        // identified is still worth marking, and one that could not be marked is still worth listing.
+        const priced = contracts.length ? await readOptionMarks(this.broker, contracts.map(c => c.optionId)) : null;
         // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
         // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
         // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
@@ -212,6 +216,15 @@ export class TradingAgentService {
         const rows: ReportHolding[] = [...bySymbol].map(([symbol, group]) => {
           const reported: ReportContract[] = group.contracts.map(c => {
             const instrument = terms?.found.get(c.optionId);
+            // Prefer the live mark; fall back to the last settled close; say which. A close the provider flagged
+            // `interpolated` never arrives here — the normalizer drops it, the same rule the daily bars follow.
+            const quote: OptionMark | undefined = priced?.marks.get(c.optionId);
+            const mark = quote?.mark != null ? { mark: quote.mark, markAt: quote.markAt, markSource: "mark" as const }
+              : quote?.close != null ? { mark: quote.close, markAt: quote.closeDate, markSource: "close" as const }
+              : { mark: null, markAt: null, markSource: null };
+            const priceNote = mark.mark !== null ? ""
+              : priced?.unpriced.has(c.optionId) ? "no price came back for this contract"
+              : quote ? "the provider sent no usable price for this contract" : "";
             const note = instrument ? undefined
               : terms?.unasked.has(c.optionId) ? "terms not fetched within this report's limit"
               : terms?.unreadable.has(c.optionId) ? "this contract's terms came back in a shape Astra could not read"
@@ -219,11 +232,12 @@ export class TradingAgentService {
             return { expiry: c.expiry, contracts: c.contracts, direction: c.direction, multiplier: c.multiplier,
               averageCostPerShare: c.averageCostPerShare,
               right: instrument?.right ?? null, strike: instrument?.strike ?? null,
-              // No mark yet: get_option_quotes has never been captured, and this slice will not price a contract
-              // against a guessed payload shape. A contract with no mark shows its cost and quantity and no value,
-              // which is the stated fallback — not a value inferred from what it cost.
-              mark: null, markAt: null, value: null,
-              note: [note, c.incomplete?.length ? `not valued: ${c.incomplete.join(", ")} could not be read` : ""]
+              // A live mark where there is one, the last settled close where there is not. Which of the two is
+              // shown travels with the number, exactly as a share price says whether it is a close or an
+              // after-hours print — a contract priced from Friday's close beside one priced from this morning is
+              // two different facts, and a bare figure would make them look like one.
+              ...mark, value: valueOption(c, mark.mark),
+              note: [note, priceNote, c.incomplete?.length ? `not valued: ${c.incomplete.join(", ")} could not be read` : ""]
                 .filter(Boolean).join(" · ") || undefined,
               strikeNotDrawn: instrument ? strikeNotComparable(instrument, symbol) ?? undefined : undefined };
           });

@@ -624,7 +624,8 @@ test("a group total covers every contract in it, or says it is unknown", () => {
   const groupRow = withUnvalued.match(/<tr class="holding[^"]*">[\s\S]*?<\/tr>/)![0];
   assert.ok(!groupRow.includes(`$${Math.round(shares).toLocaleString("en-US")}`),
     "the share figure alone is not the group's value when a contract could not be priced");
-  assert.match(groupRow, /<td class="num">—<\/td>/, "an unknown total is a dash, not a number that omits a part");
+  assert.match(groupRow, /<td class="num">—/, "an unknown total is a dash, not a number that omits a part");
+  assert.match(groupRow, /1 of 1 contract not priced/, "and the dash says why, on the line the dash is on");
 
   // The same group with every contract valued does state a total — the rule is completeness, not pessimism.
   const allValued = portfolioReport({ accounts: [account({

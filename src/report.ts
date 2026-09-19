@@ -581,6 +581,38 @@ const SCRIPT = `document.getElementById("print").addEventListener("click",functi
 export const REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; " +
   `script-src 'sha256-${createHash("sha256").update(SCRIPT).digest("base64")}'; base-uri 'none'; form-action 'none'`;
 
+/** Astra's mark, inlined. The page is served on loopback AND saved to disk by the "Save this page" link, so a
+ *  favicon fetched from anywhere would be missing from exactly the copy someone keeps — and the page's own policy
+ *  is `default-src 'none'` with `img-src data:`, which forbids fetching it in the first place. A data URI is the
+ *  only form that satisfies both.
+ *
+ *  Held as a copy of `docs/assets/astra-mark.svg` rather than read from it: nothing in this module touches the
+ *  filesystem, which is what lets the whole renderer be exercised without one. A test pins the two together. */
+const ASTRA_MARK = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Astra</title>
+  <desc id="desc">A Japanese tanto-inspired dagger with a clipped point, terminal-green cutting edge, restrained guard, and diamond-wrapped graphite grip.</desc>
+  <rect x="1" y="1" width="62" height="62" rx="16" fill="#10171C" stroke="#00FF88" stroke-opacity=".25"/>
+  <g transform="rotate(40 32 32)">
+    <path d="M38 6 37 37H28V17Z" fill="#194B39"/>
+    <path d="M38 6 33 19 33 37H37Z" fill="#00FF88"/>
+    <path d="M38 6 37 37" stroke="#BDFFE0" stroke-width="1"/>
+    <path d="M28 17 38 6" stroke="#56FFB0" stroke-width="1"/>
+    <rect x="27" y="35" width="11" height="4" rx=".8" fill="#859B9D"/>
+    <rect x="23" y="39" width="19" height="3" rx="1" fill="#D3DEDD"/>
+    <path d="M29 42H36V54L34 57H31L29 54Z" fill="#25343B" stroke="#72878C" stroke-width="1"/>
+    <path d="m32.5 44 2 2-2 2-2-2Zm0 6 2 2-2 2-2-2Z" fill="#00FF88"/>
+  </g>
+</svg>`;
+/** Percent-encoded rather than base64: an SVG data URI stays human-readable in the markup, so a reader viewing
+ *  source can see exactly what the icon is instead of an opaque blob.
+ *
+ *  The escape set covers what would end the attribute (`"`), be read as markup (`<`, `>`), start a fragment (`#`),
+ *  begin an escape of its own (`%`), or be decoded before the URI parser ever sees it (`&`). The last one is the
+ *  only one today's mark does not contain, and it is the reason to keep it: an `&amp;` added to the description
+ *  later would be HTML-decoded to a bare `&`, leaving malformed XML and no icon — and the drift test cannot catch
+ *  that, because it URL-decodes the attribute without HTML-decoding it first. */
+const ASTRA_ICON = `data:image/svg+xml,${ASTRA_MARK.replace(/[#%"'<>&]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).replace(/\s+/g, " ")}`;
+
 /** The whole report. Self-contained: no network, no fonts to fetch, and one small script for the print button whose
  *  hash is named in the page's own policy, so nothing else can run even if something got into the markup. */
 export function portfolioReport(input: ReportInput): string {
@@ -592,6 +624,7 @@ export function portfolioReport(input: ReportInput): string {
 <title>Portfolio levels — ${escape(day(input.generatedAt.slice(0, 10)))}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="content-security-policy" content="${REPORT_CSP}">
+<link rel="icon" href="${ASTRA_ICON}">
 <style>
   :root { color-scheme: light dark;
     --ink: #10171c; --muted: #5a6b70; --rule: #d6dedc; --ground: #fbfcfc; --panel: #fff;

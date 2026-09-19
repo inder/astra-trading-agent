@@ -70,11 +70,15 @@ others still answer.
 ## Accounts and the portfolio report
 
 Account reads are a second allowlist, not an extension of the first. `ACCOUNT_READS`
-(`get_accounts`, `get_portfolio`, `get_equity_positions`) has its own accessor
+(`get_accounts`, `get_portfolio`, `get_equity_positions`, `get_option_positions`) has its own accessor
 beside `MARKET_READS`, so widening the market-data path cannot widen the account
 path by accident, and a startup check refuses to run if either list ever names a
 mutation. Robinhood's single scope grants 73 tools, order placement included;
-these nine are the whole boundary.
+these ten are the whole boundary — and they are pinned by contents, not by count,
+because the startup check bounds only the *class* of name that may appear.
+`get_crypto_positions`, `get_equity_tax_lots` and `get_realized_pnl` all pass that
+check exactly as the allowed reads do, so the array is the policy and its
+element-by-element test is the only thing enforcing it.
 
 `portfolio.ts` is the trust edge. Every account response is rebuilt field by field
 from an allowlist rather than filtered, so provider text nobody asked for — the
@@ -82,7 +86,38 @@ from an allowlist rather than filtered, so provider text nobody asked for — th
 model or the page. An account's type must match a closed vocabulary of ordinary
 words, because a free-text field beside a masked account number is an injection
 channel. A holding whose symbol or share count cannot be read is dropped and
-counted, never guessed: a made-up holding is worse than a missing one. Errors leave
+counted, never guessed: a made-up holding is worse than a missing one.
+
+An option position splits that rule along a line worth naming. A row missing an
+**identity** field — the contract id, its underlying, its expiration — cannot be
+named, deduplicated or looked up, so it is dropped and counted like a share row.
+A row missing a **valuation** field — direction, multiplier, a coherent quantity
+sign — is kept, marked incomplete, and listed without a value. A missing
+multiplier bars valuing a contract; it does not erase a known underlying,
+quantity and expiry, and in a one-position account the difference is the whole
+report.
+
+Three reads stand behind a listed contract, on three separate budgets.
+`get_option_positions` says what is held. `get_option_instruments` supplies the
+strike and the right, which the position row does not carry. `get_option_quotes`
+supplies the mark. The budgets are separate deliberately: strike and call/put are
+inventory fields, so tying their lookup to chart eligibility would leave a
+contract unnamed because its underlying fell outside the charting cap. Each says
+which limit it hit — "not fetched within this report's limit" is a different
+sentence from "the provider did not return it", and a reader acts differently on
+each.
+
+The two option reads disagree about their own argument shape, and the code says so
+where it calls them: `get_option_instruments` takes a comma-separated string and
+rejects arrays, while `get_option_quotes` takes an array. Neither was inferred from
+the other; both were captured against a live account first.
+
+Signs live in the arithmetic, not in the presentation. A written contract is an
+obligation, so its market value is negative — `s·q·m·p` with `s` of −1 — and a
+percentage divides by the *absolute* basis, since dividing by a negative signed
+basis reports a short's loss as a gain. A group's total covers every contract in
+it or it is null: summing only the contracts that could be valued makes an empty
+list total zero, which prints the share position alone and calls it the group. Errors leave
 this path through `sealed()`, which replaces any message not on a short list, so a
 message interpolating an account number cannot reach a transcript by being written
 carelessly.

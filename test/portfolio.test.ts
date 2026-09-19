@@ -153,14 +153,20 @@ test("a holding Astra cannot read is dropped and counted, never invented", () =>
   assert.equal(page.skipped, 3, "the unreadable rows are counted");
   assert.throws(() => normalizeHoldings({ data: {} }), /Positions unavailable/);
 });
+/** The shape of a real `get_portfolio` payload, captured 2026-09-16. Figures are mocks; the KEYS are the product.
+ *
+ *  Shared rather than declared inside one test, so a second test can derive the class keys FROM it instead of
+ *  retyping them. A list of keys copied out of `VALUE_CLASSES` by the same hand that wrote `VALUE_CLASSES` shares
+ *  its misspellings and proves nothing; these came off the wire. */
+const capturedPortfolio = {
+  total_value: "125340.55", cash: "2200.00", pending_deposits: "0.00", buying_power: "4400.00",
+  crypto_buying_power: "0.00", currency: "USD",
+  equity_value: "100000.00", options_value: "23140.55", crypto_value: "200.00",
+  futures_value: "0.00", event_contracts_value: "0.00", fixed_income_value: "0.00", mutual_funds_value: "0.00",
+} as const;
+
 test("totals report what the provider gave and nothing it did not", () => {
-  // The shape of a real get_portfolio payload, captured 2026-09-16. Figures are mocks; the KEYS are the product.
-  const captured = { data: { portfolio: {
-    total_value: "125340.55", cash: "2200.00", pending_deposits: "0.00", buying_power: "4400.00",
-    crypto_buying_power: "0.00", currency: "USD",
-    equity_value: "100000.00", options_value: "23140.55", crypto_value: "200.00",
-    futures_value: "0.00", event_contracts_value: "0.00", fixed_income_value: "0.00", mutual_funds_value: "0.00",
-  } } };
+  const captured = { data: { portfolio: capturedPortfolio } };
   assert.deepEqual(normalizeTotals(captured), {
     value: 125340.55, cash: 2200,
     // Only classes worth something, in reading order. A zero class is not a line on a page.
@@ -559,4 +565,127 @@ test("marks are asked for once per contract, and the server's duplicates do not 
   sent.length = 0;
   await readOptionMarks(broker as never, many);
   assert.ok(sent.every(b => b.length <= QUOTE_BATCH), `no batch exceeds ${QUOTE_BATCH}: ${sent.map(b => b.length).join(",")}`);
+});
+
+test("every asset class the provider reports a value for is read, not just the three a test happened to fill", async () => {
+  const { normalizeTotals } = await import("../src/portfolio.ts");
+  // Four of the seven key-to-label mappings had never executed: the captured fixture zeroes futures, event
+  // contracts, fixed income and mutual funds, and a zero class is filtered before the mapping is reached. A typo in
+  // any of those four keys would therefore fail silently and for ever — which is precisely how `normalizeTotals`
+  // came to ask for nine field names the provider does not send, and how every report ever produced showed
+  // "Account value —" while looking like the data was simply missing.
+  //
+  // The keys are the product here. The figures are mocks, and unmistakably so.
+  const everything = normalizeTotals({ data: { portfolio: {
+    total_value: "700000.00", cash: "10000.00",
+    equity_value: "100000.00", options_value: "200000.00", crypto_value: "300000.00",
+    futures_value: "400000.00", event_contracts_value: "500000.00",
+    fixed_income_value: "600000.00", mutual_funds_value: "700000.00",
+  } } });
+  assert.deepEqual(everything.byClass, [
+    { label: "Stocks", value: 100000 }, { label: "Options", value: 200000 }, { label: "Crypto", value: 300000 },
+    { label: "Futures", value: 400000 }, { label: "Event contracts", value: 500000 },
+    { label: "Fixed income", value: 600000 }, { label: "Mutual funds", value: 700000 },
+  ], "all seven, in the order a reader thinks about them");
+
+  // Each key alone, so a single wrong name cannot hide behind the six that are right. The keys come from the
+  // CAPTURED payload at the top of this file rather than being retyped here: a list copied from `VALUE_CLASSES` by
+  // the same hand that wrote it shares its misspellings, and would pass while the provider's real name went unread.
+  // Shapes are captured, not restated.
+  // `total_value` ends in _value too and is the account's total, not a class — excluded by name rather than by a
+  // cleverer pattern, because the exclusion is a fact about the payload and should read as one.
+  const captured = Object.keys(capturedPortfolio).filter(k => k.endsWith("_value") && k !== "total_value");
+  assert.equal(captured.length, 7, `the captured payload carries seven class keys, saw ${captured.join(" ")}`);
+  for (const key of captured) {
+    const only = normalizeTotals({ data: { portfolio: { total_value: "1000.00", cash: "0.00", [key]: "1234.00" } } });
+    assert.equal(only.byClass.length, 1, `${key} is read as a class`);
+    assert.equal(only.byClass[0]!.value, 1234, `${key} carries its value`);
+    assert.ok(only.byClass[0]!.label.length > 2, `${key} has a human label, not a key echoed back`);
+  }
+
+  // A class Astra does not know about is not silently absorbed: it lands in the account value and nowhere in
+  // byClass, which is what the report's "Not itemized" line exists to surface. This is the forward-compatibility
+  // property the whole per-class design was built for — an eighth class appearing must be visible, not invisible.
+  const unknown = normalizeTotals({ data: { portfolio: {
+    total_value: "5000.00", cash: "1000.00", equity_value: "1000.00", tokenised_widgets_value: "3000.00" } } });
+  assert.deepEqual(unknown.byClass, [{ label: "Stocks", value: 1000 }]);
+  assert.equal(unknown.value! - unknown.cash! - unknown.byClass.reduce((n, c) => n + c.value, 0), 3000,
+    "the unknown class survives as a visible remainder rather than vanishing between the lines");
+});
+
+test("a class worth something renders as a header figure and is named as not listed", async () => {
+  const { portfolioReport } = await import("../src/report.ts");
+  // The four untested classes again, this time through the renderer: a value that normalizes correctly and then
+  // fails to render is the same defect one layer up.
+  const html = portfolioReport({ accounts: [{
+    label: "••••0000 individual", skipped: 0, truncated: false,
+    totals: { value: 2_310_000, cash: 10_000, byClass: [
+      { label: "Stocks", value: 100000 }, { label: "Futures", value: 400000 },
+      { label: "Event contracts", value: 500000 }, { label: "Fixed income", value: 600000 },
+      { label: "Mutual funds", value: 700000 } ] },
+    holdings: [],
+  }], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  for (const [label, figure] of [["Futures", "$400,000"], ["Event contracts", "$500,000"],
+    ["Fixed income", "$600,000"], ["Mutual funds", "$700,000"]] as const) {
+    assert.ok(html.includes(`<dt>${label}</dt><dd>${figure}</dd>`), `${label} is a header figure`);
+    assert.ok(html.includes(`${label.toLowerCase()} (${figure})`), `${label} is named as counted but not listed`);
+  }
+  // Astra can list none of these, and says so rather than implying the table covers the account.
+  assert.match(html, /Counted in the account value above, but not listed here/);
+  // And the header adds up, so nothing is left for the remainder line to report.
+  assert.ok(!/Not itemized/.test(html), "a fully itemized account has no remainder");
+});
+
+test("the documentation's count of the boundary matches the boundary", async () => {
+  // The allowlist counts are stated in prose in four places, including inside Astra's own spoken refusal — the one
+  // sentence whose whole job is to tell the user exactly what it can reach. All four drifted when the option read
+  // was added: the docs said nine tools and three account reads while the code held ten and four, and a docs pass
+  // that rewrote the sentences *beside* them did not catch it. Nothing was checking.
+  //
+  // A number a human has to remember to update is a number that goes stale. This is the mechanical gate, per the
+  // project's own rule that a recurrence earns a check rather than another paragraph.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  // Not `.pathname`, which leaves percent-escapes in place: a checkout under a path containing a space resolves to
+  // a filename that does not exist.
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const read = (f: string) => readFileSync(root + f, "utf8");
+
+  const total = MARKET_READS.length + ACCOUNT_READS.length;
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve"] as const;
+  const totalWord = words[total], marketWord = words[MARKET_READS.length], accountWord = words[ACCOUNT_READS.length];
+
+  for (const [file, claims] of [
+    ["README.md", [`allows ${totalWord} Robinhood calls`, `${marketWord} for market data`,
+      `${accountWord} for reading your accounts`, `the ${accountWord} account reads`]],
+    ["docs/READINESS.md", [`except the ${totalWord} on the allowlists`]],
+    ["docs/ARCHITECTURE.md", [`these ${totalWord} are the whole boundary`]],
+  ] as const) {
+    const text = read(file);
+    for (const claim of claims)
+      assert.ok(text.includes(claim), `${file} must say "${claim}" — the code holds ${total} tools (${MARKET_READS.length} market, ${ACCOUNT_READS.length} account)`);
+    // Presence alone would pass with a corrected sentence and a stale one side by side — which is close to what
+    // happened: the count was fixed in one paragraph while another in the same file still said nine.
+    for (const stale of [words[total - 1], words[total + 1]])
+      assert.ok(!new RegExp(`(allows|except the|these) ${stale}\\b`).test(text),
+        `${file} still carries a neighbouring count "${stale}" — a corrected sentence beside a stale one`);
+  }
+
+  // And the account reads are named, not just counted, in the two files that assert the boundary's contents. A
+  // count staying right while a read is swapped for another is the failure the element-by-element pin exists for,
+  // and the prose must not be weaker than the test.
+  // Whitespace-normalized: prose wraps, and a list broken across two lines is the same claim.
+  const named = ACCOUNT_READS.map(t => `\`${t}\``).join(", ");
+  for (const file of ["SECURITY.md", "docs/ARCHITECTURE.md"])
+    assert.ok(read(file).replace(/\s+/g, " ").includes(named),
+      `${file} must name the account reads exactly: ${named}`);
+
+  // The version the docs announce is the version that ships.
+  const version = JSON.parse(read("package.json")).version as string;
+  const minor = version.split(".").slice(0, 2).join(".");
+  assert.ok(read("docs/READINESS.md").startsWith(`# Readiness — version ${minor}`),
+    `READINESS must be headed version ${minor}`);
+  assert.ok(read("README.md").includes(`**Version ${minor} `), `README must announce version ${minor}`);
 });

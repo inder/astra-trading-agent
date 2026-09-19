@@ -334,16 +334,30 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
       // above the price may have been broken UPWARD and then closed back into — that is the give-back case, and
       // deriving the direction from the current side would look downward and find nothing, which is how this was
       // written first and what the give-back test caught.
+      // Two thresholds, not one, and the gap between them is the point.
+      //
+      // A break is CONFIRMED by closing clear of the edge by the margin — a close a cent past the edge is not a
+      // break of anything. But it is GIVEN BACK only by closing back into the zone itself. Using the margin for
+      // both makes the band between the edge and the margin count as "inside", so a price sitting just above a
+      // zone it cleared reads as having come back into it: the fixture rendered "back inside since Aug 28" for a
+      // price ABOVE the zone, which is how this was caught. Worse, with one threshold a price hovering near the
+      // edge would flicker between broken and given-back run to run.
       const beyond = (i: number) => direction === "above" ? c[i]! > z.hi + breakMargin : c[i]! < z.lo - breakMargin;
-      const inside = (i: number) => !beyond(i);
+      const backInside = (i: number) => direction === "above" ? c[i]! <= z.hi : c[i]! >= z.lo;
 
       // The most recent run of closes beyond the zone, and where it began.
+      // The most recent run of closes beyond the zone, and where it began. Bars between the edge and the margin
+      // belong to neither state: they do not confirm a break and they do not give one back, so the walk passes
+      // over them and the last CONFIRMED close anchors the run.
       let last = n - 1, backInsideOn: string | undefined;
-      if (inside(last)) {
-        // The price is back inside: this is a break given back, if there was a break. Find where it came back.
-        while (last >= lead && inside(last)) last--;
+      if (!beyond(last)) {
+        while (last >= lead && !beyond(last)) last--;
         if (last < lead) return undefined;                       // never beyond the zone in this window
-        backInsideOn = t[last + 1]!;
+        // Only a close that actually re-entered the zone gives the break back. A price that cleared the zone and
+        // has since drifted within the margin of it has not returned to it.
+        const returned = [];
+        for (let i = last + 1; i < n; i++) if (backInside(i)) { returned.push(i); break; }
+        if (returned.length) backInsideOn = t[returned[0]!]!;
       }
       let first = last;
       while (first > lead && beyond(first - 1)) first--;
@@ -353,7 +367,7 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
       // on a longer frame, and the default frame is the longest daily one.
       if (first === lead) return undefined;
       // It has to have come from inside or the other side, not merely appeared beyond.
-      if (!inside(first - 1)) return undefined;
+      if (beyond(first - 1)) return undefined;
       const closes = last - first + 1;
       if (closes < settings.breakConfirmBars) return undefined;
 

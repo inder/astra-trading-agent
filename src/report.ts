@@ -212,10 +212,29 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   const band = (z: Zone, kind: "s" | "r") => {
     const y1 = at(z.hi), y2 = at(z.lo), height = Math.max(1.5, y2 - y1);
     const text = freeY(y1 + height / 2 + 3.5);
+    // The break date deliberately does NOT go on this label. PAD_R is sized from the longest label this chart will
+    // actually draw, and that maximum is computed from exactly this string; a longer one written at `plot + 6`
+    // runs past the viewBox and is silently not drawn — the same failure that once put four labels below the floor.
+    // Adding the date to the maximum instead would shrink the plot by ~150px on precisely the charts a reader
+    // opened to see a break. The date is in the row's cell, which is where a reader is already reading it.
     return `<g class="${kind}"><rect x="0" y="${y1.toFixed(1)}" width="${plot}" height="${height.toFixed(1)}"/>` +
       `<text x="${plot + 6}" y="${text.toFixed(1)}">${money(z.lo)}–${z.hi.toFixed(2)}` +
       `<tspan class="tests"> ${z.tests} held</tspan></text></g>`;
   };
+  /** A hairline where a zone was closed through, so the eye can find the session the row's sentence is about.
+   *
+   *  Positioned like the trend line and NOT like the gap: `gap()` clamps a missing index to 0 with `Math.max`,
+   *  which for a date outside this frame's slice would draw the break at the window's start — a false position,
+   *  stated confidently. A break the frame does not contain is simply not drawn. */
+  const breakRule = (zones: Zone[]) => zones.map(z => {
+    if (!z.broke?.recent || z.broke.backInsideOn) return "";
+    // `findIndex` with `>=` returns 0 for a date BEFORE the window, not -1 — so guarding on `< 0` alone would draw
+    // a 2019 break at the start of a 2-year chart: the same false position the gap renderer's Math.max clamp
+    // produces, reintroduced through the guard meant to prevent it. The date must fall inside the drawn slice.
+    const at_ = points.findIndex(p => p.time >= z.broke!.on);
+    if (at_ < 0 || z.broke.on < points[0]!.time) return "";
+    return `<line class="broke" x1="${x(at_).toFixed(1)}" y1="${PAD_T}" x2="${x(at_).toFixed(1)}" y2="${H - PAD_B}"/>`;
+  }).join("");
   const gap = (g: Gap) => {
     const start = Math.max(0, points.findIndex(p => p.time >= g.from));
     const y1 = at(g.hi), y2 = at(g.lo);
@@ -242,6 +261,7 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
   ${gaps.map(gap).join("")}
   ${support.map(z => band(z, "s")).join("")}
   ${resistance.map(z => band(z, "r")).join("")}
+  ${breakRule([...support, ...resistance])}
   ${trend(frame.trend?.support)}${trend(frame.trend?.resistance)}
   <path class="line" d="${points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(p.value).toFixed(1)}`).join(" ")}"/>
   ${cost ? `<line class="cost" x1="0" y1="${at(cost).toFixed(1)}" x2="${plot}" y2="${at(cost).toFixed(1)}"/>
@@ -397,23 +417,62 @@ function row(entry: ReportHolding, id: string): string {
   const away = atrsAway(frame, price);
   const near = away <= 1;
   const side = near ? (Math.abs(toSupport ?? Infinity) <= Math.abs(toResistance ?? Infinity) ? "support" : "resistance") : "";
-  const zone = (z: Zone | undefined, distance: number | null) => z
-    ? `<span class="zone">${money(z.lo)}–${z.hi.toFixed(2)}</span><span class="dist">${percent(distance)} · held ${z.tests}</span>`
-    : "—";
+  // One state per side of the price, and both are always stated. Not "two shapes plus a co-occurrence": the founder
+  // pointed at INTC — *"it broke out of range but it still has resistance above"* — and that is neither of the two
+  // shapes this was first written around. Every stock is one (below × above) pair: broke-and-clear, broke-and-capped,
+  // held-and-capped. The two cells sit side by side and the reader pairs them; nothing here writes a sentence
+  // joining them, because "broke out but still capped" is a characterization of a situation rather than a
+  // measurement, and that is the line this report does not cross.
+  const zone = (z: Zone | undefined, distance: number | null, above: boolean) => {
+    if (z) {
+      // A zone the price closed up through is not holding anything: `tests` is recomputed under the side the zone
+      // is on NOW, so for a flipped ceiling it counts the years it spent turning the price back as it having
+      // "held" as support — a wrong number, printed confidently. The break date replaces it.
+      const broke = z.broke?.recent && !z.broke.backInsideOn ? z.broke : null;
+      const note = broke
+        ? `above it since ${day(broke.on)}`
+        : z.broke?.recent && z.broke.backInsideOn
+          ? `back inside since ${day(z.broke.backInsideOn)}`
+          : `held ${z.tests}`;
+      return `<span class="zone">${money(z.lo)}–${z.hi.toFixed(2)}</span><span class="dist">${percent(distance)} · ${escape(note)}</span>`;
+    }
+    // Below the price, no zone is just no zone. Above it, the absence is the fact the founder asked for — and an
+    // em-dash cannot carry it, being the same character this report uses for *unknown*.
+    if (!above) return `<span class="dist">none in this window</span>`;
+    const overhead = frame?.overhead;
+    if (!overhead) return `<span class="zone">levels unavailable</span>`;
+    // A cell claiming clear air while the chart visibly draws a gap or a falling line would be the page
+    // disagreeing with itself, so those are named rather than glossed.
+    const gapAbove = (frame?.gaps ?? []).find(g => g.side === "resistance" && !g.filling && g.lo > price);
+    if (overhead.gaps && gapAbove)
+      return `<span class="zone">no zone above</span><span class="dist">an open gap at ${money(gapAbove.lo)}–${gapAbove.hi.toFixed(2)}</span>`;
+    if (overhead.line && frame?.trend?.resistance)
+      return `<span class="zone">no zone above</span><span class="dist">a falling line at ${money(frame.trend.resistance.nextValue)}</span>`;
+    // "Prior" is load-bearing and not decoration: the count deliberately excludes zones built only from the last
+    // few bars' highs, because on the day a stock makes a new high its own session high sits just overhead. So the
+    // claim is about what came before, and the window is named because a longer tab can legitimately disagree.
+    return `<span class="zone">no zone above</span><span class="dist">no prior high in this window</span>`;
+  };
   // With no shares there is no cell for the underlying's own price, and a contract's Price column is its PREMIUM —
   // putting the stock price there would be a category error. So the group's row carries the stock's price, its
   // provenance and its levels, and says plainly that no shares are held rather than showing a dash for a quantity.
   const shares = holding ? holding.shares.toLocaleString("en-US") : `<span class="dist">no shares</span>`;
   return `<tr class="holding${near ? " near" : ""}${holding ? "" : " optionsonly"}">
-    <th scope="row">${symbol}${near ? `<span class="flag" title="Within one average daily range of this level">near ${side}</span>` : ""}</th>
+    <th scope="row">${symbol}${near ? `<span class="flag" title="Within one average daily range of this level">near ${side}</span>` : ""}</th>${
+      /* No break badge here, deliberately, though the spec proposed one. The level columns are right-aligned and
+         six columns away, so a pill beside the symbol is what a skimming reader sees while the ceiling above the
+         price sits where they may not look. Choosing which of two adjacent true facts gets the pill is an
+         editorial act — and on the most common shape, a stock that broke out and still has resistance overhead, it
+         would select the encouraging half. The cell says "above it since Sep 3"; that is the whole fact, in the
+         column where its counterpart lives. */ ""}
     <td class="num">${shares}</td>
     <td class="num">${money(holding?.averageCost ?? null)}</td>
     <td class="num">${money(price)}<span class="dist">${escape(priceNote(levels))}</span></td>
     <td class="num">${money(value, 0)}${unpricedNote}</td>
     <td class="num ${gain === null ? "" : gain < 0 ? "down" : "up"}">${money(gain, 0)}${
       gainPct === null ? "" : `<span class="dist">${percent(gainPct)}</span>`}</td>
-    <td class="level">${zone(support, toSupport)}</td>
-    <td class="level">${zone(resistance, toResistance)}</td>
+    <td class="level">${zone(support, toSupport, false)}</td>
+    <td class="level">${zone(resistance, toResistance, true)}</td>
   </tr>
   ${contracts.map(c => contractRow(c, raw, price)).join("\n")}
   <tr class="expand"><td colspan="8">${
@@ -425,17 +484,19 @@ function row(entry: ReportHolding, id: string): string {
 }
 
 function account(a: ReportAccount, scope: number): string {
-  // Nearest to a level first, alphabetical only to break a tie. A row with no levels has no distance, so it sorts to
-  // the end by a sentinel rather than by Infinity: subtracting two Infinities gives NaN, and subtracting one from a
-  // finite number gives -Infinity, so a single unpriced holding used to make the whole comparator fall through to
-  // alphabetical — the ordering this report exists to give would quietly disappear on exactly the accounts that have
-  // an unreadable or uncharted holding.
-  const distance = (r: ReportHolding) => {
-    const away = r.levels ? atrsAway(shown(r.levels), r.levels.price) : Infinity;
-    return Number.isFinite(away) ? away : Number.MAX_SAFE_INTEGER;
-  };
-  const rows = [...a.holdings].sort((x, y) =>
-    distance(x) - distance(y) || x.symbol.localeCompare(y.symbol));
+  // Alphabetical. The rows used to be ordered by how close the price sat to a level, nearest first — which an
+  // external review called "a scanner in shape, if not in words": ordering is an editorial claim about what
+  // deserves a reader's attention first, made by the page rather than by the person reading it.
+  //
+  // Naming breaks is what forced the decision. A zone the price just closed through by the break margin is, BY
+  // CONSTRUCTION, a fraction of an average day's range away — so under proximity ordering every fresh break sorted
+  // itself to the top of the account and lit the "near" styling. The spec's claim that "the break adds no term to
+  // the sort" was true and beside the point: the break IS proximity. Keeping both would have turned a latent
+  // scanner into a captioned one, with the page's own words explaining why the top row was at the top.
+  //
+  // Alphabetical costs nothing a reader cannot recover: the distances are in the cells, the near flag still marks
+  // what is close, and a reader looking for one holding now finds it where they expect.
+  const rows = [...a.holdings].sort((x, y) => x.symbol.localeCompare(y.symbol));
   const unpriced = rows.filter(r => !r.levels).length;
   const value = a.totals.value;
   // What the account value holds that this header has not named. The classes come from a frozen list, so anything
@@ -655,9 +716,14 @@ export function portfolioReport(input: ReportInput): string {
   tbody th { font-size: 15px; font-weight: 650; padding: 10px 8px 2px; }
   td { padding: 10px 8px 2px; vertical-align: baseline; }
   .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .level { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 13px; }
-  .zone { display: block; }
+  /* The band itself must not wrap — a price range broken over two lines is unreadable — but the line beneath it
+     now carries sentences rather than a percentage and a count, and nowrap on those would push the table past
+     its own width and crush six other numeric columns. On paper, at 9pt inside a 12mm page, there is no
+     escape. So the two are split: the zone holds its line, the note wraps. */
+  .level { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .zone { display: block; white-space: nowrap; }
   .dist { display: block; color: var(--muted); font-size: 11px; }
+  .level .dist { white-space: normal; text-wrap: balance; }
   .up { color: var(--up); } .down { color: var(--down); }
   .flag { margin-left: 7px; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--resistance);
     border: 1px solid currentColor; border-radius: 999px; padding: 1px 6px; vertical-align: 2px; }
@@ -705,6 +771,9 @@ export function portfolioReport(input: ReportInput): string {
   .chart .trend.tentative { stroke-dasharray: 5 4; }
   .chart .title { fill: var(--ink); font-weight: 650; font-size: 12px; }
   .chart .cost { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 2 3; }
+  /* The session a zone was closed through. A hairline, unlabelled: the date is in the row, and an annotation here
+     would be a second place to keep it true. */
+  .chart .broke { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 1 3; opacity: .7; }
   /* A held strike: the underlying's own axis, drawn differently from the zones so it is never read as one. */
   .chart .strike line { stroke: var(--strike); stroke-width: 1.2; stroke-dasharray: 7 3; }
   .chart .strike text { fill: var(--strike); }
@@ -760,7 +829,12 @@ nearest edge of a zone. Support and resistance are computed by fixed rules from 
 bars on the five-year chart. No zone is drawn from a trade later than the last settled close, though a later price does
 decide which of them are shown and which side of it they fall on. "Held 24" counts how many bars reached that zone —
 entering it, or coming within a small tolerance — without closing through it: a record of what happened in this window,
-not a probability that it happens again. A held strike is drawn against the underlying's price, and is not a breakeven. Nothing
+not a probability that it happens again. A held strike is drawn against the underlying's price, and is not a breakeven. A zone is called broken when the
+stock closed through it by a set margin for two settled sessions and had been turned back by it at least twice
+before; the date shown is that first close, and a hairline marks it on the chart. A break is a record of what
+happened, not a prediction of what follows, and it is measured from settled closes only — a price quoted during
+the session never creates one. "No zone above" means no prior high in that window sits above the price; a
+longer window can still show one. Nothing
 here is a recommendation to buy or sell, and Astra places no orders.</footer>
 <script>${script}</script>
 </body></html>`;

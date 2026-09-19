@@ -1052,3 +1052,40 @@ test("nothing the chat is handed reads as a recommendation", async () => {
   // Small enough to narrate: this is a paragraph's worth of facts, not the report.
   assert.ok(spoken.length < 1400, `${spoken.length} bytes`);
 });
+
+test("a stock's own last bar is not a ceiling over it, on the page or in the sentence", async () => {
+  // The feature's headline case, and it was broken. On the day a stock prints a new high that session's high
+  // becomes a resistance candidate a few cents overhead. The ENGINE excludes such a zone from `overhead`; the page
+  // asked `nearest()`, which does not — so `overhead.zones` said clear air while the cell printed the stock's own
+  // bar as a ceiling. Measured before the fix: engine 0 zones, cell "$220.10–220.10 +0.1% · held 1".
+  //
+  // Three reviews and a hand-check of the engine all missed it, because each looked at one side of the line.
+  const { levels: computeLevels, parseLevelsSettings: settings } = await import("../src/levels.ts");
+  const climb = 300;
+  const time = Array.from({ length: climb }, (_, i) =>
+    new Date(Date.UTC(2025, 0, 6) + i * 86_400_000).toISOString().slice(0, 10));
+  const close = Array.from({ length: climb }, (_, i) => 100 + i * 0.4 + 0.3);
+  const bars = { time, open: close, close,
+    high: close.map(v => v + 0.2), low: close.map(v => v - 0.8) };
+  const lv = computeLevels(bars, settings());
+  const input = { accounts: [account({ holdings: [{ symbol: "RBRK",
+    holding: { symbol: "RBRK", shares: 1, averageCost: 1 }, levels: lv,
+    series: { daily: time.map((t, i) => ({ time: t, value: close[i]! })) } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" };
+
+  const frame = lv.frames.find(f => f.timeframe === lv.defaultTimeframe)!;
+  assert.ok((frame.resistance ?? []).length > 0, "the raw zone exists — this is the case, not its absence");
+  assert.equal(frame.overhead!.zones, 0, "and the engine knows it is the price's own footprint");
+
+  // The page must reach the same conclusion from the same data.
+  const cells = [...portfolioReport(input).matchAll(/<td class="level">([\s\S]*?)<\/td>/g)]
+    .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  assert.match(cells[1]!, /no zone above/, "the cell does not print the stock's own bar as a ceiling");
+  assert.ok(!/held 1\b/.test(cells[1]!));
+
+  // And so must the sentence the chat reads aloud, or the two disagree about the same stock on the same run.
+  const spoken = overview(input);
+  assert.equal(spoken.clearAbove.length, 1, "the summary says clear air too");
+  assert.ok(!spoken.near.some(x => x.side === "resistance"),
+    "and never reports the stock as near a resistance that is its own last session");
+});

@@ -130,6 +130,16 @@ function optionNote(options: NonNullable<ReportAccount["options"]>, value: numbe
 
 /** The frame a report row is drawn from: the one the levels engine chose, which is the longest daily window with
  *  enough history. */
+/** A zone that is only the price's own recent footprint, not prior structure.
+ *
+ *  On the day a stock prints a new high, that session's high becomes a resistance candidate a few cents overhead.
+ *  The engine already excludes such a zone from `Analysis.overhead`; this is the same predicate, applied wherever a
+ *  zone is shown to a reader or measured against — because a page that draws the exclusion in one place and not the
+ *  other reports clear air in its summary and a ceiling in its table, for the same stock, on the same run. */
+const ownFootprint = (z: Zone): boolean => z.members.length > 0 && z.members.every(m => m.fromRecentBar);
+/** The frame as a reader should see it: prior structure only. */
+const prior = (frame: Frame | undefined): Frame | undefined =>
+  frame && { ...frame, resistance: (frame.resistance ?? []).filter(z => !ownFootprint(z)) };
 const shown = (levels: Levels): Frame | undefined =>
   levels.frames.find(f => f.timeframe === levels.defaultTimeframe && !f.unavailable) ?? levels.frames.find(f => !f.unavailable);
 
@@ -378,7 +388,7 @@ function row(entry: ReportHolding, id: string): string {
       <td class="num" colspan="5">${escape(unavailable ?? "no price history")}</td></tr>
       ${contracts.map(c => contractRow(c, raw, null)).join("\n")}`;
   }
-  const frame = shown(levels), price = levels.price;
+  const frame = prior(shown(levels)), price = levels.price;
   // The group's money is the share position plus EVERY contract, signed. A short leg subtracts, which is the only way
   // the column can be added up — and two legs that offset net to nothing without either disappearing from the rows.
   //
@@ -631,7 +641,7 @@ export function overview(input: ReportInput): PortfolioOverview {
   for (const account of input.accounts) for (const entry of account.holdings) {
     const { symbol, holding, levels } = entry;
     if (!levels) { unreadable.push(symbol); continue; }
-    const frame = shown(levels);
+    const frame = prior(shown(levels));
     // Share gains only. A contract's percentage is over its opening premium, which is a different denominator, and
     // ranking the two together would compare numbers that do not mean the same thing.
     if (holding?.averageCost) gains.push({ symbol, account: account.label,
@@ -639,8 +649,7 @@ export function overview(input: ReportInput): PortfolioOverview {
     // Both facts, gathered before the proximity filter below — a break is worth saying whether or not the price
     // happens to be sitting on something today, and `near`'s one-ATR test is about proximity, not about history.
     const band = (z: Zone) => `${money(z.lo)}–${z.hi.toFixed(2)}`;
-    const ceiling = (frame?.resistance ?? []).find(z => z.lo > levels.price
-      && !(z.members.length > 0 && z.members.every(m => m.fromRecentBar)));
+    const ceiling = (frame?.resistance ?? []).find(z => z.lo > levels.price);
     // ONE break per holding, not one per zone. A price that moves up through a shelf of levels in a single stretch
     // clears several at once — the fixture here produces two, on the same date, under the same ceiling — and a
     // model handed both narrates both, which is noise dressed as detail.

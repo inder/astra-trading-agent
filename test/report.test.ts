@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
-import { levels, parseLevelsSettings, movingAverageSeries } from "../src/levels.ts";
+import { levels, parseLevelsSettings, movingAverageSeries, type Zone } from "../src/levels.ts";
 import { overview, portfolioReport, type ReportAccount } from "../src/report.ts";
 import { TradingAgentService } from "../src/agent-service.ts";
 import { syntheticBars } from "./levels-fixture.ts";
@@ -92,6 +92,38 @@ test("technicals expand to a readable chart, one per timeframe, with no script t
   // No library, no fonts, no network: a printed page must not depend on anything being reachable.
   assert.ok(!/https?:\/\//.test(html.replace(/xmlns="[^"]*"/g, "")), "nothing is fetched");
 });
+
+test("no chart label is written outside its own chart, however crowded the chart is", () => {
+  // The two assertions above — labels fit horizontally, labels stay apart vertically — were both satisfiable by a
+  // label placed BELOW the chart, where nothing draws it at all. An SVG does not clip or complain; the text is
+  // simply not there, and its band's price goes with it. Measured on a real report: four labels in a 380-high
+  // viewBox were written at y=383.3 and y=396.3.
+  //
+  // Six zones packed into a few cents force it: the placer clamped where its search started and then nudged
+  // downward with no bound, so each collision walked the next label further past the floor.
+  const zone = (i: number, lo: number): Zone =>
+    ({ id: `z${i}`, lo, hi: lo + 0.04, tests: 20 + i, last: "2026-09-15", members: [] });
+  const crowded = {
+    ...computed,
+    frames: computed.frames.map(f => ({ ...f,
+      support: [zone(1, 41.00), zone(2, 41.05), zone(3, 41.10)],
+      resistance: [zone(4, 41.15), zone(5, 41.20), zone(6, 41.25)] })),
+  };
+  const html = portfolioReport({ accounts: [account({ holdings: [
+    { holding: { symbol: "TIGHT", shares: 100, averageCost: 41.1 }, levels: crowded, series: { daily: series } }] })],
+    generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  const charts = [...html.matchAll(/<svg class="chart"[^>]*viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"[\s\S]*?<\/svg>/g)];
+  assert.ok(charts.length, "there are charts to check");
+  let checked = 0;
+  for (const [svg, , height] of charts) {
+    for (const m of svg.matchAll(/<text[^>]*\by="(-?[\d.]+)"/g)) {
+      const y = Number(m[1]); checked++;
+      assert.ok(y >= 0 && y <= Number(height), `a label at y=${y} is outside a ${height}-high chart, so it is not drawn`);
+    }
+  }
+  assert.ok(checked > 20, `${checked} labels were checked, which is too few to have exercised the crowding`);
+});
 test("a holding without levels still appears, saying why, rather than being dropped", () => {
   const html = portfolioReport({ accounts: [account({
     holdings: [{ holding: { symbol: "QUIET", shares: 5, averageCost: null }, unavailable: "no usable daily price history from Robinhood" }],
@@ -131,12 +163,21 @@ test("an account holding more than stocks says so, by class and by figure", () =
   // lists this account's stocks" would then describe an empty table, and "its options ... is counted" is not English.
   const optionsOnly = portfolioReport({ accounts: [account({ holdings: [], totals: {
     value: 100000, cash: 1000, byClass: [{ label: "Options", value: 99000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
-  assert.match(optionsOnly, /This account holds no stocks, so the table below is empty\./);
-  assert.match(optionsOnly, /Counted in the account value above, but not listed here: options \(\$99,000\)\./);
+  assert.match(optionsOnly, /This account holds no stocks\. Counted in the account value above, but not listed here: options \(\$99,000\)\./);
   assert.ok(!/&#39;s stocks\./.test(optionsOnly), "and it does not describe stocks it does not have");
   assert.match(optionsOnly, /<dt>Options<\/dt><dd>\$99,000<\/dd>/, "the value is still stated");
   assert.ok(!/<dt>Stocks<\/dt>/.test(optionsOnly), "with no stocks line invented for it");
   assert.ok(!/<thead>/.test(optionsOnly), "and no empty table: eight column headers over nothing read as a failure");
+  // The note must not send the reader to a table that was suppressed. It said "so the table below is empty" while
+  // rendering no table at all — pointing at something not on the page, which is worse than saying nothing.
+  assert.ok(!/table below/.test(optionsOnly), "and it names no table, because there is none to name");
+
+  // An empty holdings list is not evidence of an empty account: it is also what every row failing to parse produces.
+  // Claiming "holds no stocks" in the same paragraph that says rows were dropped states two different things as one.
+  const allDropped = portfolioReport({ accounts: [account({ holdings: [], skipped: 7, totals: {
+    value: 100000, cash: 1000, byClass: [{ label: "Options", value: 99000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(allDropped, /No stock positions could be read for this account, so none are listed\./);
+  assert.ok(!/holds no stocks/.test(allDropped), "an unreadable book is not an empty one");
 
   // Whatever the account value holds that the header has not named gets a line of its own. Robinhood folds things
   // into the total that no class field covers — pending deposits today, an eighth class tomorrow — and those would
@@ -165,22 +206,48 @@ test("the options line tells apart the four things a bare count cannot", () => {
     totals: { value: 500000, cash: 1000, byClass: [{ label: "Stocks", value: 15294 }, { label: "Options", value: 470000 }] },
   })], generatedAt: "2026-09-16T12:00:00.000Z" });
 
-  assert.match(withOptions({ count: 12, skipped: 0, truncated: false }), /options \(\$470,000, 12 open contracts\)/);
-  assert.match(withOptions({ count: 1, skipped: 0, truncated: false }), /1 open contract\)/, "and it counts in English");
+  assert.match(withOptions({ count: 12, positions: 12, skipped: 0, truncated: false }), /options \(\$470,000, 12 open contracts\)/);
+  assert.match(withOptions({ count: 1, positions: 1, skipped: 0, truncated: false }), /1 open contract\)/, "and it counts in English");
   assert.match(withOptions("unreadable"), /options \(\$470,000, the contracts behind it could not be read\)/,
     "a read that failed is not an account that holds nothing");
-  assert.match(withOptions({ count: 0, skipped: 40, truncated: false }), /none of its 40 contract rows could be read/,
+  assert.match(withOptions({ count: 0, positions: 0, skipped: 40, truncated: false }), /none of its 40 contract rows could be read/,
     "and neither is a payload whose every row was dropped — the shape-drift case");
   // No rows, nothing dropped, and an account worth $470,000 in options: the provider disagreeing with itself. This
   // is the shape a payload wrapper Astra does not know about produces, and the last state that could still have been
   // reported as a fact — "0 open contracts" takes one side of a contradiction and states it.
-  assert.match(withOptions({ count: 0, skipped: 0, truncated: false }), /no contract rows came back for it/);
-  assert.ok(!/0 open contracts/.test(withOptions({ count: 0, skipped: 0, truncated: false })));
-  assert.match(withOptions({ count: 20, skipped: 0, truncated: true }), /20\+ open contracts, more than one report can page through/,
+  assert.match(withOptions({ count: 0, positions: 0, skipped: 0, truncated: false }), /no contract rows came back for it/);
+  assert.ok(!/0 open contracts/.test(withOptions({ count: 0, positions: 0, skipped: 0, truncated: false })));
+  assert.match(withOptions({ count: 20, positions: 20, skipped: 0, truncated: true }), /20\+ open contracts, more than one report can page through/,
     "a count that stopped early says so rather than looking authoritative");
-  assert.match(withOptions({ count: 12, skipped: 3, truncated: false }), /12 open contracts, and 3 rows that could not be read/);
+  assert.match(withOptions({ count: 12, positions: 12, skipped: 3, truncated: false }), /12 open contracts, and 3 rows that could not be read/);
   // Nothing known at all — the options figure stands alone rather than gaining a claim about its contracts.
   assert.match(withOptions(undefined), /options \(\$470,000\)/);
+
+  // Contracts and the rows they arrived in are different numbers, and the page says "contracts". Counting rows
+  // reported a four-contract position as "1 open contract" — a wrong number beside a real dollar figure.
+  assert.match(withOptions({ count: 4, positions: 1, skipped: 0, truncated: false }),
+    /4 open contracts across 1 position\b/, "four contracts in one row is four contracts");
+  assert.match(withOptions({ count: 7, positions: 3, skipped: 0, truncated: false }), /7 open contracts across 3 positions/);
+  // The rows are named only when they differ from the contracts; "3 contracts across 3 positions" is noise.
+  assert.ok(!/across/.test(withOptions({ count: 3, positions: 3, skipped: 0, truncated: false })));
+});
+
+test("a short options book is not reported as no options", () => {
+  // The provider-disagreement sentence was gated on `value > 0`, so it fired only for accounts whose options were
+  // worth something POSITIVE. A written book's options value is negative, and an offsetting one is near zero —
+  // so the two accounts most likely to be misread were the two the check let through in silence.
+  const book = (value: number, options: ReportAccount["options"]) => portfolioReport({ accounts: [account({
+    holdings: [], options, totals: { value: 50000, cash: 52000, byClass: [{ label: "Options", value }] } })],
+    generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(book(-2400, { count: 0, positions: 0, skipped: 0, truncated: false }), /no contract rows came back for it/,
+    "a negative options figure with no rows is the same contradiction as a positive one");
+  assert.match(book(-2400, { count: 6, positions: 2, skipped: 0, truncated: false }), /6 open contracts across 2 positions/,
+    "and a short book that did read is described by its contracts, not by the sign of its value");
+  // A long and a short that cancel: the figure rounds to nothing while two contracts stand open. The count governs,
+  // and nothing here says the account holds no options.
+  const offsetting = book(0, { count: 2, positions: 2, skipped: 0, truncated: false });
+  assert.ok(!/no contract rows|holds no options/.test(offsetting), "an offsetting book is not an empty one");
 });
 test("a stock with too little history shows its price, not zero, and says why it has no levels", () => {
   // A holding listed recently has real sessions but too few to measure a zone. The engine returns levels with every
@@ -202,7 +269,7 @@ test("a stock with too little history shows its price, not zero, and says why it
   const beforeDetails = html.slice(0, html.indexOf("<details"));
   assert.match(beforeDetails, /only \d+ sessions of history/, "and is visible without expanding anything");
   const view = overview(input);
-  assert.ok(!view.worst.some(w => w.symbol === "NEWCO" && w.gainPct <= -99), "the chat is not told it lost everything");
+  assert.ok(!view.largestLosses.some(w => w.symbol === "NEWCO" && w.gainPct <= -99), "the chat is not told it lost everything");
 });
 test("a price that is not a closing price is never shown as one", () => {
   // The case from 2026-09-16: Robinhood had not published that day's daily bar hours after the close, so the newest
@@ -415,9 +482,9 @@ test("the overview says enough for the chat to summarize, and leaves the detail 
   assert.deepEqual(summary.unreadable, ["QUIET"], "and it names what could not be read");
   // FIXA sits inside a day's range of a level in this fixture, so it is what the chat should mention first.
   assert.ok(summary.near.some(n => n.symbol === "FIXA" && /support|resistance/.test(n.side) && n.tests > 0));
-  assert.ok(summary.best.length && summary.best.every((g, i, all) => i === 0 || g.gainPct <= all[i - 1]!.gainPct), "best runs downward");
-  assert.ok(!summary.worst.some(w => summary.best.some(b => b.symbol === w.symbol)),
-    "with only a couple of holdings, best covers them and worst repeats nothing");
+  assert.ok(summary.largestGains.length && summary.largestGains.every((g, i, all) => i === 0 || g.gainPct <= all[i - 1]!.gainPct), "the ranking runs downward");
+  assert.ok(!summary.largestLosses.some(w => summary.largestGains.some(b => b.symbol === w.symbol)),
+    "with only a couple of holdings, the gains list covers them and the losses list repeats nothing");
   // Small enough to narrate: this is a paragraph's worth of facts, not the report.
   assert.ok(JSON.stringify(summary).length < 1200, `${JSON.stringify(summary).length} bytes`);
 });

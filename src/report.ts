@@ -32,8 +32,11 @@ export interface ReportAccount {
    *  read that failed, a grant without the tool, and a read that returned rows every one of which was unreadable.
    *  The last is the one that matters — the normalizer is keyed field by field to a payload shape, and a provider
    *  that renames a field does not error, it drops every row. A count would then say "no options" to someone who
-   *  holds options, with nothing on the page to notice it by. */
-  options?: { count: number; skipped: number; truncated: boolean } | "unreadable";
+   *  holds options, with nothing on the page to notice it by.
+   *
+   *  `count` is contracts; `positions` is the rows they arrived in. Both are needed because they answer different
+   *  questions and a single number has been read as the wrong one: four contracts in one row is not one contract. */
+  options?: { count: number; positions: number; skipped: number; truncated: boolean } | "unreadable";
 }
 export interface ReportInput { accounts: ReportAccount[]; generatedAt: string }
 
@@ -73,17 +76,25 @@ function priceNote(levels: Levels, short = false): string {
  *  count that stopped early, and a count with rows it could not parse. */
 function optionNote(options: NonNullable<ReportAccount["options"]>, value: number): string {
   if (options === "unreadable") return "the contracts behind it could not be read";
-  const { count, skipped, truncated } = options;
+  const { count, positions, skipped, truncated } = options;
   if (!count && skipped) return `none of its ${skipped} contract row${skipped === 1 ? "" : "s"} could be read`;
-  // No rows at all, nothing dropped, and yet the account is worth something in options: the provider is disagreeing
-  // with itself, and "0 open contracts" would take one side of that and state it as fact. This is also the shape an
+  // No rows at all, nothing dropped, and yet the account reports an options figure: the provider is disagreeing with
+  // itself, and "0 open contracts" would take one side of that and state it as fact. This is also the shape an
   // unanticipated payload wrapper produces — rows arriving somewhere the reader does not look — so it is the one
   // remaining way a drift could be reported as a number rather than as a doubt.
-  if (!count && value > 0) return "no contract rows came back for it";
+  //
+  // Tested on the figure being non-zero rather than positive. A short book's options value is NEGATIVE, so `> 0`
+  // sent exactly the account most likely to be misread — one carrying written contracts — down the path that says
+  // nothing at all. And zero is not proof of an empty book either: a long and a short that offset report zero while
+  // two contracts stand open. So the sentence below hedges on the figure, and the count governs.
+  if (!count && Math.abs(value) >= 0.5) return "no contract rows came back for it";
   const contracts = `${count}${truncated ? "+" : ""} open contract${count === 1 && !truncated ? "" : "s"}`;
-  if (truncated) return `${contracts}, more than one report can page through`;
-  if (skipped) return `${contracts}, and ${skipped} row${skipped === 1 ? "" : "s"} that could not be read`;
-  return contracts;
+  // Rows only where they differ from contracts. "4 open contracts across 1 position" earns its words; "across 4
+  // positions" beside 4 contracts is noise.
+  const across = positions && positions !== count ? `${contracts} across ${positions} position${positions === 1 ? "" : "s"}` : contracts;
+  if (truncated) return `${across}, more than one report can page through`;
+  if (skipped) return `${across}, and ${skipped} row${skipped === 1 ? "" : "s"} that could not be read`;
+  return across;
 }
 
 /** The frame a report row is drawn from: the one the levels engine chose, which is the longest daily window with
@@ -134,13 +145,24 @@ function chart(points: Point[], frame: Frame, price: number, label: string, cost
 
   // Labels are placed top to bottom and pushed apart when they would overlap, so two zones a few cents apart are
   // still both readable rather than printed on top of one another.
+  const MIN_Y = PAD_T, MAX_Y = H - 4, APART = 13;
   const placed: number[] = [];
+  const collisions = (y: number) => placed.filter(taken => Math.abs(y - taken) < APART);
   const freeY = (want: number) => {
-    let y = Math.min(H - 4, Math.max(PAD_T, want));
+    const start = Math.min(MAX_Y, Math.max(MIN_Y, want));
+    let y = start;
     // Re-check after each nudge: moving clear of one label can move onto the next.
-    for (let guard = 0; guard < 40 && placed.some(taken => Math.abs(y - taken) < 13); guard++) {
-      y = Math.max(...placed.filter(taken => Math.abs(y - taken) < 13)) + 13;
+    for (let guard = 0; guard < 40 && collisions(y).length; guard++) y = Math.max(...collisions(y)) + APART;
+    // Nudging ran out of chart. The clamp above bounds where the search STARTS; every nudge since has moved down
+    // without a bound, which is how labels came to be written below the viewBox — where they are not clipped or
+    // warned about, simply not drawn. Search upward from where the label was wanted instead.
+    if (y > MAX_Y) {
+      y = start;
+      for (let guard = 0; guard < 40 && collisions(y).length; guard++) y = Math.min(...collisions(y)) - APART;
     }
+    // Both directions full. A label overlapping another inside the chart is hard to read; one outside it is
+    // invisible, and takes its band's price with it. Prefer the overlap.
+    y = Math.min(MAX_Y, Math.max(MIN_Y, y));
     placed.push(y);
     return y;
   };
@@ -283,9 +305,16 @@ function account(a: ReportAccount, scope: number): string {
     const named = others.map(c => c.label === "Options" && a.options !== undefined
       ? `options (${money(c.value, 0)}, ${optionNote(a.options, c.value)})`
       : `${c.label.toLowerCase()} (${money(c.value, 0)})`).join(", ");
+    // With no rows there is no table below — it is suppressed, not empty — so a sentence pointing at one sends the
+    // reader looking for something that is not on the page. And an empty list is not evidence of an empty account:
+    // it is also what every stock row failing to parse produces, which is why the wording turns on `a.skipped`
+    // rather than claiming from absence. Saying "holds no stocks" in the same paragraph that says holdings were
+    // dropped states two different things as one fact.
     notes.push(rows.length
       ? `The table below lists this account's stocks. Also counted in the account value above, but not listed here: ${named}.`
-      : `This account holds no stocks, so the table below is empty. Counted in the account value above, but not listed here: ${named}.`);
+      : a.skipped || a.truncated
+        ? `No stock positions could be read for this account, so none are listed. Counted in the account value above: ${named}.`
+        : `This account holds no stocks. Counted in the account value above, but not listed here: ${named}.`);
   }
   // What this can truthfully say changed with the header. It used to mean "excluded from the equities subtotal Astra
   // computed" — but that subtotal is gone, and the Stocks figure is now Robinhood's own, which counts these holdings.
@@ -319,13 +348,21 @@ export interface PortfolioOverview {
   accounts: { label: string; value: number | null; holdings: number; byClass: { label: string; value: number }[] }[];
   totalValue: number | null;
   near: { symbol: string; side: "support" | "resistance"; zone: string; distancePct: number; tests: number }[];
-  best: { symbol: string; gainPct: number }[]; worst: { symbol: string; gainPct: number }[];
+  /** The extremes of unrealized percentage gain and loss — named for the arithmetic they are, not as "best" and
+   *  "worst", which these were called until an external review pointed out that the chat reads these fields aloud.
+   *  A product that will not characterize a position as good or bad on the page must not do it in the sentence
+   *  either, and a ranking with a superlative on it is a judgement about what deserves attention.
+   *
+   *  The account is named because the same symbol held in two accounts has two different cost bases, so a bare
+   *  symbol with a percentage beside it is ambiguous exactly where the number matters. */
+  largestGains: { symbol: string; account: string; gainPct: number }[];
+  largestLosses: { symbol: string; account: string; gainPct: number }[];
   unreadable: string[];
   /** Accounts whose totals could not be read. While this is non-empty the portfolio totals are null, not partial. */
   unreadableAccounts: string[];
 }
 export function overview(input: ReportInput): PortfolioOverview {
-  const near: PortfolioOverview["near"] = [], gains: { symbol: string; gainPct: number }[] = [], unreadable: string[] = [];
+  const near: PortfolioOverview["near"] = [], gains: PortfolioOverview["largestGains"] = [], unreadable: string[] = [];
   // A total is the sum of every account or it is nothing. Treating one unreadable account as zero produces a number
   // that looks like the whole portfolio and is short by an account — and the chat is told to read this figure out.
   // A missing total is answerable ("I couldn't read one account"); a quietly understated one is not.
@@ -335,7 +372,8 @@ export function overview(input: ReportInput): PortfolioOverview {
     const { holding, levels } = entry;
     if (!levels) { unreadable.push(holding.symbol); continue; }
     const frame = shown(levels);
-    if (holding.averageCost) gains.push({ symbol: holding.symbol, gainPct: (levels.price - holding.averageCost) / holding.averageCost * 100 });
+    if (holding.averageCost) gains.push({ symbol: holding.symbol, account: account.label,
+      gainPct: (levels.price - holding.averageCost) / holding.averageCost * 100 });
     if (atrsAway(frame, levels.price) > 1) continue;
     const { support, resistance, toSupport, toResistance } = nearest(frame, levels.price);
     const closerToSupport = support && (!resistance || Math.abs(toSupport ?? Infinity) <= Math.abs(toResistance ?? Infinity));
@@ -349,7 +387,8 @@ export function overview(input: ReportInput): PortfolioOverview {
     // byClass rides along so the chat can say "and $84,000 of that is options" without the report being open.
     accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, holdings: a.holdings.length, byClass: a.totals.byClass })),
     totalValue: sum(a => a.totals.value),
-    near, best: ranked.slice(0, 3), worst: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
+    near, largestGains: ranked.slice(0, 3),
+    largestLosses: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
     unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }
 

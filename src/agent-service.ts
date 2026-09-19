@@ -155,7 +155,12 @@ export class TradingAgentService {
         if (this.broker.status().optionPositionsAvailable) {
           try {
             const read = await readOptionHoldings(this.broker, accountNumber);
-            options = { count: read.holdings.length, skipped: read.skipped, truncated: read.truncated };
+            // Contracts, not rows. One row can hold four contracts, and counting rows reported that as "1 open
+            // contract" beside a four-contract position's value. Summed rather than netted: a long and a short
+            // that cancel in dollars are still two open contracts, and describing that book as empty is the
+            // failure this count exists to prevent.
+            options = { count: read.holdings.reduce((n, h) => n + h.contracts, 0), positions: read.holdings.length,
+              skipped: read.skipped, truncated: read.truncated };
           } catch (error) {
             if (error instanceof Error && BOUNDARY_ERRORS.has(error.message)) throw error;
             options = "unreadable";

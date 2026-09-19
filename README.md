@@ -111,14 +111,30 @@ marked.
 
 > **Astra:** Here's the report: http://127.0.0.1:50000/r/EXAMPLEONLY1 — it opens in your browser and prints.
 >
-> The two accounts hold $100,000 together: $60,000 in stocks, $30,000 in options and $10,000 cash. The options aren't listed yet — they're counted in the total. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. Best by percent are NVDA (+30.0%), HPE (+20.0%) and DELL (+10.0%); worst is INTC (−10.0%). Everything else — cost basis, market value, unrealized P&L, and the zones around each holding — is in the report.
+> The two accounts hold $100,000 together: $60,000 in stocks, $30,000 in options and $10,000 cash. Four holdings sit within one daily range of a level: HPE and INTC near support, NVDA and AAPL near resistance. The largest unrealized percentage gains are NVDA (+30.0%) and HPE (+20.0%) in ••••0000; the largest loss is INTC (−10.0%), also in ••••0000. Everything else — cost basis, market value, unrealized P&L, your option contracts, and the zones around each holding — is in the report.
 
-The page shows a row per holding with shares, average cost, last close, market
+The page shows a row per **underlying** — the stock you hold, the contracts you
+hold on it, or both. A stock row carries shares, average cost, last price, market
 value, unrealized P&L, and the nearest support below and resistance above.
+Beneath it, one row per option contract: direction, quantity, call or put, the
+full expiration, strike, the premium you paid or received, the current mark with
+its own timestamp, the contract's value, and its gain as a percentage *of
+premium*. A written contract shows a negative value, because it is an obligation
+rather than an asset.
+
+An underlying you hold only in options still gets a row: it carries the stock's
+own price and levels, with "no shares" where a quantity would be.
+
 Holdings closest to a level come first. **Technicals** under any row expands to a
 full chart with QTD, YTD, 2-year daily and 5-year weekly tabs, the zones drawn as
-bands, and a dashed line at your cost. **Print or save as PDF** from the page;
-only the charts you opened print, in the timeframe you chose.
+bands, a dashed line at your cost, and each strike you hold drawn against the
+stock's own price. **Print or save as PDF** from the page; only the charts you
+opened print, in the timeframe you chose.
+
+Every figure says what it is or says nothing. A price names the session it came
+from. A group's value covers every contract in it, or shows a dash and says how
+many could not be priced — never the shares alone with the contracts quietly
+dropped.
 
 Reading your accounts happens only when you ask about them. The report is the one
 place Astra writes any of it down — a single file under its data directory,
@@ -440,7 +456,7 @@ market-data reads, and the three account reads the portfolio report needs — ev
 though Robinhood's single scope also advertises order tools. Account reads are
 made only when you ask about your accounts, and return masked labels rather than
 account numbers. `list_accounts` reads names and status; `get_portfolio_report`
-additionally reads balances and equity positions, and is the only tool that
+additionally reads balances, equity positions and option positions, and is the only tool that
 writes any of it down — into the report file itself, created readable only by
 you, under `reports/` in Astra's data directory. There is no way to ask for it
 somewhere else: a chosen path is how account data ends up in a synced folder.

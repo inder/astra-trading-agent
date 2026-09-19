@@ -86,12 +86,14 @@ only way to name an account, they are opaque and per-process, and there is no
 The reply is a `url` on `127.0.0.1` to open, the `path` it was written to, and an
 `overview`. Give the user the link and summarize the overview in a few sentences
 — account values, the day's change, which holdings sit within one daily range of
-a level, the best and worst by percent. Everything else belongs in the report:
+a level, the largest unrealized percentage gains and losses with the account each
+sits in. Everything else belongs in the report:
 cost basis, market value, unrealized P&L, and an expandable chart per holding
 with QTD, YTD, two-year daily and five-year weekly views. It prints as it reads;
 only the charts the user opened, and only in the timeframe selected, go on paper.
 
-The report reads balances and equity positions, which nothing else in Astra does.
+The report reads balances, equity positions and option positions, which nothing
+else in Astra does.
 Every holding is listed; the twenty largest in each account get charts, and the
 rest say so rather than reading as unreadable. A holding whose bars cannot be
 read is listed with the reason instead of being dropped, and an account with

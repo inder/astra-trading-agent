@@ -43,9 +43,17 @@
   73 tools, order placement and cancellation among them. The application calls
   only its own allowlists, never a generic MCP proxy or an order tool. **Those
   allowlists, in code, are the whole boundary — the OAuth scope is not one.**
-  There are two, deliberately kept apart: `MARKET_READS` (six market-data reads)
-  and `ACCOUNT_READS` (`get_accounts`, `get_portfolio`, `get_equity_positions`),
-  each with its own accessor, so widening one cannot widen the other by accident.
+  There are two, deliberately kept apart: `MARKET_READS` (six market-data reads,
+  including the option-chain, instrument and quote reads the report needs to name
+  and price a contract) and `ACCOUNT_READS` (`get_accounts`, `get_portfolio`,
+  `get_equity_positions`, `get_option_positions`), each with its own accessor, so
+  widening one cannot widen the other by accident. The contents are pinned by an
+  element-by-element test rather than by a count: the startup check bounds the
+  *class* of name that may appear, but within that class it cannot discriminate —
+  `get_crypto_positions`, `get_equity_tax_lots` and `get_realized_pnl` all pass it
+  exactly as the allowed reads do. The array is the policy; the test is its only
+  enforcement, and a length check would stay green while one read was swapped for
+  another.
   Nothing that places, previews, cancels or exercises an order, moves money, or
   edits a watchlist, alert or scan appears in either; a startup check refuses to
   run if one ever does. Review the provider consent screen yourself. Restarting
@@ -57,8 +65,9 @@
   account data to the journal, a checkpoint or a log, and returns opaque
   per-process handles rather than account numbers. Two tools reach this path:
   `list_accounts`, which reads names and status, and `get_portfolio_report`,
-  which additionally reads balances and equity positions for the accounts the
-  user named. The report is the one place account data is written down: a single
+  which additionally reads balances, equity positions and option positions for
+  the accounts the user named, plus the market-data reads that give a held
+  contract its strike, its right and its current price. The report is the one place account data is written down: a single
   HTML file created with mode `0600`, which the user asked for and can delete.
   **Note what this does and does not prove:** the server cannot
   verify that a human chose an account, only that the accounts were listed in

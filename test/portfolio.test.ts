@@ -560,3 +560,66 @@ test("marks are asked for once per contract, and the server's duplicates do not 
   await readOptionMarks(broker as never, many);
   assert.ok(sent.every(b => b.length <= QUOTE_BATCH), `no batch exceeds ${QUOTE_BATCH}: ${sent.map(b => b.length).join(",")}`);
 });
+
+test("every asset class the provider reports a value for is read, not just the three a test happened to fill", async () => {
+  const { normalizeTotals } = await import("../src/portfolio.ts");
+  // Four of the seven key-to-label mappings had never executed: the captured fixture zeroes futures, event
+  // contracts, fixed income and mutual funds, and a zero class is filtered before the mapping is reached. A typo in
+  // any of those four keys would therefore fail silently and for ever — which is precisely how `normalizeTotals`
+  // came to ask for nine field names the provider does not send, and how every report ever produced showed
+  // "Account value —" while looking like the data was simply missing.
+  //
+  // The keys are the product here. The figures are mocks, and unmistakably so.
+  const everything = normalizeTotals({ data: { portfolio: {
+    total_value: "700000.00", cash: "10000.00",
+    equity_value: "100000.00", options_value: "200000.00", crypto_value: "300000.00",
+    futures_value: "400000.00", event_contracts_value: "500000.00",
+    fixed_income_value: "600000.00", mutual_funds_value: "700000.00",
+  } } });
+  assert.deepEqual(everything.byClass, [
+    { label: "Stocks", value: 100000 }, { label: "Options", value: 200000 }, { label: "Crypto", value: 300000 },
+    { label: "Futures", value: 400000 }, { label: "Event contracts", value: 500000 },
+    { label: "Fixed income", value: 600000 }, { label: "Mutual funds", value: 700000 },
+  ], "all seven, in the order a reader thinks about them");
+
+  // Each key alone, so a single wrong name cannot hide behind the six that are right.
+  for (const [key, label] of [["equity_value", "Stocks"], ["options_value", "Options"], ["crypto_value", "Crypto"],
+    ["futures_value", "Futures"], ["event_contracts_value", "Event contracts"],
+    ["fixed_income_value", "Fixed income"], ["mutual_funds_value", "Mutual funds"]] as const) {
+    const only = normalizeTotals({ data: { portfolio: { total_value: "1000.00", cash: "0.00", [key]: "1234.00" } } });
+    assert.deepEqual(only.byClass, [{ label, value: 1234 }], `${key} maps to ${label}`);
+  }
+
+  // A class Astra does not know about is not silently absorbed: it lands in the account value and nowhere in
+  // byClass, which is what the report's "Not itemized" line exists to surface. This is the forward-compatibility
+  // property the whole per-class design was built for — an eighth class appearing must be visible, not invisible.
+  const unknown = normalizeTotals({ data: { portfolio: {
+    total_value: "5000.00", cash: "1000.00", equity_value: "1000.00", tokenised_widgets_value: "3000.00" } } });
+  assert.deepEqual(unknown.byClass, [{ label: "Stocks", value: 1000 }]);
+  assert.equal(unknown.value! - unknown.cash! - unknown.byClass.reduce((n, c) => n + c.value, 0), 3000,
+    "the unknown class survives as a visible remainder rather than vanishing between the lines");
+});
+
+test("a class worth something renders as a header figure and is named as not listed", async () => {
+  const { portfolioReport } = await import("../src/report.ts");
+  // The four untested classes again, this time through the renderer: a value that normalizes correctly and then
+  // fails to render is the same defect one layer up.
+  const html = portfolioReport({ accounts: [{
+    label: "••••0000 individual", skipped: 0, truncated: false,
+    totals: { value: 2_310_000, cash: 10_000, byClass: [
+      { label: "Stocks", value: 100000 }, { label: "Futures", value: 400000 },
+      { label: "Event contracts", value: 500000 }, { label: "Fixed income", value: 600000 },
+      { label: "Mutual funds", value: 700000 } ] },
+    holdings: [],
+  }], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  for (const [label, figure] of [["Futures", "$400,000"], ["Event contracts", "$500,000"],
+    ["Fixed income", "$600,000"], ["Mutual funds", "$700,000"]] as const) {
+    assert.ok(html.includes(`<dt>${label}</dt><dd>${figure}</dd>`), `${label} is a header figure`);
+    assert.ok(html.includes(`${label.toLowerCase()} (${figure})`), `${label} is named as counted but not listed`);
+  }
+  // Astra can list none of these, and says so rather than implying the table covers the account.
+  assert.match(html, /Counted in the account value above, but not listed here/);
+  // And the header adds up, so nothing is left for the remainder line to report.
+  assert.ok(!/Not itemized/.test(html), "a fully itemized account has no remainder");
+});

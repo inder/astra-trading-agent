@@ -5,8 +5,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { agentStrategies, type AgentStrategy, type SampleResult } from "./agent-strategies.ts";
 import { RobinhoodConnection } from "./broker-connection.ts";
 import { DailyBarsError, RobinhoodMarketData, sessionsBefore, validateSymbols, type DroppedBars, type EquityMarketQuote } from "./market-data.ts";
-import { BOUNDARY_ERRORS, MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, readOptionHoldings, sealed, type AccountSummary } from "./portfolio.ts";
-import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportHolding } from "./report.ts";
+import { BOUNDARY_ERRORS, MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTotals, readHoldings, readOptionHoldings,
+  readOptionInstruments, sealed, strikeNotComparable, type AccountSummary, type Holding, type OptionHolding, type OptionInstrument } from "./portfolio.ts";
+import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportContract, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { ReportServer } from "./report-server.ts";
@@ -140,6 +141,9 @@ export class TradingAgentService {
     // rewriting it into "Account read failed" would send them looking at the broker for a permissions error.
     const accounts = await sealed(async () => {
       const accounts: ReportAccount[] = [];
+      // One cache for the whole report, not one per account: the same contract can be held in two accounts, and it
+      // remembers failures as well as successes so an unavailable contract is not paid for twice.
+      const instrumentCache = new Map<string, OptionInstrument | null>();
       for (const [index, accountNumber] of numbers.entries()) {
         const totals = normalizeTotals(await this.broker.accountRead("get_portfolio", { account_number: accountNumber }));
         const { holdings, skipped, truncated } = await readHoldings(this.broker, accountNumber);
@@ -152,9 +156,11 @@ export class TradingAgentService {
         // what a user may see. What is caught is the read itself failing, and that becomes a state on the page
         // rather than a silence.
         let options: ReportAccount["options"];
+        let contracts: OptionHolding[] = [];
         if (this.broker.status().optionPositionsAvailable) {
           try {
             const read = await readOptionHoldings(this.broker, accountNumber);
+            contracts = read.holdings;
             // Contracts, not rows. One row can hold four contracts, and counting rows reported that as "1 open
             // contract" beside a four-contract position's value. Summed rather than netted: a long and a short
             // that cancel in dollars are still two open contracts, and describing that book as empty is the
@@ -169,6 +175,9 @@ export class TradingAgentService {
           // The account is worth something in options and this grant cannot say what. Silence would read as none.
           options = "unreadable";
         }
+        // Contract terms are identified on their own budget, before charting decides anything. Strike and call/put
+        // are inventory fields: a contract must not lose its name because its underlying fell outside the chart cap.
+        const terms = contracts.length ? await readOptionInstruments(this.broker, contracts.map(c => c.optionId), instrumentCache) : null;
         // One levels call for the whole account, so a charted account is twenty bar reads at most, and cached. The
         // weekly frame is asked for because the report's technicals offer it as a timeframe. Past the cap the
         // largest positions keep their charts — ranked by what was paid, the only size known before prices arrive —
@@ -180,21 +189,54 @@ export class TradingAgentService {
         // orders an account of unpriced holdings arbitrarily — the same defect this report's own row ordering had.
         const size = (h: { shares: number; averageCost: number | null }) =>
           h.averageCost === null ? Number.MAX_SAFE_INTEGER : h.shares * h.averageCost;
-        const charted = new Set([...holdings]
-          .sort((a, b) => size(b) - size(a) || b.shares - a.shares || a.symbol.localeCompare(b.symbol))
-          .slice(0, MAX_CHARTED_HOLDINGS).map(h => h.symbol));
+        // One group per underlying, across shares and contracts. An account holding options on twenty names it owns
+        // no stock in has twenty underlyings to chart, so the cap counts groups rather than share positions.
+        const bySymbol = new Map<string, { holding?: Holding; contracts: OptionHolding[] }>();
+        for (const holding of holdings) bySymbol.set(holding.symbol, { holding, contracts: [] });
+        for (const c of contracts) {
+          const group = bySymbol.get(c.underlying) ?? { contracts: [] };
+          group.contracts.push(c);
+          bySymbol.set(c.underlying, group);
+        }
+        // Ranked by what is known before any price arrives: share cost, plus each contract's opening premium. Gross,
+        // not signed — a long and a short that offset are a large position to look at, not a $0 one, and ranking by
+        // a signed sum would sort a big written book below a tiny bought one.
+        const groupSize = (g: { holding?: Holding; contracts: OptionHolding[] }) => {
+          const shares = !g.holding ? 0 : g.holding.averageCost === null ? Number.MAX_SAFE_INTEGER : g.holding.shares * g.holding.averageCost;
+          const premium = g.contracts.reduce((n, c) =>
+            n + (c.averageCostPerShare === null || c.multiplier === null ? 0 : c.averageCostPerShare * c.multiplier * c.contracts), 0);
+          return shares === Number.MAX_SAFE_INTEGER ? shares : shares + premium;
+        };
+        const charted = new Set([...bySymbol]
+          .sort(([as, a], [bs, b]) => groupSize(b) - groupSize(a) || as.localeCompare(bs))
+          .slice(0, MAX_CHARTED_HOLDINGS).map(([symbol]) => symbol));
         const computed = charted.size ? await this.levels([...charted], "5y") : [];
-        const rows: ReportHolding[] = holdings.map(holding => {
-          const found = computed.find(c => c.symbol === holding.symbol);
+        const rows: ReportHolding[] = [...bySymbol].map(([symbol, group]) => {
+          const reported: ReportContract[] = group.contracts.map(c => {
+            const instrument = terms?.found.get(c.optionId);
+            const note = instrument ? undefined
+              : terms?.unasked.has(c.optionId) ? "terms not fetched within this report's limit"
+              : "the provider did not return this contract's terms";
+            return { expiry: c.expiry, contracts: c.contracts, direction: c.direction, multiplier: c.multiplier,
+              averageCostPerShare: c.averageCostPerShare,
+              right: instrument?.right ?? null, strike: instrument?.strike ?? null,
+              // No mark yet: get_option_quotes has never been captured, and this slice will not price a contract
+              // against a guessed payload shape. A contract with no mark shows its cost and quantity and no value,
+              // which is the stated fallback — not a value inferred from what it cost.
+              mark: null, markAt: null, value: null,
+              note: note ?? (c.incomplete?.length ? `not valued: ${c.incomplete.join(", ")} could not be read` : undefined),
+              strikeNotDrawn: instrument ? strikeNotComparable(instrument, symbol) ?? undefined : undefined };
+          });
+          const found = computed.find(c => c.symbol === symbol);
           if (!found || "unavailable" in found) {
-            return { holding, unavailable: found ? found.unavailable
+            return { symbol, holding: group.holding, contracts: reported, unavailable: found ? found.unavailable
               : `not charted — this report charts the ${MAX_CHARTED_HOLDINGS} largest positions in an account` };
           }
-          const bars = this.#dailyBars.get(holding.symbol)?.bars;
-          if (!bars) return { holding, levels: found, series: { daily: [] } };
+          const bars = this.#dailyBars.get(symbol)?.bars;
+          if (!bars) return { symbol, holding: group.holding, contracts: reported, levels: found, series: { daily: [] } };
           const closes = (source: DailyBars) => source.time.map((time, i) => ({ time, value: source.close[i]! }));
           const weekly = found.frames.some(f => f.bar === "week" && !f.unavailable) ? closes(aggregateWeekly(bars)) : undefined;
-          return { holding, levels: found, series: { daily: closes(bars), weekly } };
+          return { symbol, holding: group.holding, contracts: reported, levels: found, series: { daily: closes(bars), weekly } };
         });
         accounts.push({ label: labels.get(handles[index]!) ?? "account", totals, holdings: rows, skipped, truncated,
           options });

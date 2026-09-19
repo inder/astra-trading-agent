@@ -16,7 +16,7 @@ const series = bars.time.map((time, i) => ({ time, value: bars.close[i]! }));
 const account = (over: Partial<ReportAccount> = {}): ReportAccount => ({
   label: "••••0000 individual",
   totals: { value: 125340.55, cash: 2200, byClass: [{ label: "Stocks", value: 15294 }] },
-  holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: computed, series: { daily: series } }],
+  holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: computed, series: { daily: series } }],
   skipped: 0, truncated: false, ...over,
 });
 
@@ -60,7 +60,9 @@ test("the report states the figures a holder needs, and marks a stock sitting on
 });
 test("technicals expand to a readable chart, one per timeframe, with no script to switch them", () => {
   const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
-  assert.match(html, /<details class="technicals"><summary>Technicals — price, cost and levels/,
+  // The heading names WHOSE price the axis carries. "Price, cost and levels" was ambiguous the moment a group could
+  // hold options and no shares — a contract's own price is its premium, which never goes on this axis.
+  assert.match(html, /<details class="technicals"><summary>Underlying price, levels, your share cost/,
     "collapsed until asked for, and its label says what opening it gives you");
   assert.match(html, /<svg class="chart"/);
   assert.match(html, /<path class="line" d="M[\d. LM]+"/, "the price is a path");
@@ -110,7 +112,7 @@ test("no chart label is written outside its own chart, however crowded the chart
       resistance: [zone(4, 41.15), zone(5, 41.20), zone(6, 41.25)] })),
   };
   const html = portfolioReport({ accounts: [account({ holdings: [
-    { holding: { symbol: "TIGHT", shares: 100, averageCost: 41.1 }, levels: crowded, series: { daily: series } }] })],
+    { symbol: "TIGHT", holding: { symbol: "TIGHT", shares: 100, averageCost: 41.1 }, levels: crowded, series: { daily: series } }] })],
     generatedAt: "2026-09-16T12:00:00.000Z" });
 
   const charts = [...html.matchAll(/<svg class="chart"[^>]*viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"[\s\S]*?<\/svg>/g)];
@@ -126,7 +128,7 @@ test("no chart label is written outside its own chart, however crowded the chart
 });
 test("a holding without levels still appears, saying why, rather than being dropped", () => {
   const html = portfolioReport({ accounts: [account({
-    holdings: [{ holding: { symbol: "QUIET", shares: 5, averageCost: null }, unavailable: "no usable daily price history from Robinhood" }],
+    holdings: [{ symbol: "QUIET", holding: { symbol: "QUIET", shares: 5, averageCost: null }, unavailable: "no usable daily price history from Robinhood" }],
     skipped: 2, truncated: true })], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.match(html, /QUIET/);
   assert.match(html, /no usable daily price history/);
@@ -140,7 +142,7 @@ test("a holding without levels still appears, saying why, rather than being drop
 test("what a provider or an issuer wrote cannot become markup", () => {
   const html = portfolioReport({ accounts: [account({
     label: '<script>alert(1)</script> "roth"',
-    holdings: [{ holding: { symbol: "A&B<C", shares: 1, averageCost: 1 }, unavailable: "<img src=x onerror=alert(1)>" }],
+    holdings: [{ symbol: "A&B<C", holding: { symbol: "A&B<C", shares: 1, averageCost: 1 }, unavailable: "<img src=x onerror=alert(1)>" }],
   })], generatedAt: "2026-09-16T12:00:00.000Z" });
   assert.ok(!html.includes("<script>alert"), "a label cannot open a tag");
   assert.ok(!html.includes("<img src=x"), "nor can a reason");
@@ -176,7 +178,7 @@ test("an account holding more than stocks says so, by class and by figure", () =
   // Claiming "holds no stocks" in the same paragraph that says rows were dropped states two different things as one.
   const allDropped = portfolioReport({ accounts: [account({ holdings: [], skipped: 7, totals: {
     value: 100000, cash: 1000, byClass: [{ label: "Options", value: 99000 }] } })], generatedAt: "2026-09-16T12:00:00.000Z" });
-  assert.match(allDropped, /No stock positions could be read for this account, so none are listed\./);
+  assert.match(allDropped, /No positions could be read for this account, so none are listed\./);
   assert.ok(!/holds no stocks/.test(allDropped), "an unreadable book is not an empty one");
 
   // Whatever the account value holds that the header has not named gets a line of its own. Robinhood folds things
@@ -259,7 +261,7 @@ test("a stock with too little history shows its price, not zero, and says why it
   assert.equal(thin.price, bars.close.at(-1), "but the price is the last close, not zero");
 
   const input = { accounts: [account({
-    holdings: [{ holding: { symbol: "NEWCO", shares: 100, averageCost: 40 }, levels: thin, series: { daily: series } }],
+    holdings: [{ symbol: "NEWCO", holding: { symbol: "NEWCO", shares: 100, averageCost: 40 }, levels: thin, series: { daily: series } }],
   })], generatedAt: "2026-09-16T12:00:00.000Z" };
   const html = portfolioReport(input);
   assert.ok(!/\$0\.00/.test(html), "no zero price reaches the table");
@@ -276,7 +278,7 @@ test("a price that is not a closing price is never shown as one", () => {
   // trade was an after-hours print. Shown under a column headed "Last close", it read as the day's close.
   const afterHours = { ...computed, priceSource: "after-hours" as const, priceAt: "2026-09-16T21:42:00.000Z" };
   const html = portfolioReport({ accounts: [account({
-    holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: afterHours, series: { daily: series } }],
+    holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: afterHours, series: { daily: series } }],
   })], generatedAt: "2026-09-16T23:36:00.000Z" });
   // \s, not a literal space: ICU separates the time from AM/PM with U+202F, a narrow no-break space.
   assert.match(html, /after hours Sep 16, 5:42\sPM ET/, "it says what it is, and when, in the market's own timezone");
@@ -287,7 +289,7 @@ test("a price that is not a closing price is never shown as one", () => {
 
   const preMarket = { ...computed, priceSource: "pre-market" as const, priceAt: "2026-09-16T12:10:00.000Z" };
   const early = portfolioReport({ accounts: [account({
-    holdings: [{ holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: preMarket, series: { daily: series } }],
+    holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: preMarket, series: { daily: series } }],
   })], generatedAt: "2026-09-16T12:15:00.000Z" });
   assert.match(early, /pre-market Sep 16, 8:10\sAM ET/);
 });
@@ -469,8 +471,8 @@ test("the overview says enough for the chat to summarize, and leaves the detail 
   const input = { accounts: [account(), account({ label: "••••1234 roth ira",
     totals: { value: 40000, cash: 0, byClass: [{ label: "Stocks", value: 40000 }] },
     holdings: [
-      { holding: { symbol: "FIXA", shares: 10, averageCost: 200 }, levels: computed, series: { daily: series } },
-      { holding: { symbol: "QUIET", shares: 5, averageCost: 10 }, unavailable: "no usable daily price history" },
+      { symbol: "FIXA", holding: { symbol: "FIXA", shares: 10, averageCost: 200 }, levels: computed, series: { daily: series } },
+      { symbol: "QUIET", holding: { symbol: "QUIET", shares: 5, averageCost: 10 }, unavailable: "no usable daily price history" },
     ] })], generatedAt: "2026-09-16T12:00:00.000Z" };
   const summary = overview(input);
   assert.equal(summary.asOf, "2026-09-16");
@@ -492,4 +494,118 @@ test("the moving-average series the chart could draw matches the numbers the rep
   // Guards the rule the whole design rests on: a picture is a view of the same answer, never a second computation.
   const drawn = movingAverageSeries(bars, [10]).at(0)!.points.at(-1)!.value;
   assert.ok(Math.abs(drawn - computed.averages.find(a => a.period === 10)!.value!) < 1e-9);
+});
+
+const contract = (over: Partial<import("../src/report.ts").ReportContract> = {}) => ({
+  expiry: "2026-12-18", contracts: 4, direction: "long" as const, right: "call" as const,
+  strike: 44, multiplier: 100, averageCostPerShare: 6.2, mark: 7.85, markAt: "2026-09-18T20:02:00.000Z",
+  value: { value: 3140, basis: 2480, gain: 660, gainPctOfPremium: 26.6 }, ...over,
+} as import("../src/report.ts").ReportContract);
+
+test("an account that holds only options is not an empty report", () => {
+  // The founder opened a report, pointed at an account holding options and nothing else, and said: "this account is
+  // options only, and it shows nothing." It had a value, a contract count, and no listing.
+  const html = portfolioReport({ accounts: [account({
+    totals: { value: 5266, cash: 2666, byClass: [{ label: "Options", value: 2600 }] },
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [contract()] }],
+    options: { count: 4, positions: 1, skipped: 0, truncated: false },
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  // Everything a holder needs, without opening anything: which way round, how many, call or put, the full
+  // expiration, the strike, what was paid, the mark and its time, the signed value and the gain.
+  assert.match(html, /FIXA Dec 18, 2026 \$44\.00 call · long/, "the contract names itself in full");
+  assert.match(html, /<tr class="contract">/);
+  assert.match(html, /\$7\.85<span class="dist">mark Sep 18, 4:02 PM ET/, "the mark carries its own clock");
+  assert.match(html, /\$3,140/); assert.match(html, /26\.6% of premium/,
+    "and a percentage names its denominator, which is neither collateral nor capital");
+
+  // The underlying's own price and levels have somewhere to live. A contract's Price column is its PREMIUM, so the
+  // stock price cannot go there — with no share row there was previously nowhere for it at all.
+  assert.match(html, /<span class="dist">no shares<\/span>/, "the group says it holds no shares rather than showing a dash");
+  assert.match(html, /close [A-Z][a-z]{2} \d+, \d{4}/, "the underlying's price is still stated, with its session");
+  assert.match(html, /Support below/);
+
+  // And the note no longer names options among the things that are NOT listed, because they are listed.
+  assert.match(html, /The table below lists this account&#39;s option contracts\./);
+  assert.ok(!/not listed here: options/.test(html), "options are on the page now, so nothing says they are absent");
+  assert.ok(!/holds no stocks, so the table below is empty/.test(html));
+});
+
+test("a group carries its shares and its contracts, and the money is signed", () => {
+  const html = portfolioReport({ accounts: [account({
+    totals: { value: 125340.55, cash: 2200, byClass: [{ label: "Stocks", value: 15294 }, { label: "Options", value: 2660 }] },
+    holdings: [{ symbol: "FIXA", holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 },
+      levels: computed, series: { daily: series }, contracts: [
+        contract(),
+        // A short put. Its value must be negative in the group's total, or the account is overstated by twice the
+        // premium — which is what "invert the P&L for a short" alone would have produced.
+        contract({ direction: "short", right: "put", strike: 38, contracts: 2, averageCostPerShare: 3.1, mark: 2.4,
+          value: { value: -480, basis: -620, gain: 140, gainPctOfPremium: 22.6 } }),
+      ] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(html, /FIXA Dec 18, 2026 \$38\.00 put · short/, "the direction survives the merge with the instrument");
+  assert.match(html, /−\$480/, "a written contract subtracts from the group");
+  // The group's value is the shares plus every contract that could be valued, signed.
+  const shares = 120 * computed.price;
+  assert.ok(html.includes(`$${Math.round(shares + 3140 - 480).toLocaleString("en-US")}`),
+    `the group totals ${Math.round(shares + 3140 - 480)}`);
+  // No percentage on a mixed group: premium and share cost are different denominators, and one number over both
+  // would mean nothing. The dollar figure is still there.
+  const groupRow = html.match(/<tr class="holding[^"]*">[\s\S]*?<\/tr>/)![0];
+  assert.ok(!/% *<\/span>/.test(groupRow.split("Support")[0] ?? ""), "no percentage is claimed across two denominators");
+  assert.match(html, /The table below lists this account&#39;s stocks and option contracts\./);
+});
+
+test("a contract whose terms could not be read is listed anyway, and never at a strike of zero", () => {
+  const html = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [
+      contract({ right: null, strike: null, mark: null, markAt: null, value: null,
+        note: "the provider did not return this contract's terms" }),
+      contract({ right: null, strike: null, mark: null, markAt: null, value: null, contracts: 1,
+        note: "terms not fetched within this report's limit" }),
+    ] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  assert.match(html, /FIXA Dec 18, 2026 contract · long/, "named from what the position already knew");
+  assert.ok(!/\$0\.00 call|\$0\.00 put/.test(html), "never a strike of zero");
+  // The two absences are different facts and get different words: one is the provider declining to answer, the
+  // other is this report declining to ask.
+  assert.match(html, /the provider did not return this contract&#39;s terms/);
+  assert.match(html, /terms not fetched within this report&#39;s limit/);
+});
+
+test("a strike is drawn once per distinct price, and a far one does not flatten the chart", () => {
+  const strike = Math.round(computed.price * 1.04 * 100) / 100;
+  const far = Math.round(computed.price * 3.2);
+  const html = portfolioReport({ accounts: [account({
+    holdings: [{ symbol: "FIXA", levels: computed, series: { daily: series }, contracts: [
+      contract({ strike }),
+      // Same strike, different expiry: one marker, both contracts named on it. Two lines at one price is just a
+      // thicker line, and a label reading only "$44.00" would not say which contracts it belongs to.
+      contract({ strike, expiry: "2027-01-15", contracts: 1 }),
+      contract({ strike: far, expiry: "2027-06-18", contracts: 1 }),
+      // An adjusted deliverable: the strike is real and is shown in the row, but it is not comparable to the share
+      // price, so it is not drawn against that axis.
+      contract({ strike: 5, expiry: "2026-10-16", strikeNotDrawn: "it trades in the FIXA1 chain, not FIXA" }),
+    ] }],
+  })], generatedAt: "2026-09-16T12:00:00.000Z" });
+
+  const pane = html.match(/<svg class="chart"[\s\S]*?<\/svg>/)![0];
+  const markers = [...pane.matchAll(/<g class="strike">/g)].length;
+  assert.equal(markers, 2, `one marker per distinct drawable strike, got ${markers}`);
+  assert.ok(pane.includes(`$${strike.toFixed(2)} strike · 4× Dec 18, 2026 call long, 1× Jan 15, 2027 call long`),
+    "and it names every contract standing behind it");
+  assert.ok(!/FIXA1 chain[\s\S]*<\/svg>/.test(pane), "an adjusted contract's strike is not drawn");
+  assert.match(html, /strike \$5\.00 is [\d.]+% below the price · not drawn: it trades in the FIXA1 chain/,
+    "but the row still states it, and says why the chart does not");
+  // A far strike is clamped and labelled, never admitted to the domain — a $408 strike on a $127 stock would
+  // otherwise compress the whole price history into a line at the bottom edge.
+  assert.match(pane, /strike · 1× Jun 18, 2027 call long \(off scale\)/);
+  const line = pane.match(/<path class="line" d="([^"]+)"/)![1]!;
+  const ys = [...line.matchAll(/[ML][\d.]+ ([\d.]+)/g)].map(m => Number(m[1]));
+  assert.ok(Math.max(...ys) - Math.min(...ys) > 100,
+    `the price history still uses the chart: it spans ${(Math.max(...ys) - Math.min(...ys)).toFixed(0)} of 380`);
+  // A distance is a magnitude with a direction in words. "+7.0% below" reads as a contradiction.
+  assert.ok(!/[+−]\d+\.\d% (above|below) the price/.test(html), "no signed percentage sits in front of above/below");
 });

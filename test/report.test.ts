@@ -1006,7 +1006,7 @@ test("the spoken summary carries the break AND what still stands above it", asyn
   // The half that stops the summary being "INTC broke out" full stop. A model handed only a break says only that,
   // which is the same flattening the founder complained about, inverted.
   assert.equal(capped.broke[0]!.resistanceAbove, "$131.00–133.00", "what it still has over it travels with it");
-  assert.equal(capped.clearAbove.length, 0);
+  assert.equal(capped.noPriorHighAbove.length, 0);
 
   // And the other half of the pair: broke out with nothing prior above.
   const clear = overview({ accounts: [account({ holdings: [{ symbol: "RBRK",
@@ -1014,9 +1014,9 @@ test("the spoken summary carries the break AND what still stands above it", asyn
     levels: framed([Z(124, 125.4, 3, brk)], [], { zones: 0, gaps: 0, line: false }),
     series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
   assert.equal(clear.broke[0]!.resistanceAbove, null, "nothing prior above it, stated as null rather than omitted");
-  assert.equal(clear.clearAbove.length, 1);
-  assert.ok(clear.clearAbove[0]!.window.length > 0, "and the window is named, because a longer one may disagree");
-  assert.equal(clear.clearAbove[0]!.account, "••••0000 individual",
+  assert.equal(clear.noPriorHighAbove.length, 1);
+  assert.ok(clear.noPriorHighAbove[0]!.window.length > 0, "and the window is named, because a longer one may disagree");
+  assert.equal(clear.noPriorHighAbove[0]!.account, "••••0000 individual",
     "with the account, since the same symbol in two accounts is two rows");
 });
 
@@ -1088,7 +1088,7 @@ test("a stock's own last bar is not a ceiling over it, on the page or in the sen
 
   // And so must the sentence the chat reads aloud, or the two disagree about the same stock on the same run.
   const spoken = overview(input);
-  assert.equal(spoken.clearAbove.length, 1, "the summary says clear air too");
+  assert.equal(spoken.noPriorHighAbove.length, 1, "the summary says clear air too");
   assert.ok(!spoken.near.some(x => x.side === "resistance"),
     "and never reports the stock as near a resistance that is its own last session");
 
@@ -1107,4 +1107,75 @@ test("a stock's own last bar is not a ceiling over it, on the page or in the sen
     .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
   assert.match(downCells[0]!, /none in this window/, "no floor is invented from the stock's own last bar");
   assert.ok(!/held 1\b/.test(downCells[0]!));
+});
+
+test("a level the price fell through says it fell through, not that it rose", () => {
+  // The cell read the break's date and its give-back but never its DIRECTION, so a floor the stock closed down
+  // through — now a ceiling above the price — rendered "above it since Sep 3" while the price sat below it. An
+  // inversion in the column whose only job is placing the price, and on the falling stock the previous commit was
+  // written for. Every existing assertion used the upward phrasing, so none of them saw it.
+  const down: Zone = { id: "Z", lo: 135, hi: 136, tests: 4, last: "2026-09-15",
+    members: [{ date: "2026-06-01", price: 135.5, kind: "low" }],
+    broke: { direction: "below", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const html = render(withZones({ resistance: [down], support: [],
+    overhead: { zones: 1, gaps: 0, line: false } }));
+  const [, above] = levelCells(html);
+  assert.match(above!, /below it since Sep 3, 2026/, "the price is under this zone, and the cell says so");
+  assert.ok(!/above it since/.test(above!), "never the opposite of where the price is");
+});
+
+test("a zone with a confirmed break is prior structure, whatever its members are made of", () => {
+  // Membership and tests are different populations. A band can be built entirely from the last few bars' extremes
+  // and still be a level the price was turned back by repeatedly — the engine's own evidence of that is the break,
+  // which requires testsBefore >= breakMinTests. Filtering such a zone as "the price's own footprint" discarded
+  // the row's most important fact: the shared fixture's nearest support, eleven prior tests and a confirmed break,
+  // vanished from the cell and from the summary both.
+  const recent = (d: string) => ({ date: d, price: 126, kind: "low" as const, fromRecentBar: true as const });
+  const footprintWithBreak: Zone = { id: "Z", lo: 126, hi: 127, tests: 3, last: "2026-09-15",
+    members: [recent("2026-09-14"), recent("2026-09-15")],
+    broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const [below] = levelCells(render(withZones({ support: [footprintWithBreak] })));
+  assert.match(below!, /\$126\.00–127\.00/, "the zone survives, because the break proves it was structure");
+  assert.match(below!, /above it since Sep 3, 2026/);
+
+  // And one with no break, made only of recent bars, is still excluded — that is the RBRK case and it must not
+  // regress while fixing this one.
+  const { broke: _drop, ...footprintOnly } = footprintWithBreak;
+  const [, above] = levelCells(render(withZones({ resistance: [footprintOnly as Zone], support: [],
+    overhead: { zones: 0, gaps: 0, line: false } })));
+  assert.match(above!, /no zone above/);
+});
+
+test("the chart draws the same zones the row names", () => {
+  // The cell filtered; the chart iterated the raw frames. So beneath a row reading "no zone above · no prior high
+  // in this window" the chart drew a band at the price's own high labelled "1 held", with a hairline for a zone
+  // the row had just said was not there. The same contradiction as engine-versus-cell, moved one element down —
+  // and it survived an audit that searched for `shown(` rather than for who reads a zone array.
+  const recent = (d: string) => ({ date: d, price: 131, kind: "high" as const, fromRecentBar: true as const });
+  const footprint: Zone = { id: "R1", lo: 131, hi: 131, tests: 1, last: "2026-09-15",
+    members: [recent("2026-09-14"), recent("2026-09-15")] };
+  const html = render(withZones({ resistance: [footprint], support: [],
+    overhead: { zones: 0, gaps: 0, line: false } }));
+  assert.match(levelCells(html)[1]!, /no zone above/, "the row says nothing is overhead");
+  const panes = [...html.matchAll(/<svg class="chart"[\s\S]*?<\/svg>/g)].map(m => m[0]);
+  assert.ok(panes.length > 0, "there are charts");
+  assert.ok(!panes.some(p => /\$131\.00–131\.00/.test(p)), "and no chart draws the band the row denies");
+});
+
+test("the summary names breakdowns as readily as breakouts", () => {
+  // It scanned the support side only, and by the give-back rule a downward break that still stands can only live
+  // among the resistance zones — so the chat narrated every breakout and never once a breakdown. That is the
+  // "select the encouraging half" act refused for the row badge, reproduced in the layer that is read aloud.
+  const lost: Zone = { id: "Z", lo: 135, hi: 136, tests: 4, last: "2026-09-15",
+    members: [{ date: "2026-06-01", price: 135.5, kind: "low" }],
+    broke: { direction: "below", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const spoken = overview({ accounts: [account({ holdings: [{ symbol: "DOWN",
+    holding: { symbol: "DOWN", shares: 1, averageCost: 1 },
+    levels: withZones({ resistance: [lost], support: [], overhead: { zones: 1, gaps: 0, line: false } }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(spoken.broke.length, 1, "a level lost is a level the price closed through");
+  assert.equal(spoken.broke[0]!.direction, "below");
+  assert.equal(spoken.broke[0]!.resistanceAbove, "$135.00–136.00", "what is over it now");
+  assert.equal(spoken.broke[0]!.supportBelow, null, "and nothing prior beneath it, stated rather than omitted");
 });

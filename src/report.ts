@@ -136,7 +136,16 @@ function optionNote(options: NonNullable<ReportAccount["options"]>, value: numbe
  *  The engine already excludes such a zone from `Analysis.overhead`; this is the same predicate, applied wherever a
  *  zone is shown to a reader or measured against — because a page that draws the exclusion in one place and not the
  *  other reports clear air in its summary and a ceiling in its table, for the same stock, on the same run. */
-const ownFootprint = (z: Zone): boolean => z.members.length > 0 && z.members.every(m => m.fromRecentBar);
+const ownFootprint = (z: Zone): boolean =>
+  // A confirmed break disqualifies it outright. Membership (which pivots and recent bars formed the band) and
+  // tests (how many bars reached it) are different populations: a band can be built entirely from recent members
+  // and still be a level the price was turned back by repeatedly. The break is the engine's own evidence of that,
+  // and filtering it out discarded exactly the zone a reader most needs.
+  !z.broke && z.members.length > 0 && z.members.every(m => m.fromRecentBar);
+/** Every frame of a `Levels`, filtered the same way. The charts draw per frame rather than through `shown()`, so
+ *  filtering only the frame the row happens to use leaves the picture beneath the row contradicting it. */
+const priorLevels = (levels: Levels): Levels =>
+  ({ ...levels, frames: levels.frames.map(f => prior(f)!) });
 /** The frame as a reader should see it: prior structure only, on BOTH sides.
  *
  *  Symmetric because the distortion is. `zoneSide` seeds the support side from the last bars' LOWS exactly as it
@@ -447,8 +456,11 @@ function row(entry: ReportHolding, id: string): string {
       // is on NOW, so for a flipped ceiling it counts the years it spent turning the price back as it having
       // "held" as support — a wrong number, printed confidently. The break date replaces it.
       const broke = z.broke?.recent && !z.broke.backInsideOn ? z.broke : null;
+      // Which side the price ended up on comes from the break's own direction, not from which column this is. A
+      // zone can be broken downward and end up ABOVE the price — support lost — and saying "above it since" of it
+      // states the opposite of where the price is.
       const note = broke
-        ? `above it since ${day(broke.on)}`
+        ? `${broke.direction === "above" ? "above" : "below"} it since ${day(broke.on)}`
         : z.broke?.recent && z.broke.backInsideOn
           ? `back inside since ${day(z.broke.backInsideOn)}`
           : `held ${z.tests}`;
@@ -498,7 +510,7 @@ function row(entry: ReportHolding, id: string): string {
     // reading the table, and print drops unopened sections entirely — so it would be absent from exactly the copy
     // someone keeps. The numbers it qualifies are on the line above it.
     levels.warnings.length ? `<p class="note">${levels.warnings.map(w => escape(w)).join(" ")}</p>` : ""
-  }${technicals(raw, levels, series, holding?.averageCost ?? null, id, contracts)}</td></tr>`;
+  }${technicals(raw, priorLevels(levels), series, holding?.averageCost ?? null, id, contracts)}</td></tr>`;
 }
 
 function account(a: ReportAccount, scope: number): string {
@@ -618,13 +630,17 @@ export interface PortfolioOverview {
    *  product's to assert. */
   broke: { symbol: string; account: string; zone: string; direction: "above" | "below"; on: string;
     closes: number; testsBefore: number;
-    /** The nearest zone still standing above the price, or null when nothing prior is. Present so the sentence
-     *  cannot be "INTC broke out" full stop. */
-    resistanceAbove: string | null }[];
+    /** What stands on either side of the price now, or null where nothing prior does. Present so the sentence
+     *  cannot be "INTC broke out" full stop: a stock that clears one ceiling usually has another, and the two
+     *  facts travel together or the summary misleads by omission. */
+    resistanceAbove: string | null; supportBelow: string | null }[];
   /** Stocks with no prior high above them in the window their levels were measured over. Window-scoped on purpose:
    *  a longer frame can legitimately show a band overhead, and the summary must not claim more than the engine
-   *  measured. */
-  clearAbove: { symbol: string; account: string; window: string }[];
+   *  measured.
+   *
+   *  Named for what was measured rather than for how it feels. "Clear above" reads to a model as an all-clear;
+   *  what the engine established is narrower and duller, and the field should say so. */
+  noPriorHighAbove: { symbol: string; account: string; window: string }[];
   /** The extremes of unrealized percentage gain and loss — named for the arithmetic they are, not as "best" and
    *  "worst", which these were called until an external review pointed out that the chat reads these fields aloud.
    *  A product that will not characterize a position as good or bad on the page must not do it in the sentence
@@ -640,7 +656,7 @@ export interface PortfolioOverview {
 }
 export function overview(input: ReportInput): PortfolioOverview {
   const near: PortfolioOverview["near"] = [], gains: PortfolioOverview["largestGains"] = [], unreadable: string[] = [];
-  const broke: PortfolioOverview["broke"] = [], clearAbove: PortfolioOverview["clearAbove"] = [];
+  const broke: PortfolioOverview["broke"] = [], noPriorHighAbove: PortfolioOverview["noPriorHighAbove"] = [];
   // A total is the sum of every account or it is nothing. Treating one unreadable account as zero produces a number
   // that looks like the whole portfolio and is short by an account — and the chat is told to read this figure out.
   // A missing total is answerable ("I couldn't read one account"); a quietly understated one is not.
@@ -658,6 +674,7 @@ export function overview(input: ReportInput): PortfolioOverview {
     // happens to be sitting on something today, and `near`'s one-ATR test is about proximity, not about history.
     const band = (z: Zone) => `${money(z.lo)}–${z.hi.toFixed(2)}`;
     const ceiling = (frame?.resistance ?? []).find(z => z.lo > levels.price);
+    const floor = (frame?.support ?? []).find(z => z.hi < levels.price);
     // ONE break per holding, not one per zone. A price that moves up through a shelf of levels in a single stretch
     // clears several at once — the fixture here produces two, on the same date, under the same ceiling — and a
     // model handed both narrates both, which is noise dressed as detail.
@@ -665,14 +682,20 @@ export function overview(input: ReportInput): PortfolioOverview {
     // The one kept is the most-tested: the level that was actually holding the price back, which is what "the range
     // it was stuck in" means. It is also the discriminator measured during B1, where a steady climb scored 1 and a
     // real range scored 20.
-    const broken = (frame?.support ?? [])
+    //
+    // BOTH sides are scanned. This read the support side only, and by the give-back rule a downward break that
+    // stands can only live among the resistance zones — so the summary narrated every breakout and never once a
+    // breakdown. That is the "select the encouraging half" act refused for the badge, reproduced in the layer that
+    // is read aloud, where it matters more. Silence is not the neutral option.
+    const broken = [...(frame?.support ?? []), ...(frame?.resistance ?? [])]
       .filter(z => z.broke?.recent && !z.broke.backInsideOn)
       .sort((x, y) => y.broke!.testsBefore - x.broke!.testsBefore)[0];
     if (broken) broke.push({ symbol, account: account.label, zone: band(broken),
       direction: broken.broke!.direction, on: broken.broke!.on, closes: broken.broke!.closes,
-      testsBefore: broken.broke!.testsBefore, resistanceAbove: ceiling ? band(ceiling) : null });
+      testsBefore: broken.broke!.testsBefore,
+      resistanceAbove: ceiling ? band(ceiling) : null, supportBelow: floor ? band(floor) : null });
     if (frame?.overhead && !frame.overhead.zones && !frame.overhead.gaps && !frame.overhead.line)
-      clearAbove.push({ symbol, account: account.label, window: frame.label });
+      noPriorHighAbove.push({ symbol, account: account.label, window: frame.label });
 
     if (atrsAway(frame, levels.price) > 1) continue;
     const { support, resistance, toSupport, toResistance } = nearest(frame, levels.price);
@@ -687,7 +710,7 @@ export function overview(input: ReportInput): PortfolioOverview {
     // byClass rides along so the chat can say "and $84,000 of that is options" without the report being open.
     accounts: input.accounts.map(a => ({ label: a.label, value: a.totals.value, holdings: a.holdings.length, byClass: a.totals.byClass })),
     totalValue: sum(a => a.totals.value),
-    near, broke, clearAbove, largestGains: ranked.slice(0, 3),
+    near, broke, noPriorHighAbove, largestGains: ranked.slice(0, 3),
     largestLosses: ranked.slice(-3).reverse().filter(g => !ranked.slice(0, 3).includes(g)), unreadable,
     unreadableAccounts: input.accounts.filter(a => a.totals.value === null).map(a => a.label) };
 }

@@ -47,6 +47,33 @@ never what to do. It is a port of a prototype validated by eye; the differences
 from it are listed in `DIVERGENCES` in the file, and parity is pinned by a golden
 fixture in `test/fixtures/levels-golden.json`.
 
+A zone also records whether the price closed through it: which way, on what session,
+how many closes since, and how often it had turned the price back **before** it went.
+That last number is not `Zone.tests`, and the distinction is the easiest wrong number
+in the feature — after a flip, `tests` is recomputed under the side the zone is on
+*now*, so a level's years as a ceiling would be counted as it having held as support.
+
+Three thresholds keep a break meaning something. It must close through by a margin
+sized in ATR, for two settled sessions, having been turned back at least twice before
+— nothing was broken if nothing was holding, and a steadily climbing stock otherwise
+reports a break at every level it passes. The margin uses a **window-mean** ATR rather
+than the trailing one every other tolerance here uses: a trailing ATR moves with this
+week's volatility, so a claim about a September session would be re-adjudicated by
+today's range and the break's own date would drift between runs.
+
+Confirming and giving back use different thresholds deliberately. A break is confirmed
+by clearing the edge by the margin; it is given back only by closing back into the
+zone itself. Without that gap a price hovering near an edge flickers between states.
+
+`Analysis.overhead` counts what stands above the price, excluding any zone built only
+from the last few bars' highs — on the day a stock makes a new high, that session's
+high is a candidate just overhead, and counting it would mean the check never fires
+for the stock it exists for. The report applies the same exclusion wherever a zone is
+shown or measured against, on both sides, because a page that draws it in one place
+and not another reports clear air in its summary and a ceiling in its table for the
+same stock on the same run. A zone carrying a confirmed break is never excluded: the
+break is proof it was structure, whatever its members are made of.
+
 Every number it uses is a validated setting with a default and bounds
 (`LEVELS_SETTINGS`), on the same rule as strategy configuration: no magic numbers.
 

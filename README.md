@@ -11,7 +11,7 @@ model; this server provides validated tools and durable run records.
 Independent project, not affiliated with OpenAI or Robinhood. The MCP server is
 model-agnostic; its name does not require a particular model or provider.
 
-**Version 0.5 lists your option contracts too: the report covers the whole account** —
+**Version 0.6 says when a level was broken, and when nothing stands above a stock** —
 cost basis, profit and loss, and the support and resistance around each holding on
 an expandable chart. Reading is all it does: the same code allowlist that blocks
 order tools governs every account call, and no tool Astra can reach places one.
@@ -125,8 +125,18 @@ rather than an asset.
 An underlying you hold only in options still gets a row: it carries the stock's
 own price and levels, with "no shares" where a quantity would be.
 
-Holdings closest to a level come first. **Technicals** under any row expands to a
-full chart with QTD, YTD, 2-year daily and 5-year weekly tabs, the zones drawn as
+Both level columns always say something. Below the price: the nearest zone, and if the
+stock closed up through it, the session it did — replacing the count of how often it
+held, which after a flip is measured under the wrong side's rule. Above the price:
+the nearest zone, or **no zone above** with what that means in this window — no prior
+high, an open gap, or a falling line. An em-dash is what this report uses for
+*unknown*, and a stock at the top of its range is not unknown.
+
+Rows are alphabetical. They used to be ordered by how close the price sat to a level,
+which put the page in the business of deciding what deserved your attention first.
+
+**Technicals** under any row expands to a full chart with QTD, YTD, 2-year daily and
+5-year weekly tabs, the zones drawn as
 bands, a dashed line at your cost, and each strike you hold drawn against the
 stock's own price. **Print or save as PDF** from the page; only the charts you
 opened print, in the timeframe you chose.
@@ -156,11 +166,13 @@ is a recommendation: it reports what the rules found.
 > **Astra:** HPE, from two years of daily bars through Monday, September 14. Last close $60.20; a day's swing, overnight gaps included, averages $0.72 (1.2%), and that sets how wide these zones are.
 >
 > - **Just above:** $60.24–$60.59, touched 17 times, most recently Monday.
-> - **Just below:** $59.80–$60.12, also 17 touches, the last one Monday. Then $59.38–$59.63 (16) and $58.93–$59.13 (14).
+> - **Just below:** $59.80–$60.12, which HPE closed up through on August 29 and has closed above every session since — it had turned the price back 14 times before that. Then $59.38–$59.63, touched 16 times, and $58.93–$59.13 (14).
 > - **Rising support line:** up since January 8, with no close dropping through it since; it reaches about $56.88 tomorrow, well under the price.
 > - **Falling line since August 26:** touched four times, three of them this month. It sat at $60.35 on Monday and reaches about $60.24 tomorrow — the same shelf as the zone above.
 > - **Open gaps below:** June 23 at $56.39–$57.74, and January 6 at $48.96–$50.00. Neither has been filled.
 > - **Moving averages:** 10-day $59.84, 21-day $60.36, 50-day $60.04, 200-day $54.40.
+>
+> A zone counts as broken when the stock closed through it by a set margin for two settled sessions and had been turned back by it at least twice before. It is a record of what happened, measured from settled closes only — a price quoted during the session never creates one.
 >
 > This is what the rules found on the chart, not a suggestion to buy or sell. Ask for the quarter or the year instead of two years, and I'll recompute. For the long view, ask for five years and I'll measure weekly bars instead.
 

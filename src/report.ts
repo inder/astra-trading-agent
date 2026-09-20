@@ -141,6 +141,10 @@ const ownFootprint = (z: Zone): boolean =>
   // tests (how many bars reached it) are different populations: a band can be built entirely from recent members
   // and still be a level the price was turned back by repeatedly. The break is the engine's own evidence of that,
   // and filtering it out discarded exactly the zone a reader most needs.
+  //
+  // ANY break counts, including one given back or too old to mention. A break exists only because `testsBefore`
+  // met `breakMinTests` at the time, and neither a later re-entry nor the passage of time un-proves that the level
+  // acted. Do not tighten this to `!z.broke?.recent`.
   !z.broke && z.members.length > 0 && z.members.every(m => m.fromRecentBar);
 /** Every frame of a `Levels`, filtered the same way. The charts draw per frame rather than through `shown()`, so
  *  filtering only the frame the row happens to use leaves the picture beneath the row contradicting it. */
@@ -630,9 +634,12 @@ export interface PortfolioOverview {
    *  product's to assert. */
   broke: { symbol: string; account: string; zone: string; direction: "above" | "below"; on: string;
     closes: number; testsBefore: number;
-    /** What stands on either side of the price now, or null where nothing prior does. Present so the sentence
-     *  cannot be "INTC broke out" full stop: a stock that clears one ceiling usually has another, and the two
-     *  facts travel together or the summary misleads by omission. */
+    /** The nearest level on each side BEYOND the one that broke — the zone itself is `zone`. Null where nothing
+     *  prior stands there. Present so the sentence cannot be "INTC broke out" full stop: a stock that clears one
+     *  ceiling usually has another, and the two facts travel together or the summary misleads by omission.
+     *
+     *  The broken zone is excluded from both. It genuinely does sit on one side of the price now, but naming it
+     *  twice under two field names gives a model two identical strings to narrate as two levels. */
     resistanceAbove: string | null; supportBelow: string | null }[];
   /** Stocks with no prior high above them in the window their levels were measured over. Window-scoped on purpose:
    *  a longer frame can legitimately show a band overhead, and the summary must not claim more than the engine
@@ -673,8 +680,11 @@ export function overview(input: ReportInput): PortfolioOverview {
     // Both facts, gathered before the proximity filter below — a break is worth saying whether or not the price
     // happens to be sitting on something today, and `near`'s one-ATR test is about proximity, not about history.
     const band = (z: Zone) => `${money(z.lo)}–${z.hi.toFixed(2)}`;
-    const ceiling = (frame?.resistance ?? []).find(z => z.lo > levels.price);
-    const floor = (frame?.support ?? []).find(z => z.hi < levels.price);
+    // Computed after `broken` below and excluding it: these two fields mean the level BEYOND the one that broke.
+    // A zone the price fell through does stand above it now, so naming it in both places is not false — but it
+    // hands a model the same band twice under two names, and it will narrate two levels where there is one.
+    const beyond = (zones: Zone[] | undefined, keep: (z: Zone) => boolean, exclude: Zone | undefined) =>
+      (zones ?? []).find(z => z !== exclude && keep(z));
     // ONE break per holding, not one per zone. A price that moves up through a shelf of levels in a single stretch
     // clears several at once — the fixture here produces two, on the same date, under the same ceiling — and a
     // model handed both narrates both, which is noise dressed as detail.
@@ -690,6 +700,8 @@ export function overview(input: ReportInput): PortfolioOverview {
     const broken = [...(frame?.support ?? []), ...(frame?.resistance ?? [])]
       .filter(z => z.broke?.recent && !z.broke.backInsideOn)
       .sort((x, y) => y.broke!.testsBefore - x.broke!.testsBefore)[0];
+    const ceiling = beyond(frame?.resistance, z => z.lo > levels.price, broken);
+    const floor = beyond(frame?.support, z => z.hi < levels.price, broken);
     if (broken) broke.push({ symbol, account: account.label, zone: band(broken),
       direction: broken.broke!.direction, on: broken.broke!.on, closes: broken.broke!.closes,
       testsBefore: broken.broke!.testsBefore,

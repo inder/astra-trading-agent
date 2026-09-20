@@ -25,9 +25,8 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /••••0000 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
-  // The convention, not a particular distance: a minus sign, never accountants' brackets. Pinning one value made
-  // this fail when the nearest support changed — and it changed for a good reason, the old one being formed
-  // entirely from the last three bars' lows, which is the price's own footprint rather than a level under it.
+  // The convention only: a minus sign, never accountants' brackets. Which zone is nearest is pinned by its own
+  // test below, not here.
   assert.match(html, /−\d+\.\d%/, "a negative is shown with a minus, not a bracket");
   assert.ok(!/\(\$[\d,]/.test(html), "and never in accountants' brackets");
   assert.match(html, /FIXA/);
@@ -1006,6 +1005,8 @@ test("the spoken summary carries the break AND what still stands above it", asyn
   // The half that stops the summary being "INTC broke out" full stop. A model handed only a break says only that,
   // which is the same flattening the founder complained about, inverted.
   assert.equal(capped.broke[0]!.resistanceAbove, "$131.00–133.00", "what it still has over it travels with it");
+  assert.equal(capped.broke[0]!.supportBelow, null,
+    "and the zone it broke is `zone`, not echoed here — the only support in this fixture is the broken one");
   assert.equal(capped.noPriorHighAbove.length, 0);
 
   // And the other half of the pair: broke out with nothing prior above.
@@ -1140,6 +1141,22 @@ test("a zone with a confirmed break is prior structure, whatever its members are
 
   // And one with no break, made only of recent bars, is still excluded — that is the RBRK case and it must not
   // regress while fixing this one.
+  // ANY break is that evidence — given back, or too old to mention. Neither a later re-entry nor the passage of
+  // time un-proves that the level acted, since the break existed only because `testsBefore` met its threshold.
+  //
+  // The STALE case is the one that pins the predicate: a given-back break is still `recent`, so tightening this to
+  // `!z.broke?.recent` would not change its outcome and an assertion on it catches nothing. Found by mutation:
+  // that tightening produced zero failures against the first version of this test.
+  const givenBack: Zone = { ...footprintWithBreak,
+    broke: { ...footprintWithBreak.broke!, backInsideOn: "2026-09-12" } };
+  assert.match(levelCells(render(withZones({ support: [givenBack] })))[0]!, /\$126\.00–127\.00/,
+    "a given-back break still marks the zone as prior structure");
+  const stale: Zone = { ...footprintWithBreak,
+    broke: { ...footprintWithBreak.broke!, recent: false, barsSince: 400 } };
+  const [staleCell] = levelCells(render(withZones({ support: [stale] })));
+  assert.match(staleCell!, /\$126\.00–127\.00/, "and so does one too old to be worth saying");
+  assert.match(staleCell!, /held 3/, "which the cell reports as the count, the break being history");
+
   const { broke: _drop, ...footprintOnly } = footprintWithBreak;
   const [, above] = levelCells(render(withZones({ resistance: [footprintOnly as Zone], support: [],
     overhead: { zones: 0, gaps: 0, line: false } })));
@@ -1176,6 +1193,35 @@ test("the summary names breakdowns as readily as breakouts", () => {
 
   assert.equal(spoken.broke.length, 1, "a level lost is a level the price closed through");
   assert.equal(spoken.broke[0]!.direction, "below");
-  assert.equal(spoken.broke[0]!.resistanceAbove, "$135.00–136.00", "what is over it now");
+  assert.equal(spoken.broke[0]!.zone, "$135.00–136.00");
+  // Both side fields mean the level BEYOND the one that broke. The zone fallen through does stand above the price
+  // now, so echoing it here would not be false — it would hand a model the same band twice under two names, to be
+  // narrated as two levels. There is nothing else on either side of this fixture, so both are null.
+  assert.equal(spoken.broke[0]!.resistanceAbove, null, "the broken zone is `zone`, not what lies beyond it");
   assert.equal(spoken.broke[0]!.supportBelow, null, "and nothing prior beneath it, stated rather than omitted");
+
+  // With a second level genuinely beyond the broken one, that is what the field carries.
+  const deeper: Zone = { id: "Z2", lo: 120, hi: 121, tests: 6, last: "2026-08-01", members: [] };
+  const twoLevels = overview({ accounts: [account({ holdings: [{ symbol: "DOWN",
+    holding: { symbol: "DOWN", shares: 1, averageCost: 1 },
+    levels: withZones({ resistance: [lost], support: [deeper], overhead: { zones: 1, gaps: 0, line: false } }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+  assert.equal(twoLevels.broke[0]!.supportBelow, "$120.00–121.00", "the next level down, which is the useful half");
+  assert.equal(twoLevels.broke[0]!.resistanceAbove, null);
+});
+
+test("the fixture's nearest support is the zone that broke, not the one behind it", () => {
+  // The assertion this three-commit chain was actually about, and the repo never had it. One commit filtered a
+  // zone whose members are all from the last two sessions as "the price's own footprint" and the cell fell back to
+  // the zone behind it; the next commit established that a confirmed break is proof the level acted, and the cell
+  // came back. Both changes passed the suite, because the only assertion touching this was a minus-sign check.
+  //
+  // `syntheticBars()` is deterministic, so this pins the engine through the renderer: S1 at $126.95–127.20 carries
+  // a live break dated Aug 11 with eleven prior tests, which is why it survives `prior()` despite every one of its
+  // members coming from the last two bars. S2 at $124.90–125.70 is the zone behind it.
+  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
+  const [below] = levelCells(html);
+  assert.match(below!, /\$126\.95–127\.20/, "the zone with the break, not the one behind it");
+  assert.match(below!, /−0\.2% · above it since Aug 11, 2026/);
+  assert.ok(!/\$124\.90–125\.70/.test(below!), "S2 is further away and is not what the row leads with");
 });

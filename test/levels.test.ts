@@ -183,3 +183,207 @@ test("windows start where the calendar says", () => {
   assert.equal(windowStart("2026-09-09", "ytd"), "2026-01-01");
   assert.equal(windowStart("2026-09-09", "2y"), "2024-09-09");
 });
+
+// ── Breakouts (B1): the engine names what it already knew ─────────────────────────────────────────────────────
+//
+// The founder, reading his own charts: "RBRK and INTC have both broken out - in different ways... you are right to
+// say they are just above support, but they have also broken out, which is a better/bigger signal." The engine
+// already computed the flip — ZoneMember.kind carries "broken resistance" — and nothing outside this module read
+// it, so a zone that was a ceiling until three weeks ago and one that has been a floor for two years printed the
+// same string.
+
+/** Bars built to order. Every test here needs a specific shape, and a shared fixture would hide which bar matters. */
+function barsOf(rows: [high: number, low: number, close: number][]): DailyBars {
+  const time = rows.map((_, i) => {
+    const day = new Date(Date.UTC(2026, 0, 5) + i * 86_400_000);   // a Monday; weekends are irrelevant to the engine
+    return day.toISOString().slice(0, 10);
+  });
+  return { time, open: rows.map(r => r[2]), high: rows.map(r => r[0]), low: rows.map(r => r[1]), close: rows.map(r => r[2]) };
+}
+/** N bars oscillating into a ceiling at `hi` without closing through it. */
+const under = (n: number, hi: number): [number, number, number][] =>
+  Array.from({ length: n }, (_, i) => i % 2 === 0 ? [hi - 0.1, hi - 4, hi - 1] : [hi - 3, hi - 6, hi - 5]);
+/** N bars clear above `hi`. */
+const above = (n: number, hi: number): [number, number, number][] =>
+  Array.from({ length: n }, () => [hi + 6, hi + 3, hi + 5]);
+
+const analyzed = (rows: [number, number, number][], over: Record<string, unknown> = {}) => {
+  const out = analyzeWindow(barsOf(rows), parseLevelsSettings(over));
+  assert.ok(!("unavailable" in out), `analyzable: ${"unavailable" in out ? out.unavailable : ""}`);
+  return out as Exclude<typeof out, { unavailable: string }>;
+};
+/** The broken zone a reader means: the one that actually held the price back, not an incidental level it crossed.
+ *  Ranked by testsBefore, because that is the measure that separates a range from a bar the price passed. */
+const brokenZone = (a: ReturnType<typeof analyzed>) =>
+  a.support.filter(z => z.broke).sort((x, y) => y.broke!.testsBefore - x.broke!.testsBefore)[0];
+/** The break of the zone straddling one price, on either side. Asking about a level rather than about the window,
+ *  because these fixtures oscillate and so carry a lower level the price genuinely does break. */
+const breakAt = (a: ReturnType<typeof analyzed>, level: number) =>
+  [...a.support, ...a.resistance].find(z => z.lo <= level + 0.5 && z.hi >= level - 0.5)?.broke;
+
+test("a zone the price closed up through is named, with the session it went on", () => {
+  const a = analyzed([...under(40, 107), ...above(8, 107)]);
+  const zone = brokenZone(a);
+  assert.ok(zone, "the ceiling it broke is now a support zone carrying a break");
+  assert.equal(zone!.broke!.direction, "above");
+  assert.equal(zone!.broke!.on, a.support[0] && barsOf([...under(40, 107), ...above(8, 107)]).time[40],
+    "the date is the FIRST close through, not the latest");
+  assert.equal(zone!.broke!.closes, 8, "and it counts the closes since");
+  assert.equal(zone!.broke!.barsSince, 7);
+  assert.ok(zone!.broke!.recent);
+
+  // The member kind was already there and said less: it means only "a former swing high now below the price",
+  // which is true of a high the stock drifted past years ago and carries no claim that anything broke.
+  assert.ok(zone!.members.some(m => m.kind === "broken resistance"), "the flip is visible in the members too");
+});
+
+test("a break's date does not move when nothing happens", () => {
+  // The margin is sized from a WINDOW-mean ATR, not the trailing one the zone widths use. With the trailing ATR a
+  // claim about a February session would be re-adjudicated by this week's volatility: after a breakout the range
+  // expands, the margin widens, the walk-back terminates later, and the page prints a LATER break date with no new
+  // price action behind it. A date that moves on its own is the plainest way to state a number you cannot stand
+  // behind.
+  const rows: [number, number, number][] = [...under(40, 107), ...above(8, 107)];
+  const before = brokenZone(analyzed(rows))!.broke!;
+  // One flat session: no range, no news.
+  const after = brokenZone(analyzed([...rows, [112, 112, 112]]))!.broke!;
+  assert.equal(after.on, before.on, "the session it broke on is a fact about February, not about today");
+  assert.equal(after.testsBefore, before.testsBefore);
+  assert.equal(after.closes, before.closes + 1, "only the count of closes since moves, because one was added");
+});
+
+test("what counts as through it: a margin, a close, and more than one of them", () => {
+  const ceiling = 107;
+  // Barely over the edge is not a break of anything.
+  const grazed: [number, number, number][] = [...under(40, ceiling), ...Array.from({ length: 6 },
+    () => [ceiling + 0.2, ceiling - 0.5, ceiling + 0.05] as [number, number, number])];
+  assert.equal(breakAt(analyzed(grazed), ceiling), undefined, "a close a few cents past the edge clears no margin");
+
+  // Trading through without closing through is a wick, and the rest of this engine lives by closes.
+  const wicked: [number, number, number][] = [...under(40, ceiling), ...Array.from({ length: 6 },
+    () => [ceiling + 9, ceiling - 4, ceiling - 2] as [number, number, number])];
+  assert.equal(breakAt(analyzed(wicked), ceiling), undefined, "a high above the zone that closed back inside is not a break");
+
+  // One close through is the more intuitive reading and is available as a setting; two is the default, because the
+  // page makes a claim in words and a one-day print that reverses turns it into a retraction on the next run.
+  const once: [number, number, number][] = [...under(40, ceiling), ...above(1, ceiling)];
+  assert.equal(breakAt(analyzed(once), ceiling), undefined, "one close is not enough by default");
+  assert.ok(breakAt(analyzed(once, { breakConfirmBars: 1 }), ceiling), "and is enough when asked for");
+});
+
+test("a price that was never below a zone did not break it", () => {
+  // Every old low in a long uptrend sits below the price. Without this rule each one becomes a fresh breakout, and
+  // the page fills with breaks that nobody watched happen.
+  const a = analyzed(Array.from({ length: 50 }, (_, i) => [100 + i, 99 + i, 99.8 + i] as [number, number, number]));
+  assert.ok(a.support.length > 0, "there are support zones beneath a climbing price");
+  assert.equal(a.support.filter(z => z.broke).length, 0, "and none of them is a break");
+});
+
+test("testsBefore counts the side the zone was, not the side it is", () => {
+  const a = analyzed([...under(40, 107), ...above(8, 107)]);
+  const zone = a.support.find(z => z.broke && z.hi > 106 && z.lo < 108);
+  assert.ok(zone, "the former ceiling");
+  // Twenty of the forty bars reached the ceiling and closed back below it. That is what "the range it was stuck
+  // in" means, and it is the number a reader would assume "held N" was telling them.
+  assert.ok(zone!.broke!.testsBefore >= 15, `it turned the price back ${zone!.broke!.testsBefore} times before`);
+  // Zone.tests is the OTHER rule applied across the break: it asks whether bars closed ABOVE this zone, which the
+  // forty bars under the ceiling did not. The two numbers must not be conflated, and this is why.
+  assert.notEqual(zone!.tests, zone!.broke!.testsBefore,
+    "tests and testsBefore answer different questions about the same zone");
+});
+
+test("a break given back says so, and an unconfirmed one never happened", () => {
+  const ceiling = 107;
+  // Above for six sessions, then back inside.
+  const given: [number, number, number][] = [...under(30, ceiling), ...above(6, ceiling),
+    ...Array.from({ length: 3 }, () => [ceiling - 1, ceiling - 5, ceiling - 3] as [number, number, number])];
+  const back = analyzed(given).resistance.find(z => z.broke);
+  assert.ok(back, "the zone is a ceiling again, and remembers");
+  assert.ok(back!.broke!.backInsideOn, "the session it closed back inside is named");
+  assert.equal(back!.broke!.closes, 6, "and the run above it is still counted");
+
+  // One close above, then back: never confirmed, so there is nothing to give back.
+  const flickered: [number, number, number][] = [...under(30, ceiling), ...above(1, ceiling),
+    ...Array.from({ length: 4 }, () => [ceiling - 1, ceiling - 5, ceiling - 3] as [number, number, number])];
+  assert.equal(analyzed(flickered).resistance.find(z => z.broke), undefined,
+    "a single close that reversed is not a break that was given back — it is not a break");
+});
+
+test("a stock above every high in its window has nothing overhead, and says so", () => {
+  // The RBRK shape: each bar makes the high, so nothing has ever traded above the price.
+  const climbing = Array.from({ length: 50 }, (_, i) =>
+    [100 + i * 0.8 + 0.5, 100 + i * 0.8 - 0.5, 100 + i * 0.8 + 0.3] as [number, number, number]);
+  const a = analyzed(climbing);
+
+  // The trap this exists for: `recentBars` injects the last few bars' highs as resistance candidates, so on the day
+  // a stock prints a new high its OWN session high becomes a zone a few cents overhead. A naive check on
+  // `resistance.length` never fires for precisely the stock that just made a new high.
+  assert.ok(a.resistance.length > 0, "there is a raw zone — the price's own last bars");
+  assert.equal(a.overhead.zones, 0, "but nothing that is prior structure");
+  assert.ok(a.resistance.every(z => z.members.every(m => m.fromRecentBar)),
+    "because every member of it is the price's own recent footprint");
+  assert.equal(a.overhead.gaps, 0);
+  assert.equal(a.overhead.line, false);
+
+  // And a stock with a real high above it is not clear air.
+  const capped = analyzed([...above(6, 120), ...under(40, 107)]);
+  assert.ok(capped.overhead.zones > 0, "a prior high overhead is counted");
+});
+
+test("a stock can have broken out and have nothing above it, without the two facts interfering", () => {
+  // Both at once is the RBRK case as the founder described it, and the page has to be able to say both.
+  const rows: [number, number, number][] = [...under(30, 107), ...Array.from({ length: 10 },
+    (_, i) => [108 + i, 107.2 + i, 107.8 + i] as [number, number, number])];
+  const a = analyzed(rows);
+  assert.ok(a.support.some(z => z.broke?.direction === "above"), "it broke a ceiling");
+  assert.equal(a.overhead.zones, 0, "and there is nothing above it now");
+});
+
+test("a live quote moves the zones but never creates a break", () => {
+  // A break is a claim about a settled session. An after-hours print that reverses by the open would make the page
+  // assert something that never settled, and a badge appearing at 10:04 and gone by 15:30 is a scanner.
+  const rows: [number, number, number][] = [...under(40, 107), ...Array.from({ length: 4 },
+    () => [106.9, 103, 106] as [number, number, number])];
+  const settled = analyzed(rows);
+  assert.equal(breakAt(settled, 107), undefined, "no settled close went through the ceiling");
+
+  const quoted = analyzeWindow(barsOf(rows), parseLevelsSettings(), 0, 118) as Exclude<
+    ReturnType<typeof analyzeWindow>, { unavailable: string }>;
+  // The quote re-files the ceiling as support, exactly as it does today — that behaviour is unchanged and expected.
+  assert.ok(quoted.support.length > settled.support.length, "the quote moves zones between sides, as it always has");
+  assert.equal(breakAt(quoted, 107), undefined,
+    "but a zone on the support side with no break is the correct intraday state, not a bug to fix");
+});
+
+test("the break settings are validated like every other number in this engine", () => {
+  // A strategy constant is a user setting with a default, never a literal buried in a branch.
+  const s = parseLevelsSettings();
+  assert.equal(s.breakCloseAtr, 0.25); assert.equal(s.breakConfirmBars, 2); assert.equal(s.breakRecentBars, 30);
+  assert.equal(s.breakMinTests, 2);
+  assert.throws(() => parseLevelsSettings({ breakMinTests: -1 }), /breakMinTests/);
+  assert.throws(() => parseLevelsSettings({ breakConfirmBars: 0 }), /breakConfirmBars/);
+  assert.throws(() => parseLevelsSettings({ breakConfirmBars: 2.5 }), /breakConfirmBars/, "an integer setting");
+  assert.throws(() => parseLevelsSettings({ breakCloseAtr: -1 }), /breakCloseAtr/);
+  assert.throws(() => parseLevelsSettings({ breakRecentBars: 0 }), /breakRecentBars/);
+  assert.throws(() => parseLevelsSettings({ breakRecentBars: 501 }), /breakRecentBars/);
+
+  // Recency is a threshold, not a filter baked into the data: an older break keeps its date and is simply not
+  // recent, so get_levels stays complete and the threshold stays adjustable.
+  const rows: [number, number, number][] = [...under(30, 107), ...above(12, 107)];
+  const recent = brokenZone(analyzed(rows))!.broke!;
+  const stale = brokenZone(analyzed(rows, { breakRecentBars: 3 }))!.broke!;
+  assert.equal(stale.on, recent.on, "the date is unchanged");
+  assert.equal(recent.recent, true);
+  assert.equal(stale.recent, false, "only whether it is still worth saying changes");
+});
+
+test("nothing the engine now names reads as a recommendation", () => {
+  // A field name is an instruction to whatever model reads get_levels. `broke`, `recent`, `overhead` and
+  // `testsBefore` are nouns for events and counts; anything comparative would be the product adopting the
+  // founder's own read ("a better/bigger signal") as its voice.
+  const a = analyzed([...under(40, 107), ...above(8, 107)]);
+  const serialized = JSON.stringify(a);
+  for (const banned of ["signal", "strength", "score", "opportunity", "bullish", "bearish", "target", "important",
+    "strong", "weak", "buy", "sell"])
+    assert.ok(!new RegExp(`"[^"]*${banned}`, "i").test(serialized), `no field named for ${banned}`);
+});

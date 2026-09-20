@@ -6,8 +6,43 @@ import { timestamp } from "./validation.ts";
 
 /** Daily bars, oldest first, as columns: the shape the prototype and its fixtures use. */
 export interface DailyBars { time: string[]; open: number[]; high: number[]; low: number[]; close: number[] }
-export interface ZoneMember { date: string; price: number; kind: "high" | "low" | "broken support" | "broken resistance" }
-export interface Zone { id: string; lo: number; hi: number; tests: number; last: string; members: ZoneMember[] }
+export interface ZoneMember { date: string; price: number; kind: "high" | "low" | "broken support" | "broken resistance";
+  /** This member is the price's own recent footprint — one of the last `recentBars` bars' extremes — rather than a
+   *  swing pivot. It matters because on the day a stock makes a new high, that session's own high becomes a
+   *  resistance candidate a few cents overhead, so a zone built only from such members is not prior structure and
+   *  must not count as something standing above the price. */
+  fromRecentBar?: true }
+
+/** A zone the price closed through, by a margin, for long enough to mean it.
+ *
+ *  Distinct from `ZoneMember.kind`'s `"broken resistance"`, which says only *a former swing high now sits below the
+ *  price* — true of a high the stock drifted past years ago, and carrying no claim that anything was observed
+ *  breaking. A zone can carry that kind with no `broke` at all. */
+export interface ZoneBreak {
+  /** Which way the price went through it. */
+  direction: "above" | "below";
+  /** The settled session whose close first went through. */
+  on: string;
+  /** Consecutive settled closes beyond it, counting from `on`. */
+  closes: number;
+  /** Frame bars from `on` to the last settled bar. Bars of the frame's own kind: weeks on the five-year chart. */
+  barsSince: number;
+  /** `barsSince <= breakRecentBars`. A setting, not a filter baked into the data — an older break keeps its date
+   *  and is simply not recent, so `get_levels` stays complete and the threshold stays adjustable. */
+  recent: boolean;
+  /** How often this zone turned the price away BEFORE the break, under the side's rule it had then.
+   *
+   *  Not `Zone.tests`, and the difference is the easiest wrong number in this feature: after a flip, `tests` is
+   *  recomputed under the OTHER side's rule across the whole window, so the years a level spent acting as a
+   *  ceiling get counted as it having "held" as support. */
+  testsBefore: number;
+  /** A later settled close came back inside: the break was given back, on this session. */
+  backInsideOn?: string;
+}
+export interface Zone { id: string; lo: number; hi: number; tests: number; last: string; members: ZoneMember[];
+  /** Named `broke`, not `break`: the latter is a reserved word, so `const { break } = zone` is a syntax error and
+   *  every consumer would have to rename it at the boundary. Cheap now, a wire break later. */
+  broke?: ZoneBreak }
 export interface Gap { side: "resistance" | "support"; from: string; lo: number; hi: number; filling?: true }
 export interface TrendTouch { time: string; value: number; recent: boolean }
 export interface TrendLine { from: string; to: string; fromValue: number; toValue: number; nextValue: number;
@@ -15,6 +50,18 @@ export interface TrendLine { from: string; to: string; fromValue: number; toValu
 export interface Analysis {
   atr: number; atrPct: number; width: number; resistance: Zone[]; support: Zone[]; gaps: Gap[];
   trend: { resistance: TrendLine | null; support: TrendLine | null; resistanceNear: TrendLine | null; supportNear: TrendLine | null };
+  /** What stands above the price in this window, so "nothing above it" can be stated as a fact rather than shown as
+   *  an em-dash — which is the character this report uses for *unknown*, and a stock at the top of its range is not
+   *  unknown.
+   *
+   *  `zones` excludes any zone built only from the last `recentBars` bars' highs: on a breakout day the session's
+   *  own high becomes a candidate just overhead, so counting it would mean the check never fires for precisely the
+   *  stock it exists for.
+   *
+   *  Unlike a break, this follows the displayed price, including a live quote — it describes the zones as shown,
+   *  in the present tense. A break is a past-tense claim about a settled session and deliberately does not move
+   *  intraday; whatever states this must keep that distinction in its words. */
+  overhead: { zones: number; gaps: number; line: boolean };
 }
 export interface Frame extends Partial<Analysis> {
   label: string; timeframe: Timeframe; start: string; sessions: number;
@@ -51,6 +98,7 @@ export const DIVERGENCES = [
   "Thin or unusable history returns a reason instead of throwing, and an ATR of zero is unusable.",
   "Values are full precision; the prototype rounded inside the engine.",
   "Moving averages default to 10, 21, 50 and 200 (the founder's charts), not 20, 50 and 200.",
+  "Breaks have no counterpart in the prototype: a zone the price closed through by a margin for enough settled sessions carries `broke`, with the session it went on and how often it had held before. The margin is sized from a WINDOW-mean ATR rather than the trailing one every other tolerance here uses, so a break's date cannot move with this week's volatility.",
   "Trend lines that rank equally are separated by the earlier anchor, then the shallower slope, instead of by the order they were found in.",
   "The weekly timeframe has no counterpart in the prototype and so no parity fixture: it is the same rules over folded bars, checked by its own assertions.",
 ] as const;
@@ -61,6 +109,26 @@ export const LEVELS_SETTINGS = {
   zoneWidthAtr: { default: 0.5, min: 0.05, max: 3 },
   testReachZone: { default: 0.5, min: 0, max: 2 },
   recentBars: { default: 3, min: 0, max: 20 },
+  /** How far beyond a zone's edge a close must finish to count as through it, in ATR. A close a cent past the edge
+   *  is not a break of anything, and a percentage would mean something different on a $6 stock and a $600 one —
+   *  ATR is the unit every other tolerance here already uses. A quarter of one is half a default zone width. */
+  breakCloseAtr: { default: 0.25, min: 0, max: 3 },
+  /** Consecutive settled closes beyond the edge before the page will call it a break. Two by default: the page
+   *  makes a claim in words, and a one-day print that reverses turns that claim into a retraction on the next run.
+   *  One session of lateness buys the claim. Set to 1 for the more intuitive reading. */
+  breakConfirmBars: { default: 2, min: 1, max: 10 },
+  /** How long a break stays worth saying, in the frame's own bars — so thirty is thirty WEEKS on the five-year
+   *  chart, which has a correspondingly longer memory. Older breaks keep their date and are simply not recent. */
+  breakRecentBars: { default: 30, min: 1, max: 500 },
+  /** How often a zone must have turned the price away BEFORE the price closed through it, or there was nothing
+   *  there to break.
+   *
+   *  Measured, not assumed. A steadily climbing stock passes minor levels constantly, and without this every one of
+   *  them reports a break: a 50-bar climb produced two, each with `testsBefore` of exactly 1 — the single bar that
+   *  happened to sit under the level on the way past. The range the founder described INTC being "stuck in" scored
+   *  **20** on the same measure, and the incidental levels around it scored 0. One rejection is a bar; two is a
+   *  level that acted. Set to 0 to report every crossing. */
+  breakMinTests: { default: 2, min: 0, max: 50 },
   maxZonesPerSide: { default: 10, min: 1, max: 50 },
   trendToleranceAtr: { default: 0.2, min: 0.01, max: 2 },
   trendMinBars: { default: 5, min: 2, max: 100 },
@@ -84,6 +152,7 @@ export const LEVELS_SETTINGS = {
 } as const;
 export interface LevelsSettings {
   swingBars: number; atrBars: number; zoneWidthAtr: number; testReachZone: number; recentBars: number;
+  breakCloseAtr: number; breakConfirmBars: number; breakRecentBars: number; breakMinTests: number;
   maxZonesPerSide: number; trendToleranceAtr: number; trendMinBars: number; trendConfirmTouches: number;
   trendMaxDistanceAtr: number; trendWickAtr: number; listingSlackDays: number; minSessions: number;
   weeklyYears: number; weeklyMinSessions: number;
@@ -99,7 +168,7 @@ const weekly = (timeframe: Timeframe) => WEEKLY_TIMEFRAMES.includes(timeframe);
 const LABELS: Record<Timeframe, string> = { qtd: "QTD", ytd: "YTD", "2y": "2 years", "5y": "5 years (weekly)" };
 const whole = (v: unknown, r: { min: number; max: number }) => typeof v === "number" && Number.isSafeInteger(v) && v >= r.min && v <= r.max;
 const real = (v: unknown, r: { min: number; max: number }) => typeof v === "number" && Number.isFinite(v) && v >= r.min && v <= r.max;
-const INTEGER_SETTINGS = ["swingBars", "atrBars", "recentBars", "maxZonesPerSide", "trendMinBars", "trendConfirmTouches",
+const INTEGER_SETTINGS = ["swingBars", "atrBars", "recentBars", "breakConfirmBars", "breakRecentBars", "breakMinTests", "maxZonesPerSide", "trendMinBars", "trendConfirmTouches",
   "listingSlackDays", "minSessions", "weeklyYears", "weeklyMinSessions", "weeklyTrendMinBars"] as const;
 /** Every rule is a setting with the founder's default (constants are configuration); anything out of range is refused. */
 export function parseLevelsSettings(raw: Partial<LevelsSettings> = {}): LevelsSettings {
@@ -208,6 +277,16 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
   const recentRanges = tr.slice(-settings.atrBars);
   const atr = recentRanges.reduce((a, b) => a + b, 0) / recentRanges.length;
   if (!(atr > 0)) return { unavailable: "no price movement in this window" };
+  // A SECOND ATR, over the whole window, and it exists for one reason: `atr` above is trailing — the last
+  // `atrBars` true ranges — so it moves with this week's volatility. Sizing the break margin from it would let a
+  // claim about a September session be re-adjudicated by today's range: volatility expands after a breakout, the
+  // margin widens, the walk-back terminates later, and the page prints a LATER break date next week with no new
+  // price action behind it. A date that moves on its own is the plainest possible violation of never stating a
+  // number you cannot stand behind. Zone widths and trend tolerances keep the trailing ATR, which is right for
+  // them: they describe what the price is doing now.
+  const windowRanges = tr.slice(lead);
+  const windowAtr = windowRanges.reduce((a, b) => a + b, 0) / windowRanges.length;
+  const breakMargin = settings.breakCloseAtr * windowAtr;
   const width = settings.zoneWidthAtr * atr, k = settings.swingBars;
   const pivots = (series: number[], keep: (a: number, b: number) => boolean) => {
     const out: number[] = [];
@@ -238,6 +317,79 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
       if (z && inside) { z.lo = Math.min(z.lo, candidate.level); z.hi = Math.max(z.hi, candidate.level); z.at.push(candidate); }
       else grouped.push({ lo: candidate.level, hi: candidate.level, at: [candidate] });
     }
+    // A bar index belonging to the price's own last few sessions rather than to a swing pivot. Decided by INDEX,
+    // not by pivot-set membership: `pivots()` runs to `n - swingBars`, so at the defaults index `n - 3` is BOTH a
+    // pivot and one of the last three bars. Asking "is it a pivot?" would answer no-it-is-not-recent for exactly
+    // the bar a breakout day produces, and the clear-air check below would never fire for the stock it exists for.
+    const isRecentBar = (index: number) => index >= n - settings.recentBars;
+
+    /** Whether the price closed through this zone, by the margin, for long enough to mean it.
+     *
+     *  Closing through, never trading through: an intraday spike that closes back inside is not a break, and the
+     *  rest of this engine already lives by closes — a trend holds on closes, a test requires the close to finish
+     *  on the price's side. Counting a high above the zone would make every wick a break and the false-break case
+     *  the common one. */
+    const brokeThrough = (z: { lo: number; hi: number }, direction: "above" | "below"): ZoneBreak | undefined => {
+      // Which way the price went is a fact about the bars, NOT about which side the zone sits on today. A zone
+      // above the price may have been broken UPWARD and then closed back into — that is the give-back case, and
+      // deriving the direction from the current side would look downward and find nothing, which is how this was
+      // written first and what the give-back test caught.
+      // Two thresholds, not one, and the gap between them is the point.
+      //
+      // A break is CONFIRMED by closing clear of the edge by the margin — a close a cent past the edge is not a
+      // break of anything. But it is GIVEN BACK only by closing back into the zone itself. Using the margin for
+      // both makes the band between the edge and the margin count as "inside", so a price sitting just above a
+      // zone it cleared reads as having come back into it: the fixture rendered "back inside since Aug 28" for a
+      // price ABOVE the zone, which is how this was caught. Worse, with one threshold a price hovering near the
+      // edge would flicker between broken and given-back run to run.
+      const beyond = (i: number) => direction === "above" ? c[i]! > z.hi + breakMargin : c[i]! < z.lo - breakMargin;
+      const backInside = (i: number) => direction === "above" ? c[i]! <= z.hi : c[i]! >= z.lo;
+
+      // The most recent run of closes beyond the zone, and where it began.
+      // The most recent run of closes beyond the zone, and where it began. Bars between the edge and the margin
+      // belong to neither state: they do not confirm a break and they do not give one back, so the walk passes
+      // over them and the last CONFIRMED close anchors the run.
+      let last = n - 1, backInsideOn: string | undefined;
+      if (!beyond(last)) {
+        while (last >= lead && !beyond(last)) last--;
+        if (last < lead) return undefined;                       // never beyond the zone in this window
+        // Only a close that actually re-entered the zone gives the break back. A price that cleared the zone and
+        // has since drifted within the margin of it has not returned to it.
+        const returned = [];
+        for (let i = last + 1; i < n; i++) if (backInside(i)) { returned.push(i); break; }
+        if (returned.length) backInsideOn = t[returned[0]!]!;
+      }
+      let first = last;
+      while (first > lead && beyond(first - 1)) first--;
+
+      // The price has been beyond this zone for the entire window: nothing was observed breaking. Without this,
+      // every old low in a five-year uptrend becomes a fresh breakout. A genuine pre-window break still surfaces
+      // on a longer frame, and the default frame is the longest daily one.
+      if (first === lead) return undefined;
+      // It has to have come from inside or the other side, not merely appeared beyond.
+      if (beyond(first - 1)) return undefined;
+      const closes = last - first + 1;
+      if (closes < settings.breakConfirmBars) return undefined;
+
+      // How often the zone turned the price away BEFORE it went, under the rule the zone had THEN — which is the
+      // opposite side's rule, since a zone below the price now was above it then. `Zone.tests` cannot answer this:
+      // it is recomputed under the current side's rule across the whole window, so a level's years as a ceiling
+      // are counted as it having held as support.
+      let testsBefore = 0;
+      for (let i = lead; i < first; i++) {
+        if (direction === "above") {                              // it was resistance before the break
+          if (h[i]! >= z.lo - settings.testReachZone * width && c[i]! < z.hi && l[i]! <= z.hi) testsBefore++;
+        } else if (l[i]! <= z.hi + settings.testReachZone * width && c[i]! > z.lo && h[i]! >= z.lo) testsBefore++;
+      }
+      // Nothing was broken if nothing was holding. Checked AFTER counting, so the threshold stays a setting rather
+      // than a rule welded into the walk — and so the count is available to explain why a crossing was not a break.
+      if (testsBefore < settings.breakMinTests) return undefined;
+      const barsSince = (n - 1) - first;
+      return { direction, on: t[first]!, closes, barsSince,
+        recent: barsSince <= settings.breakRecentBars, testsBefore,
+        ...(backInsideOn ? { backInsideOn } : {}) };
+    };
+
     return grouped.slice(0, settings.maxZonesPerSide).map((z, index) => {
       // A test: the bar reached the zone (or came within reach of it) and closed back on the price's side.
       let tests = 0;
@@ -248,8 +400,16 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
       const seen = new Map<string, Candidate>();
       for (const x of z.at) seen.set(`${x.index}|${x.kind}|${x.level}`, x);   // the prototype grouped members in a set
       const members = [...seen.values()].sort((a, b) => b.index - a.index || b.kind.localeCompare(a.kind) || b.level - a.level)
-        .map(x => ({ date: t[x.index]!, price: x.level, kind: x.kind }));
-      return { id: `${resistance ? "R" : "S"}${index + 1}`, lo: z.lo, hi: z.hi, tests, last: members[0]!.date, members };
+        // The flag is derived from the surviving member's own index rather than carried on the candidate: a recent
+        // bar's high and a pivot high at the same index and level produce byte-identical keys, so which one
+        // survives the Map is decided by sort order, and reading the flag off the loser would be arbitrary.
+        .map(x => ({ date: t[x.index]!, price: x.level, kind: x.kind, ...(isRecentBar(x.index) ? { fromRecentBar: true as const } : {}) }));
+      // Both directions are asked, because neither is implied by the side. When a zone has been broken each way
+      // inside one window the later event is the one a reader is looking at.
+      const up = brokeThrough(z, "above"), down = brokeThrough(z, "below");
+      const broke = !up ? down : !down ? up : up.barsSince <= down.barsSince ? up : down;
+      return { id: `${resistance ? "R" : "S"}${index + 1}`, lo: z.lo, hi: z.hi, tests, last: members[0]!.date, members,
+        ...(broke ? { broke } : {}) };
     });
   };
 
@@ -315,8 +475,22 @@ export function analyzeWindow(bars: DailyBars, settings: LevelsSettings, lead = 
     return [line(strongest), different ? line(near!) : null];
   };
   const [resistanceLine, resistanceNear] = trend(ph, h, true), [supportLine, supportNear] = trend(pl, l, false);
-  return { atr, atrPct: atr / price * 100, width, resistance: zoneSide(true), support: zoneSide(false), gaps,
-    trend: { resistance: resistanceLine, support: supportLine, resistanceNear, supportNear } };
+  const resistanceZones = zoneSide(true), supportZones = zoneSide(false);
+  // What stands above the price, so "nothing above it" is a statement rather than an em-dash. A zone built ONLY
+  // from the last few bars' highs is the price's own footprint, not prior structure: on the day a stock prints a
+  // new high, that session's high is a candidate a few cents overhead, and counting it would mean this never
+  // reports clear air for exactly the stock that just made some. A zone with any prior structure in it keeps at
+  // least one member that is not from a recent bar, so nothing real is erased.
+  const overhead = {
+    // `[].every(...)` is true, so a memberless zone would read as "all of it is the price's own footprint" and be
+    // dropped from what stands overhead — reporting clear air above a real ceiling. Members are required before
+    // anything can be concluded about all of them.
+    zones: resistanceZones.filter(z => !(z.members.length > 0 && z.members.every(m => m.fromRecentBar))).length,
+    gaps: gaps.filter(g => g.side === "resistance" && !g.filling).length,
+    line: !!resistanceLine && resistanceLine.nextValue > price,
+  };
+  return { atr, atrPct: atr / price * 100, width, resistance: resistanceZones, support: supportZones, gaps,
+    trend: { resistance: resistanceLine, support: supportLine, resistanceNear, supportNear }, overhead };
 }
 
 /** Bars that cannot support levels at all, named rather than computed through. */

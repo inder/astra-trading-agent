@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
-import { levels, parseLevelsSettings, movingAverageSeries, type Zone } from "../src/levels.ts";
+import { levels, parseLevelsSettings, movingAverageSeries, type Analysis, type Gap, type Levels, type Zone } from "../src/levels.ts";
 import { overview, portfolioReport, type ReportAccount } from "../src/report.ts";
 import { TradingAgentService } from "../src/agent-service.ts";
 import { syntheticBars } from "./levels-fixture.ts";
@@ -25,7 +25,9 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   assert.match(html, /^<!doctype html>/);
   assert.match(html, /••••0000 individual/);
   assert.match(html, /\$125,341/, "account value, to the dollar — a header is not the place for cents");
-  assert.match(html, /−0\.2%/, "a negative is shown with a minus, not a bracket");
+  // The convention only: a minus sign, never accountants' brackets. Which zone is nearest is pinned by its own
+  // test below, not here.
+  assert.match(html, /−\d+\.\d%/, "a negative is shown with a minus, not a bracket");
   assert.ok(!/\(\$[\d,]/.test(html), "and never in accountants' brackets");
   assert.match(html, /FIXA/);
   assert.match(html, /120/, "shares");
@@ -34,8 +36,21 @@ test("the report states the figures a holder needs, and marks a stock sitting on
   const gain = 120 * computed.price - 120 * 41.22;
   assert.ok(html.includes(`$${Math.round(gain).toLocaleString("en-US")}`), `gain of ${gain} appears`);
   assert.match(html, /Support below/); assert.match(html, /Resistance above/);
-  assert.match(html, /held \d+</, "a zone says how often it held, in one word used everywhere");
+  // One vocabulary for the count, everywhere it appears. A zone that has NOT been broken reports it; a zone the
+  // price closed up through does not, because after a flip `tests` is recomputed under the side the zone is on now
+  // and counts the years it spent turning the price back as it having held as support. The shared fixture happens
+  // to contain breaks, so the count is asserted on a zone with none.
+  const quiet = { ...computed, frames: computed.frames.map(f => ({ ...f,
+    support: (f.support ?? []).map(({ broke, ...z }) => z), resistance: (f.resistance ?? []).map(({ broke, ...z }) => z) })) };
+  const quietHtml = portfolioReport({ accounts: [account({ holdings: [{ symbol: "FIXA",
+    holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels: quiet, series: { daily: series } }] })],
+    generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.match(quietHtml, /held \d+</, "a zone says how often it held, in one word used everywhere");
   assert.ok(!/\d+ tests|\d+×/.test(html), "and never in a second vocabulary");
+  // And where it HAS been broken, the count is replaced rather than sitting beside a break date, where it would
+  // read as "held as support 11 times since Aug 11" — which is false.
+  assert.match(html, /above it since [A-Z][a-z]{2} \d+, \d{4}/);
+  assert.ok(!/held \d+ · above it since|above it since [^<]*held/.test(html), "the two never appear together");
   assert.match(html, /Avg cost\/share/); assert.match(html, /Unrealized P&amp;L/); assert.match(html, />Price</);
   // Every price says what it is. A closing price and an after-hours trade are different facts, and the column used to
   // be headed "Last close" whatever it held — which is how a report misleads without stating a wrong number.
@@ -236,7 +251,10 @@ test("the options line tells apart the four things a bare count cannot", () => {
     /4 open contracts across 1 position\b/, "four contracts in one row is four contracts");
   assert.match(withOptions({ count: 7, positions: 3, skipped: 0, truncated: false }), /7 open contracts across 3 positions/);
   // The rows are named only when they differ from the contracts; "3 contracts across 3 positions" is noise.
-  assert.ok(!/across/.test(withOptions({ count: 3, positions: 3, skipped: 0, truncated: false })));
+  // Scoped to the options sentence rather than the whole document: the page carries prose elsewhere, and a bare
+  // word match against all of it fails for reasons that have nothing to do with this claim.
+  const note = (h: string) => h.match(/options \(\$[\d,]+, ([^)]*)\)/)?.[1] ?? "";
+  assert.ok(!/across/.test(note(withOptions({ count: 3, positions: 3, skipped: 0, truncated: false }))));
 });
 
 test("a short options book is not reported as no options", () => {
@@ -813,4 +831,397 @@ test("the report wears the product's own mark, and the copy cannot drift from th
   const policy = html.match(/content-security-policy" content="([^"]+)"/)![1]!;
   assert.match(policy, /default-src 'none'/);
   assert.match(policy, /img-src data:/, "which is what makes a data-URI icon the only form that works");
+});
+
+// ── Breakouts on the page (B2+B3) ─────────────────────────────────────────────────────────────────────────────
+/** Levels with the zones on one side replaced, so a cell state can be built without reverse-engineering bars. */
+const withZones = (over: { support?: Zone[]; resistance?: Zone[]; overhead?: Analysis["overhead"];
+  gaps?: Gap[]; price?: number }) => {
+  const frames = computed.frames.map(f => ({ ...f,
+    ...(over.support ? { support: over.support } : {}),
+    ...(over.resistance !== undefined ? { resistance: over.resistance } : {}),
+    ...(over.gaps ? { gaps: over.gaps } : {}),
+    overhead: over.overhead ?? { zones: (over.resistance ?? f.resistance ?? []).length, gaps: 0, line: false } }));
+  return { ...computed, ...(over.price ? { price: over.price } : {}), frames };
+};
+const zoneAt = (lo: number, hi: number, tests: number, broke?: Zone["broke"]): Zone =>
+  ({ id: "Z1", lo, hi, tests, last: "2026-09-15", members: [], ...(broke ? { broke } : {}) });
+const render = (levels: Levels) => portfolioReport({ accounts: [account({ holdings: [{ symbol: "FIXA",
+  holding: { symbol: "FIXA", shares: 120, averageCost: 41.22 }, levels, series: { daily: series } }] })],
+  generatedAt: "2026-09-16T12:00:00.000Z" });
+/** The two level cells of the first holding row, as text. */
+const levelCells = (html: string) => [...html.matchAll(/<td class="level">([\s\S]*?)<\/td>/g)]
+  .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ").trim());
+
+test("a stock that broke out and still has a ceiling says both, and joins them with nothing", () => {
+  // The founder, on the case that prompted the feature: "INTC is interesting case. It broke out of range but it
+  // still has resistance above. How you express that would be interesting."
+  //
+  // This is neither of the two shapes the design was first written around — a flipped zone beneath, or clear air
+  // above. It is both halves of one pair, and almost certainly the common one, since a stock clearing one ceiling
+  // usually has another. The two cells carry it; no sentence joins them, because "broke out but still capped" is a
+  // characterization of a situation rather than a measurement.
+  const html = render(withZones({
+    support: [zoneAt(106, 107.4, 3, { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8,
+      recent: true, testsBefore: 14 })],
+    resistance: [zoneAt(112, 114, 9)],
+  }));
+  const [below, above] = levelCells(html);
+  assert.match(below!, /\$106\.00–107\.40 .* above it since Sep 3, 2026/, "what it broke, and when");
+  assert.match(above!, /\$112\.00–114\.00 .* held 9/, "and what still stands over it");
+  // Nothing characterizes the pair. A reader assembles two facts; the page does not assemble them for him.
+  for (const editorial of ["but still", "however", "despite", "although", "capped", "room to", "clear to"])
+    assert.ok(!new RegExp(editorial, "i").test(html), `the page does not say "${editorial}"`);
+});
+
+test("nothing above the price is a fact, not an em-dash", () => {
+  // An em-dash is this report's character for *unknown*, and a stock at the top of its range is not unknown. Worse,
+  // a dash made "above every high in this window" and "levels could not be computed" byte-identical in the column.
+  const clear = render(withZones({ resistance: [], overhead: { zones: 0, gaps: 0, line: false } }));
+  const [, above] = levelCells(clear);
+  assert.match(above!, /no zone above/);
+  assert.match(above!, /no prior high in this window/,
+    "scoped to the window, because a longer tab may legitimately show a band overhead");
+  assert.ok(!above!.includes("—"), "and never a bare dash");
+
+  // "Prior" is load-bearing: the count excludes zones built only from the last few bars' highs, because on the day
+  // a stock makes a new high its own session high sits just overhead. The claim is about what came before.
+  assert.ok(/prior/.test(above!), "the word carries the exclusion, and is not decoration");
+
+  // A cell claiming clear air while the chart visibly draws a gap would be the page disagreeing with itself.
+  const gapped = render(withZones({ resistance: [], overhead: { zones: 0, gaps: 1, line: false },
+    gaps: [{ side: "resistance", from: "2026-08-01", lo: 131.2, hi: 133.75 }] }));
+  assert.match(levelCells(gapped)[1]!, /no zone above\s*an open gap at \$131\.20–133\.75/);
+});
+
+test("levels that could not be computed say so, where the absence of a zone used to look the same", () => {
+  const broken: Levels = { ...computed, defaultTimeframe: null,
+    frames: computed.frames.map(f => ({ ...f, support: undefined, resistance: undefined, unavailable: "only 14 sessions in this window; needs 20" })) };
+  const [below, above] = levelCells(render(broken));
+  assert.match(above!, /levels unavailable/, "not a dash, which reads as a stock with nothing overhead");
+  assert.ok(!above!.includes("—"));
+  assert.match(below!, /none in this window/, "and below the price, an absence is just an absence");
+});
+
+test("a flipped zone stops claiming it held, because that number is the other side's", () => {
+  // After a flip, `tests` is recomputed under the side the zone is on NOW — so a level's years of turning the price
+  // back are counted as it having "held" as support. Printed beside a break date it reads as "held as support 14
+  // times since Sep 3", which is false. The count is replaced, not supplemented.
+  const html = render(withZones({ support: [zoneAt(106, 107.4, 14,
+    { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 })] }));
+  const [below] = levelCells(html);
+  assert.match(below!, /above it since Sep 3, 2026/);
+  assert.ok(!/held 14/.test(below!), "the count that is no longer about this side is gone");
+
+  // A break the price has given back says that instead, and does not read as still being above it.
+  const given = render(withZones({ resistance: [zoneAt(112, 114, 9,
+    { direction: "above", on: "2026-08-01", closes: 6, barsSince: 20, recent: true, testsBefore: 7,
+      backInsideOn: "2026-09-12" })] }));
+  assert.match(levelCells(given)[1]!, /back inside since Sep 12, 2026/);
+  assert.ok(!/above it since/.test(levelCells(given)[1]!));
+
+  // And a break too old to be worth saying keeps its date in the data while the cell returns to the count.
+  const stale = render(withZones({ support: [zoneAt(106, 107.4, 14,
+    { direction: "above", on: "2025-01-03", closes: 200, barsSince: 200, recent: false, testsBefore: 14 })] }));
+  assert.match(levelCells(stale)[0]!, /held 14/, "an old break is history, and the cell says what the zone is now");
+});
+
+test("no break badge is added beside the symbol", () => {
+  // The spec proposed one. It is cut, and this pins the decision rather than leaving it to memory.
+  //
+  // The level columns are right-aligned and six columns away, so a pill beside the symbol is what a skimming reader
+  // sees while the ceiling above the price sits where they may not look. Choosing which of two adjacent true facts
+  // gets the pill is an editorial act — and on the common shape, a stock that broke out and still has resistance
+  // overhead, it would select the encouraging half.
+  const html = render(withZones({
+    support: [zoneAt(106, 107.4, 3, { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 })],
+    resistance: [zoneAt(112, 114, 9)],
+  }));
+  const header = html.match(/<th scope="row">([\s\S]*?)<\/th>/)![1]!;
+  assert.ok(!/broke/i.test(header), "the row header names the stock, and does not caption it");
+  assert.equal((html.match(/class="flag"/g) ?? []).length <= 1, true, "at most the one flag that already existed");
+});
+
+test("rows are alphabetical, because ordering by nearness is a claim about what matters", () => {
+  // A zone the price just closed through is, by construction, a fraction of an average day's range away — so under
+  // proximity ordering every fresh break sorted itself to the top and lit the "near" styling. Naming breaks in
+  // words would have turned a latent scanner into a captioned one, with the page explaining why its top row was on
+  // top. The distances are still in the cells; only the page's opinion about reading order is gone.
+  const holding = (symbol: string, levels: Levels) => ({ symbol,
+    holding: { symbol, shares: 10, averageCost: 10 }, levels, series: { daily: series } });
+  const far = withZones({ support: [zoneAt(80, 81, 5)], resistance: [zoneAt(200, 201, 5)] });
+  const onTop = withZones({ support: [zoneAt(127.3, 127.4, 5)], resistance: [zoneAt(127.5, 127.6, 5)] });
+  const html = portfolioReport({ accounts: [account({ holdings: [
+    holding("ZETA", onTop), holding("ALFA", far)] })], generatedAt: "2026-09-16T12:00:00.000Z" });
+  assert.ok(html.indexOf(">ALFA") < html.indexOf(">ZETA"),
+    "alphabetical, even though ZETA sits on a level and ALFA does not");
+});
+
+test("the chart marks the session a zone was broken, and never a session it does not contain", () => {
+  const html = render(withZones({ support: [zoneAt(106, 107.4, 3,
+    { direction: "above", on: series[Math.floor(series.length * 0.8)]!.time, closes: 9, barsSince: 8, recent: true, testsBefore: 14 })] }));
+  // Across the panes, not the first one: each timeframe draws its own slice, and a break inside the two-year
+  // window legitimately predates the quarter-to-date one. A pane that does not reach the session does not draw it,
+  // which is the property under test on the next assertion.
+  assert.match(html, /<line class="broke"/, "a hairline where the close went through");
+  const panes = [...html.matchAll(/<svg class="chart"[\s\S]*?<\/svg>/g)].map(m => m[0]);
+  assert.ok(panes.some(p => /<line class="broke"/.test(p)) && panes.some(p => !/<line class="broke"/.test(p)),
+    "drawn where the frame reaches the session, absent where it does not");
+
+  // A break dated outside this frame's slice is NOT drawn at the window's edge. Clamping a missing index to zero —
+  // which is what the gap renderer does — would state a false position confidently.
+  // Both sides replaced: the shared fixture's own resistance zones carry real, in-window breaks, and leaving them
+  // in draws hairlines that have nothing to do with the zone under test — which is how this assertion first
+  // appeared to fail against correct code.
+  const outside = render(withZones({ resistance: [], overhead: { zones: 0, gaps: 0, line: false },
+    support: [zoneAt(106, 107.4, 3,
+      { direction: "above", on: "2019-01-02", closes: 9, barsSince: 8, recent: true, testsBefore: 14 })] }));
+  assert.ok(!/<line class="broke"/.test(outside), "a break this frame does not reach is simply not drawn");
+
+  // The date does not go on the band label: PAD_R is sized from the label this chart will actually draw, and a
+  // longer one is written past the viewBox and silently lost.
+  assert.ok(!/class="s"[^>]*>[\s\S]{0,200}since /.test(panes[0] ?? ""), "the band label is unchanged");
+});
+
+test("the spoken summary carries the break AND what still stands above it", async () => {
+  // Where the founder's complaint actually lives. "You are right to say they are just above support, but they have
+  // also broken out" is a sentence about what the CHAT said, not what the page showed — it comes from `near`, and a
+  // page fix alone would have left it word for word.
+  const Z = (lo: number, hi: number, tests: number, broke?: Zone["broke"]): Zone =>
+    ({ id: "Z", lo, hi, tests, last: "2026-09-15", members: [], ...(broke ? { broke } : {}) });
+  const brk = { direction: "above" as const, on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 };
+  const framed = (sup: Zone[], res: Zone[], overhead: Analysis["overhead"]) =>
+    ({ ...computed, frames: computed.frames.map(f => ({ ...f, support: sup, resistance: res, overhead })) });
+
+  const capped = overview({ accounts: [account({ holdings: [{ symbol: "INTC",
+    holding: { symbol: "INTC", shares: 100, averageCost: 100 },
+    levels: framed([Z(124, 125.4, 3, brk)], [Z(131, 133, 9)], { zones: 1, gaps: 0, line: false }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(capped.broke.length, 1);
+  assert.equal(capped.broke[0]!.zone, "$124.00–125.40");
+  assert.equal(capped.broke[0]!.on, "2026-09-03");
+  assert.equal(capped.broke[0]!.testsBefore, 14);
+  // The half that stops the summary being "INTC broke out" full stop. A model handed only a break says only that,
+  // which is the same flattening the founder complained about, inverted.
+  assert.equal(capped.broke[0]!.resistanceAbove, "$131.00–133.00", "what it still has over it travels with it");
+  assert.equal(capped.broke[0]!.supportBelow, null,
+    "and the zone it broke is `zone`, not echoed here — the only support in this fixture is the broken one");
+  assert.equal(capped.noPriorHighAbove.length, 0);
+
+  // And the other half of the pair: broke out with nothing prior above.
+  const clear = overview({ accounts: [account({ holdings: [{ symbol: "RBRK",
+    holding: { symbol: "RBRK", shares: 100, averageCost: 100 },
+    levels: framed([Z(124, 125.4, 3, brk)], [], { zones: 0, gaps: 0, line: false }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+  assert.equal(clear.broke[0]!.resistanceAbove, null, "nothing prior above it, stated as null rather than omitted");
+  assert.equal(clear.noPriorHighAbove.length, 1);
+  assert.ok(clear.noPriorHighAbove[0]!.window.length > 0, "and the window is named, because a longer one may disagree");
+  assert.equal(clear.noPriorHighAbove[0]!.account, "••••0000 individual",
+    "with the account, since the same symbol in two accounts is two rows");
+});
+
+test("one break per holding, and it is the level that was actually holding", async () => {
+  // A price moving up through a shelf clears several levels in one stretch — the shared fixture produces two, on the
+  // same date, under the same ceiling. A model handed both narrates both. The one kept is the most-tested, which is
+  // what "the range it was stuck in" means and the measure that separates a range from a level passed in a trend.
+  const Z = (lo: number, hi: number, tests: number, testsBefore: number): Zone =>
+    ({ id: "Z", lo, hi, tests, last: "2026-09-15", members: [],
+      broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore } });
+  const view = overview({ accounts: [account({ holdings: [{ symbol: "FIXA",
+    holding: { symbol: "FIXA", shares: 100, averageCost: 100 },
+    levels: { ...computed, frames: computed.frames.map(f => ({ ...f,
+      support: [Z(120, 121, 3, 2), Z(124, 125.4, 3, 14), Z(118, 119, 3, 5)], resistance: [],
+      overhead: { zones: 0, gaps: 0, line: false } })) },
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(view.broke.length, 1, "one holding, one break");
+  assert.equal(view.broke[0]!.testsBefore, 14, "the level that turned the price back most often, not the nearest");
+});
+
+test("nothing the chat is handed reads as a recommendation", async () => {
+  // A field name is an instruction to whatever model reads this. The founder's own read — that a breakout is "a
+  // better/bigger signal" — is his to make; the product does not assert it, on the page or in the sentence.
+  const Z = (lo: number, hi: number): Zone => ({ id: "Z", lo, hi, tests: 9, last: "2026-09-15", members: [],
+    broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 14 } });
+  const view = overview({ accounts: [account({ holdings: [{ symbol: "FIXA",
+    holding: { symbol: "FIXA", shares: 100, averageCost: 100 },
+    levels: { ...computed, frames: computed.frames.map(f => ({ ...f, support: [Z(124, 125.4)], resistance: [],
+      overhead: { zones: 0, gaps: 0, line: false } })) }, series: { daily: series } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" });
+  const spoken = JSON.stringify(view);
+  for (const banned of ["signal", "strength", "score", "opportunity", "bullish", "bearish", "important",
+    "strong", "weak", "best", "worst", "buy", "sell", "target", "breakout"])
+    assert.ok(!new RegExp(`"[^"]*${banned}`, "i").test(spoken), `no field named for "${banned}"`);
+  // Small enough to narrate: this is a paragraph's worth of facts, not the report.
+  assert.ok(spoken.length < 1400, `${spoken.length} bytes`);
+});
+
+test("a stock's own last bar is not a ceiling over it, on the page or in the sentence", async () => {
+  // The feature's headline case, and it was broken. On the day a stock prints a new high that session's high
+  // becomes a resistance candidate a few cents overhead. The ENGINE excludes such a zone from `overhead`; the page
+  // asked `nearest()`, which does not — so `overhead.zones` said clear air while the cell printed the stock's own
+  // bar as a ceiling. Measured before the fix: engine 0 zones, cell "$220.10–220.10 +0.1% · held 1".
+  //
+  // Three reviews and a hand-check of the engine all missed it, because each looked at one side of the line.
+  const { levels: computeLevels, parseLevelsSettings: settings } = await import("../src/levels.ts");
+  const climb = 300;
+  const time = Array.from({ length: climb }, (_, i) =>
+    new Date(Date.UTC(2025, 0, 6) + i * 86_400_000).toISOString().slice(0, 10));
+  const close = Array.from({ length: climb }, (_, i) => 100 + i * 0.4 + 0.3);
+  const bars = { time, open: close, close,
+    high: close.map(v => v + 0.2), low: close.map(v => v - 0.8) };
+  const lv = computeLevels(bars, settings());
+  const input = { accounts: [account({ holdings: [{ symbol: "RBRK",
+    holding: { symbol: "RBRK", shares: 1, averageCost: 1 }, levels: lv,
+    series: { daily: time.map((t, i) => ({ time: t, value: close[i]! })) } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" };
+
+  const frame = lv.frames.find(f => f.timeframe === lv.defaultTimeframe)!;
+  assert.ok((frame.resistance ?? []).length > 0, "the raw zone exists — this is the case, not its absence");
+  assert.equal(frame.overhead!.zones, 0, "and the engine knows it is the price's own footprint");
+
+  // The page must reach the same conclusion from the same data.
+  const cells = [...portfolioReport(input).matchAll(/<td class="level">([\s\S]*?)<\/td>/g)]
+    .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  assert.match(cells[1]!, /no zone above/, "the cell does not print the stock's own bar as a ceiling");
+  assert.ok(!/held 1\b/.test(cells[1]!));
+
+  // And so must the sentence the chat reads aloud, or the two disagree about the same stock on the same run.
+  const spoken = overview(input);
+  assert.equal(spoken.noPriorHighAbove.length, 1, "the summary says clear air too");
+  assert.ok(!spoken.near.some(x => x.side === "resistance"),
+    "and never reports the stock as near a resistance that is its own last session");
+
+  // The mirror, because the distortion is symmetric: `zoneSide` seeds support from the last bars' LOWS exactly as
+  // it seeds resistance from their highs. A stock making new lows every session was shown its own last bar as the
+  // floor beneath it — measured at "$180.20–180.20 −0.1% · held 1", a level that had held against itself. This is
+  // the worse of the two sides to get wrong: it puts a floor under a falling stock that is not there.
+  const falling = Array.from({ length: climb }, (_, i) => 300 - i * 0.4);
+  const downBars = { time, open: falling, close: falling,
+    high: falling.map(v => v + 0.8), low: falling.map(v => v - 0.2) };
+  const down = computeLevels(downBars, settings());
+  const downCells = [...portfolioReport({ accounts: [account({ holdings: [{ symbol: "FALL",
+    holding: { symbol: "FALL", shares: 1, averageCost: 1 }, levels: down,
+    series: { daily: time.map((t, i) => ({ time: t, value: falling[i]! })) } }] })],
+    generatedAt: "2026-09-19T12:00:00.000Z" }).matchAll(/<td class="level">([\s\S]*?)<\/td>/g)]
+    .slice(0, 2).map(m => m[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  assert.match(downCells[0]!, /none in this window/, "no floor is invented from the stock's own last bar");
+  assert.ok(!/held 1\b/.test(downCells[0]!));
+});
+
+test("a level the price fell through says it fell through, not that it rose", () => {
+  // The cell read the break's date and its give-back but never its DIRECTION, so a floor the stock closed down
+  // through — now a ceiling above the price — rendered "above it since Sep 3" while the price sat below it. An
+  // inversion in the column whose only job is placing the price, and on the falling stock the previous commit was
+  // written for. Every existing assertion used the upward phrasing, so none of them saw it.
+  const down: Zone = { id: "Z", lo: 135, hi: 136, tests: 4, last: "2026-09-15",
+    members: [{ date: "2026-06-01", price: 135.5, kind: "low" }],
+    broke: { direction: "below", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const html = render(withZones({ resistance: [down], support: [],
+    overhead: { zones: 1, gaps: 0, line: false } }));
+  const [, above] = levelCells(html);
+  assert.match(above!, /below it since Sep 3, 2026/, "the price is under this zone, and the cell says so");
+  assert.ok(!/above it since/.test(above!), "never the opposite of where the price is");
+});
+
+test("a zone with a confirmed break is prior structure, whatever its members are made of", () => {
+  // Membership and tests are different populations. A band can be built entirely from the last few bars' extremes
+  // and still be a level the price was turned back by repeatedly — the engine's own evidence of that is the break,
+  // which requires testsBefore >= breakMinTests. Filtering such a zone as "the price's own footprint" discarded
+  // the row's most important fact: the shared fixture's nearest support, eleven prior tests and a confirmed break,
+  // vanished from the cell and from the summary both.
+  const recent = (d: string) => ({ date: d, price: 126, kind: "low" as const, fromRecentBar: true as const });
+  const footprintWithBreak: Zone = { id: "Z", lo: 126, hi: 127, tests: 3, last: "2026-09-15",
+    members: [recent("2026-09-14"), recent("2026-09-15")],
+    broke: { direction: "above", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const [below] = levelCells(render(withZones({ support: [footprintWithBreak] })));
+  assert.match(below!, /\$126\.00–127\.00/, "the zone survives, because the break proves it was structure");
+  assert.match(below!, /above it since Sep 3, 2026/);
+
+  // And one with no break, made only of recent bars, is still excluded — that is the RBRK case and it must not
+  // regress while fixing this one.
+  // ANY break is that evidence — given back, or too old to mention. Neither a later re-entry nor the passage of
+  // time un-proves that the level acted, since the break existed only because `testsBefore` met its threshold.
+  //
+  // The STALE case is the one that pins the predicate: a given-back break is still `recent`, so tightening this to
+  // `!z.broke?.recent` would not change its outcome and an assertion on it catches nothing. Found by mutation:
+  // that tightening produced zero failures against the first version of this test.
+  const givenBack: Zone = { ...footprintWithBreak,
+    broke: { ...footprintWithBreak.broke!, backInsideOn: "2026-09-12" } };
+  assert.match(levelCells(render(withZones({ support: [givenBack] })))[0]!, /\$126\.00–127\.00/,
+    "a given-back break still marks the zone as prior structure");
+  const stale: Zone = { ...footprintWithBreak,
+    broke: { ...footprintWithBreak.broke!, recent: false, barsSince: 400 } };
+  const [staleCell] = levelCells(render(withZones({ support: [stale] })));
+  assert.match(staleCell!, /\$126\.00–127\.00/, "and so does one too old to be worth saying");
+  assert.match(staleCell!, /held 3/, "which the cell reports as the count, the break being history");
+
+  const { broke: _drop, ...footprintOnly } = footprintWithBreak;
+  const [, above] = levelCells(render(withZones({ resistance: [footprintOnly as Zone], support: [],
+    overhead: { zones: 0, gaps: 0, line: false } })));
+  assert.match(above!, /no zone above/);
+});
+
+test("the chart draws the same zones the row names", () => {
+  // The cell filtered; the chart iterated the raw frames. So beneath a row reading "no zone above · no prior high
+  // in this window" the chart drew a band at the price's own high labelled "1 held", with a hairline for a zone
+  // the row had just said was not there. The same contradiction as engine-versus-cell, moved one element down —
+  // and it survived an audit that searched for `shown(` rather than for who reads a zone array.
+  const recent = (d: string) => ({ date: d, price: 131, kind: "high" as const, fromRecentBar: true as const });
+  const footprint: Zone = { id: "R1", lo: 131, hi: 131, tests: 1, last: "2026-09-15",
+    members: [recent("2026-09-14"), recent("2026-09-15")] };
+  const html = render(withZones({ resistance: [footprint], support: [],
+    overhead: { zones: 0, gaps: 0, line: false } }));
+  assert.match(levelCells(html)[1]!, /no zone above/, "the row says nothing is overhead");
+  const panes = [...html.matchAll(/<svg class="chart"[\s\S]*?<\/svg>/g)].map(m => m[0]);
+  assert.ok(panes.length > 0, "there are charts");
+  assert.ok(!panes.some(p => /\$131\.00–131\.00/.test(p)), "and no chart draws the band the row denies");
+});
+
+test("the summary names breakdowns as readily as breakouts", () => {
+  // It scanned the support side only, and by the give-back rule a downward break that still stands can only live
+  // among the resistance zones — so the chat narrated every breakout and never once a breakdown. That is the
+  // "select the encouraging half" act refused for the row badge, reproduced in the layer that is read aloud.
+  const lost: Zone = { id: "Z", lo: 135, hi: 136, tests: 4, last: "2026-09-15",
+    members: [{ date: "2026-06-01", price: 135.5, kind: "low" }],
+    broke: { direction: "below", on: "2026-09-03", closes: 9, barsSince: 8, recent: true, testsBefore: 11 } };
+  const spoken = overview({ accounts: [account({ holdings: [{ symbol: "DOWN",
+    holding: { symbol: "DOWN", shares: 1, averageCost: 1 },
+    levels: withZones({ resistance: [lost], support: [], overhead: { zones: 1, gaps: 0, line: false } }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+
+  assert.equal(spoken.broke.length, 1, "a level lost is a level the price closed through");
+  assert.equal(spoken.broke[0]!.direction, "below");
+  assert.equal(spoken.broke[0]!.zone, "$135.00–136.00");
+  // Both side fields mean the level BEYOND the one that broke. The zone fallen through does stand above the price
+  // now, so echoing it here would not be false — it would hand a model the same band twice under two names, to be
+  // narrated as two levels. There is nothing else on either side of this fixture, so both are null.
+  assert.equal(spoken.broke[0]!.resistanceAbove, null, "the broken zone is `zone`, not what lies beyond it");
+  assert.equal(spoken.broke[0]!.supportBelow, null, "and nothing prior beneath it, stated rather than omitted");
+
+  // With a second level genuinely beyond the broken one, that is what the field carries.
+  const deeper: Zone = { id: "Z2", lo: 120, hi: 121, tests: 6, last: "2026-08-01", members: [] };
+  const twoLevels = overview({ accounts: [account({ holdings: [{ symbol: "DOWN",
+    holding: { symbol: "DOWN", shares: 1, averageCost: 1 },
+    levels: withZones({ resistance: [lost], support: [deeper], overhead: { zones: 1, gaps: 0, line: false } }),
+    series: { daily: series } }] })], generatedAt: "2026-09-19T12:00:00.000Z" });
+  assert.equal(twoLevels.broke[0]!.supportBelow, "$120.00–121.00", "the next level down, which is the useful half");
+  assert.equal(twoLevels.broke[0]!.resistanceAbove, null);
+});
+
+test("the fixture's nearest support is the zone that broke, not the one behind it", () => {
+  // The assertion this three-commit chain was actually about, and the repo never had it. One commit filtered a
+  // zone whose members are all from the last two sessions as "the price's own footprint" and the cell fell back to
+  // the zone behind it; the next commit established that a confirmed break is proof the level acted, and the cell
+  // came back. Both changes passed the suite, because the only assertion touching this was a minus-sign check.
+  //
+  // `syntheticBars()` is deterministic, so this pins the engine through the renderer: S1 at $126.95–127.20 carries
+  // a live break dated Aug 11 with eleven prior tests, which is why it survives `prior()` despite every one of its
+  // members coming from the last two bars. S2 at $124.90–125.70 is the zone behind it.
+  const html = portfolioReport({ accounts: [account()], generatedAt: "2026-09-16T12:00:00.000Z" });
+  const [below] = levelCells(html);
+  assert.match(below!, /\$126\.95–127\.20/, "the zone with the break, not the one behind it");
+  assert.match(below!, /−0\.2% · above it since Aug 11, 2026/);
+  assert.ok(!/\$124\.90–125\.70/.test(below!), "S2 is further away and is not what the row leads with");
 });

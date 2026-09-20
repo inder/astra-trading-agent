@@ -1,4 +1,4 @@
-# Readiness — version 0.5
+# Readiness — version 0.6
 
 The local end-to-end PAPER workflow is implemented: credential-free discovery,
 configuration, independent browser authorization, continuously scheduled runs,
@@ -6,9 +6,11 @@ option selection, assumed fills, positions and estimated P&L, reviewed trims/
 closes, durable history, stop and explicit management-only recovery.
 
 Two read-only surfaces sit beside it. `get_levels` answers where a stock's support
-and resistance are, from daily or weekly bars. `get_portfolio_report` reads the
-accounts the user names — balances, equity positions and option positions — and writes a printable
-report of what they hold with those levels around each holding, served on loopback.
+and resistance are, from daily or weekly bars, and whether the price has closed
+through one of them recently — a record of a settled session, never a prediction.
+`get_portfolio_report` reads the accounts the user names — balances, equity positions
+and option positions — and writes a printable report of what they hold with those
+levels around each holding, served on loopback.
 Both are advisory, and neither can reach a tool that places an order.
 
 ## Evidence

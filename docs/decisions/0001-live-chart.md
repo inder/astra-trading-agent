@@ -39,4 +39,4 @@ Astra reaches Robinhood only through its MCP connection and a read allowlist.
   first opens; it is confined to `src/chart-store.ts`.
 - The chart's reads share the Robinhood connection with paper runs.
 
-Refs: docs/LIVE-CHART.md.
+Refs: PR #30; docs/LIVE-CHART.md.

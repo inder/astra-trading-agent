@@ -2,6 +2,7 @@ import { RobinhoodMarketData, type EquityMarketQuote, validateSymbols } from "./
 import type { RobinhoodConnection } from "./broker-connection.ts";
 import { eligibleChains, loadOrbContracts, parseAvailableOrbCallQuotes } from "./option-source.ts";
 import type { CallQuote, OrbCallContract } from "./orb-options.ts";
+import type { DailyBars } from "./levels.ts";
 
 export interface OptionCatalog { expiration: string; contracts: OrbCallContract[] }
 export interface PaperMarket {
@@ -11,11 +12,15 @@ export interface PaperMarket {
   contracts(symbol: string, date: string): Promise<OptionCatalog>;
   /** Quotes for at most 20 contracts (the provider's per-request limit). */
   optionQuotes(ids: string[]): Promise<CallQuote[]>;
+  /** Daily bars, for context the journal records (the opening range against ATR). Optional: a market without it
+   *  journals that context as unavailable. */
+  dailyBars?(symbol: string, startMs: number, endMs: number): Promise<{ bars: DailyBars }>;
 }
 export class RobinhoodPaperMarket implements PaperMarket {
   #broker: RobinhoodConnection; #equities: RobinhoodMarketData; #clock: () => number;
   constructor(broker: RobinhoodConnection, clock = Date.now) { this.#broker = broker; this.#equities = new RobinhoodMarketData(broker); this.#clock = clock; }
   quotes(symbols: string[]) { return this.#equities.quotes(symbols); }
+  dailyBars(symbol: string, startMs: number, endMs: number) { return this.#equities.dailyBars(symbol, startMs, endMs); }
   bars(symbols: string[], start: number, end: number, extended: boolean) {
     validateSymbols(symbols);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 86400000) throw new Error("Invalid history window");

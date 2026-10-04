@@ -144,7 +144,7 @@ export function timeline(result: ReplayResult): string[] {
   const lines: string[] = [];
   for (const e of result.events) {
     const d = e.data, at = et(e.at);
-    if (e.type === "opening_range") lines.push(`${at}  ${d.symbol}  opening range ${d.range.low}-${d.range.high}`);
+    if (e.type === "opening_range") lines.push(`${at}  ${d.symbol}  opening range ${d.range.low}-${d.range.high}${d.rangeToAtr != null ? ` (${Math.round(d.rangeToAtr * 100)}% of ATR ${d.atr14})` : ""}`);
     else if (e.type === "setup_disqualified") lines.push(`${at}  ${d.symbol}  out for the day: ${d.reason}${d.observedClose !== undefined
       ? ` (candle ${et(Date.parse(d.candleStart))}-${et(Date.parse(d.candleEnd))} closed ${d.observedClose} under ${d.cancelLevel})` : d.price ? ` (traded ${d.price})` : ""}`);
     else if (e.type === "candle_unobserved") lines.push(`${at}  ${d.symbol}  candle ${et(Date.parse(d.candleStart))}-${et(Date.parse(d.candleEnd))} close not observed; no rule acted`);

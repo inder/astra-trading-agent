@@ -536,7 +536,9 @@ single quote below the low never ends the day. New entries stop after a configur
 (`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
 positions are managed all day. Prices are polled about once a second
 (`pollSeconds`).
-If the first candle's bars publish late, Astra retries them for up to a minute
+Each opening range is journaled with the stock's ATR(14) from the sessions before
+the trade date and the range as a share of it (`atr14`, `rangeToAtr`): context for
+studying the strategy, read by no rule. If the first candle's bars publish late, Astra retries them for up to a minute
 (`rangeDeadlineSeconds`) while it keeps watching prices; a candle that closed under
 the cancel level in that wait still ends the day, and nothing enters until the range is known. A
 stock first seen more than `maxObservationGapSeconds` (default 5) after the first

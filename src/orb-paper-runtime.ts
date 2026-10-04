@@ -1,7 +1,7 @@
 import { EntrySkip, OrbOptionsEngine, backstopPrice, minuteBarLow, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type OrbCallSelection, type SaleReason } from "./orb-options.ts";
 import { CalendarCoverageError, sessionTimes } from "./daily-history.ts";
-import { breakoutAbove } from "./orb-rules.ts";
+import { breakoutAbove, rangeVsAtr, trailingAtr } from "./orb-rules.ts";
 import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperEvent, type PaperPosition, type PaperControl } from "./paper-runtime.ts";
 
@@ -28,6 +28,8 @@ export class OrbPaperRuntime implements PaperRuntime {
   #failures: Partial<Record<Source, number>> = {};
   /** Session catalogs, prefetched before 9:32. Memory only: a restarted run manages positions and never enters. */
   #catalogs = new Map<string, Catalog>(); #slowestCatalogMs = 0; #prefetches = 0; #prefetchOver = false;
+  /** Each stock's ATR(14) before today, for the journal's opening-range context; null when unavailable. Memory only. */
+  #atr = new Map<string, number | null>();
   /** Journaled once per outage or per trigger, keyed "symbol:exit": the "no fresh bid" deferral of a sell-everything exit,
    *  and a stop firing while a different exit is already pending. Each re-fires every tick until the position sells. */
   #deferred = new Set<string>(); #triggered = new Set<string>();
@@ -318,13 +320,30 @@ export class OrbPaperRuntime implements PaperRuntime {
    *  loaded by then loads at its entry. */
   async #prefetch(now: number, rangeEnd: number, events: PaperEvent[]): Promise<void> {
     const missing = this.#config.symbols.filter(s => !this.#catalogs.has(s)), budgetMs = rangeEnd - this.#config.pollMs - now;
-    if (!missing.length || budgetMs <= this.#slowestCatalogMs) return;
+    if (!missing.length) return this.#prefetchAtr(budgetMs);
+    if (budgetMs <= this.#slowestCatalogMs) return;
     const symbol = missing[this.#prefetches++ % missing.length]!, started = this.#clock();
     const catalog = await this.#read("catalog", now, events, () => this.#withDeadline(symbol, budgetMs));
     this.#slowestCatalogMs = Math.max(this.#slowestCatalogMs, this.#clock() - started);
     if (!catalog) return;
     this.#catalogs.set(symbol, catalog);
     if ("skip" in catalog) events.push({ type: "no_tradable_calls", data: { symbol, reason: catalog.skip } });
+  }
+  /** Once every catalog is in, one stock's daily bars per tick for the ATR context, under the same rule: it never runs
+   *  into the first observation after 9:32. Context only, so a failure is recorded as unavailable, never as an outage. */
+  async #prefetchAtr(budgetMs: number): Promise<void> {
+    const symbol = this.#config.symbols.find(s => !this.#atr.has(s)), read = this.#market.dailyBars;
+    if (!symbol) return;
+    if (!read || budgetMs <= Math.max(this.#slowestCatalogMs, this.#config.pollMs)) { this.#atr.set(symbol, null); return; }
+    const { open } = this.#session;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("deadline")), budgetMs); timer.unref?.(); });
+    try {
+      const { bars } = await Promise.race([read.call(this.#market, symbol, open - 45 * 86400000, open), deadline]);
+      const before = bars.time.map((t, i) => ({ t, high: bars.high[i]!, low: bars.low[i]!, close: bars.close[i]! })).filter(b => b.t < this.#config.date);
+      this.#atr.set(symbol, trailingAtr(before));
+    } catch { this.#atr.set(symbol, null); }
+    finally { clearTimeout(timer); }
   }
   /** A catalog load raced against a real-time deadline. The provider call cannot be cancelled; if it finishes late its catalog
    *  is still kept for the entry (no event is written outside a step). */
@@ -361,7 +380,8 @@ export class OrbPaperRuntime implements PaperRuntime {
     for (const symbol of forming) {
       let range: OpeningRange;
       try { range = parseOpeningRange(bars, symbol, open, c.openingRangeMinutes, c.includePremarketLeadMinutes); } catch { continue; }   // not published yet: retry
-      this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range } });
+      // Context for later study, read by no rule: how big the first two minutes were against a normal day's range.
+      this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range, ...rangeVsAtr(range, this.#atr.get(symbol) ?? null) } });
       const after = this.#engine.snapshot().symbols[symbol]!;
       if (after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol, reason: after.endReason, ...after.endEvidence, whileRangePending: true } });
     }

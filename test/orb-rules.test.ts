@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { OrbOptionsEngine, SETTINGS, SETTING_KEYS, replayOpeningRange, validSetting, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import { sessionTimes } from "../src/daily-history.ts";
-import { barCandleCloses, breakoutAbove, cancelLevel, newCandleState, observeCandles, protectiveStopHit, protectiveStopLevel, setupCancelled,
+import { barCandleCloses, breakoutAbove, cancelLevel, rangeVsAtr, trailingAtr, newCandleState, observeCandles, protectiveStopHit, protectiveStopLevel, setupCancelled,
   stopAnchor, type CandleClose } from "../src/orb-rules.ts";
 
 // Each rule lives once in orb-rules.ts. These tests hold every caller to the same answer on the same input, because a
@@ -144,4 +144,13 @@ test("each settings row's chat unit is pinned, so a mislabelled unit cannot pass
     stopBufferFraction: "percent", flattenLeadMinutes: "whole", pollMs: "seconds", maxQuoteAgeMs: "seconds", maxObservationGapMs: "seconds",
     rangeDeadlineMs: "seconds", maxEntryQuoteBatches: "whole", maxEntryAttempts: "whole", heartbeatMs: "seconds", readFailureHaltMs: "seconds",
     openingLowToleranceRanges: "multiple", candleMinutes: "whole" });
+});
+
+test("ATR is the mean of the last 14 true ranges, as the levels engine measures it, and the range is a share of it", () => {
+  const bars = Array.from({ length: 15 }, (_, i) => ({ high: 106, low: 102, close: i === 13 ? 100 : 104 }));
+  // The 14 true ranges: 4 each, except the bar after the 100 close (106 - 100 = 6).
+  assert.equal(trailingAtr(bars), (13 * 4 + 6) / 14);
+  assert.equal(trailingAtr(bars.slice(1)), null, "needs 15 sessions for 14 true ranges");
+  assert.deepEqual(rangeVsAtr({ high: 105, low: 100 }, 4), { atr14: 4, rangeToAtr: 1.25 });
+  assert.deepEqual(rangeVsAtr({ high: 105, low: 100 }, null), { atr14: null, rangeToAtr: null });
 });

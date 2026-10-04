@@ -254,7 +254,8 @@ test("with premarket minutes the range still ends at 9:32, and a candle closing 
   f.setBarsReady(false, "DEMOB"); f.setTime(open + 120000); f.prices.DEMOB = 94;
   const first = await runtime.step();
   assert.deepEqual(first.filter(e => e.type === "opening_range").map(e => e.data),
-    [{ symbol: "DEMOA", range: { high: 105, low: 100, startMs: open - 120000, endMs: open + 120000 } }]);
+    [{ symbol: "DEMOA", range: { high: 105, low: 100, startMs: open - 120000, endMs: open + 120000 }, atr14: null, rangeToAtr: null }],
+    "no daily bars were loaded before 9:32 (the runtime started at it), so the context is unavailable, not guessed");
   for (let t = 5000; t <= 120000; t += 5000) { f.setTime(open + 120000 + t); await runtime.step(); }
   f.advance(); f.prices.DEMOB = 104; f.setBarsReady(true);
   const second = await runtime.step();
@@ -904,4 +905,18 @@ test("a cancel finished by a stale quote is journaled with its evidence, and a s
   for (let t = 10000; t <= 250000; t += 10000) { g.setTime(open + 120000 + t); notes.push(...await frozen.step()); }
   assert.ok(notes.some(e => e.type === "candle_unobserved"), "the frozen stretch is said");
   assert.ok(!notes.some(e => e.type === "setup_disqualified" && (e.data as any).reason === "opening_low_failed"), "an unvouched close never cancels");
+});
+
+test("each opening range is journaled with the stock's ATR(14) before today and the range as a share of it", async t => {
+  const f = fixture(t, ["DEMOA", "DEMOB"]);
+  // Twenty sessions before the trade date, each spanning 102-106 around a 104 close: every true range is 4.
+  const days = Array.from({ length: 20 }, (_, i) => `2026-08-${String(10 + i).padStart(2, "0")}`);
+  f.market.dailyBars = async symbol => symbol === "DEMOB" ? Promise.reject(new Error("test-only daily outage")) : ({ bars: {
+    time: [...days, date], open: [...days.map(() => 104), 104], high: [...days.map(() => 106), 140], low: [...days.map(() => 102), 60], close: [...days.map(() => 104), 104] } });
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA", "DEMOB"], includePremarketLeadMinutes: 0 }), f.market, f.options.clock);
+  for (let t = -60000; t < 120000; t += 1000) { f.setTime(open + t); await runtime.step(); }
+  f.setTime(open + 120000);
+  const ranges = (await runtime.step()).filter(e => e.type === "opening_range").map(e => e.data as any);
+  assert.deepEqual(ranges.map(r => [r.symbol, r.atr14, r.rangeToAtr]), [["DEMOA", 4, 1.25], ["DEMOB", null, null]],
+    "today's own bar never counts; a failed read is recorded as unavailable");
 });

@@ -94,3 +94,18 @@ export function protectiveStopHit(candle: CandleClose, level: number, anchor: nu
   return { fired: candle.close !== null && candle.close < level, reason: "protective_stop",
     evidence: { ...candleEvidence(candle), stopLevel: shown(level), stopAnchor: anchor } };
 }
+
+// ---- Context, journaled but read by no rule (yet): the opening range against the stock's normal daily movement.
+
+/** ATR as the levels engine measures it: the mean of the last `n` true ranges, from daily bars strictly before the
+ *  trade date (all known at the open). null when there are not `n` + 1 sessions. */
+export function trailingAtr(bars: readonly { high: number; low: number; close: number }[], n = 14): number | null {
+  if (bars.length < n + 1) return null;
+  const tr = bars.slice(-n).map((b, i) => { const prev = bars[bars.length - n - 1 + i]!.close; return Math.max(b.high - b.low, Math.abs(b.high - prev), Math.abs(b.low - prev)); });
+  const atr = tr.reduce((a, b) => a + b, 0) / n;
+  return atr > 0 ? atr : null;
+}
+/** The opening range as a share of that ATR (0.5 = the first two minutes moved half a normal day). */
+export function rangeVsAtr(range: RangeLevels, atr: number | null): { atr14: number | null; rangeToAtr: number | null } {
+  return { atr14: atr === null ? null : shown(atr), rangeToAtr: atr === null ? null : Math.round((range.high - range.low) / atr * 1000) / 1000 };
+}

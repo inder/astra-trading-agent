@@ -84,6 +84,15 @@
   carrying an `Origin` header or an unexpected `Host`, and sends
   `default-src 'none'`. It holds no session and no cookie, so there is nothing
   for a cross-origin page to ride; names are forgotten when the process exits.
+- The live chart (`open_chart`) is served the same way on its own loopback port,
+  under one unguessable path per process. Its page reads JSON and an event stream
+  from that same server, so it accepts an `Origin` only when it is exactly the
+  server's own, refuses `Origin: null`, refuses any `Sec-Fetch-Site` other than
+  `same-origin` or a typed-in navigation (another loopback port is `same-site`
+  and is refused), and checks `Host`. Its script is pinned by hash with
+  `connect-src 'self'`; the chart library is bundled, never fetched. It reads
+  market data only, never an account, and stores minute bars — prices, no
+  account data — in `charts.sqlite` in the data directory, readable only by you.
 
 Do not post credentials or private account details in public issues. Use GitHub
 private vulnerability reporting if enabled, or request a private reporting

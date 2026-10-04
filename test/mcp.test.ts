@@ -67,7 +67,7 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   t.after(async () => { await client.close(); rmSync(dir, { recursive: true, force: true }); });
   await client.connect(transport);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 25);
   assert.ok(!tools.some(t => /close|sell|buy|live|shell|credential/.test(t.name)));
   // Clients that pass server instructions to their model are told to lead with get_readiness's guide.
   assert.match(client.getInstructions() ?? "", /call get_readiness and follow its guide/);
@@ -75,6 +75,10 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   const readiness = unpack(await client.callTool({ name: "get_readiness", arguments: {} }));
   // The stage depends on today's date (the guided flow is pinned to a fixed clock in its own test above).
   assert.equal(readiness.brokerage, "not_connected"); assert.equal(typeof readiness.guide.stage, "string");
+  // The live chart is a read, and without a Robinhood connection it says what to do rather than opening a dead page.
+  assert.equal(tools.find(t => t.name === "open_chart")!.annotations?.readOnlyHint, true);
+  const chart = await client.callTool({ name: "open_chart", arguments: { symbol: "RDDT" } });
+  assert.equal(chart.isError, true); assert.match(unpack(chart).error, /Connect Robinhood market data first/);
   const bad = await client.callTool({ name: "run_sample", arguments: { requestId: "../x" } });
   assert.equal(bad.isError, true);
   // The report's own contract, at the boundary a model actually reaches it through. Account handles are the only way
@@ -125,7 +129,7 @@ test("HTTP rejects unauthenticated, cross-origin, hostile-host and oversized req
   const client = new Client({ name: "http-test", version: "1" });
   try {
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 24);
+    assert.equal((await client.listTools()).tools.length, 25);
     assert.equal(unpack(await client.callTool({ name: "get_readiness", arguments: {} })).mode, "sample_and_paper");
   } finally { await client.close(); }
 });

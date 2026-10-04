@@ -325,6 +325,7 @@ is a recommendation: it reports what the rules found.
 | "Can you watch CRWV, HPE, SMCI?" | Checks each ticker has a price and the options it needs | `check_symbols` |
 | "What is CRWV trading at?" | Latest prices, with their time | `get_market_quotes` |
 | "Where is HPE's support and resistance?" / "Any open gaps in SMCI?" / "Show me NVDA's five-year weekly levels" | Price zones with how often they held, open gaps, trend lines and moving averages, daily or weekly | `get_levels` |
+| "Chart RDDT" / "Open a live chart of QCOM" | Opens a two-panel chart in your browser: daily candles with the levels above, intraday candles (1, 2, 5, 15 or 30 minutes) below, updating every few seconds while the market is open | `open_chart` |
 | "Which accounts can you see?" | Lists your Robinhood accounts, masked, so you can pick | `list_accounts` |
 | "Show me my portfolio" / "Print a report for my Roth" | Writes a printable report — cost basis, P&L, and each holding's nearest support and resistance on an expandable chart — and gives you a link to it | `get_portfolio_report` |
 | "Plan tomorrow with…" / "Use $500 per trade" | Saves a plan with your settings; doesn't start it | `configure_paper_strategy` |
@@ -447,6 +448,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `check_symbols` | Check proposed tickers: a price and the week-ending expiry the entry rule needs |
 | `get_market_quotes` | Read normalized equity prices and freshness flags after authorization |
 | `get_levels` | Support and resistance from daily bars: zones and tests, open gaps, trend lines, moving averages. `timeframe: "5y"` measures weekly bars instead. Advisory; market data only |
+| `open_chart` | Live two-panel chart on loopback: daily candles with QTD/YTD/2Y/5Y levels and moving averages, intraday candles from 1-minute bars (switchable to 2/5/15/30), scroll-wheel and button zoom. See [docs/LIVE-CHART.md](docs/LIVE-CHART.md). Market data only |
 | `list_accounts` | List your Robinhood accounts as masked labels with opaque handles, so you can choose which to report on. Reads names and status only — no balances, no positions |
 | `get_portfolio_report` | Write a printable portfolio report for the accounts you name and return a loopback link to it, plus a short overview the chat can read aloud. Cost basis, market value, unrealized P&L, and the nearest support and resistance for each holding on an expandable chart |
 | `configure_paper_strategy` | Save session settings without starting |
@@ -615,6 +617,10 @@ and summary together in `runs/<requestId>.json`. Records are published atomicall
 without overwrite. Retrying the same ID and inputs returns the existing result;
 changing inputs with that ID fails. Different clients must name their run
 explicitly; there is no shared “selected position” state.
+
+The live chart keeps the minute bars it has seen in `charts.sqlite` (SQLite,
+built into Node), 90 days by default, so a chart left open for hours, or reopened
+later, shows more history than one Robinhood read returns.
 
 Paper runs store immutable revisions in `paper/<runId>/`, with events, pinned
 settings/version and checkpoint published together. One process owns a run and

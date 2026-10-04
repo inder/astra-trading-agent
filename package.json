@@ -19,6 +19,6 @@
     "check": "npm run typecheck && npm test"
   },
   "files": ["src/", "README.md", "INSTALL.md", "AGENTS.md", "CLAUDE.md", "SECURITY.md", "docs/", "LICENSE"],
-  "dependencies": { "@modelcontextprotocol/sdk": "1.30.0", "zod": "3.25.76" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.30.0", "lightweight-charts": "5.2.1", "zod": "3.25.76" },
   "devDependencies": { "@types/node": "24.3.0", "playwright-core": "1.63.0", "typescript": "5.9.2" }
 }

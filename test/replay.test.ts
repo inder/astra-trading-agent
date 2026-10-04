@@ -24,10 +24,15 @@ function day(first: MinuteBar[], closes: (minute: number) => number): MinuteBar[
 const ramp = (from: number, to: number, a: number, b: number) => (m: number) => m <= a ? from : m >= b ? to : from + (to - from) * (m - a) / (b - a);
 // DEMOA holds its 49.50-51.20 range, breaks out at 9:44 and rallies about 12% before easing into the close.
 const demoA = day([bar(0, 50, 51, 49.5, 50.8), bar(1, 50.8, 51.2, 50.2, 51)], m => m < 14 ? 50.8 : m < 210 ? ramp(51.5, 57, 14, 210)(m) : ramp(57, 55, 210, 389)(m));
-// DEMOB loses its 60-61 low in the third minute, then rallies above its high at 10:00, inside the entry window.
-const demoB = day([bar(0, 60.5, 61, 60, 60.6), bar(1, 60.6, 60.9, 60.1, 60.2), bar(2, 60.2, 60.4, 59.8, 60.3)], m => m < 30 ? 60.3 : ramp(61.5, 63, 30, 120)(m));
-// DEMOC's third minute breaks BOTH ends of its 70-71 range and closes lower: nothing decides which came first.
-const demoC = day([bar(0, 70.5, 71, 70, 70.6), bar(1, 70.6, 70.9, 70.2, 70.6), bar(2, 70.6, 71.4, 69.8, 70.5)], m => m < 20 ? 70.5 : 72);
+// DEMOB's 9:32-9:34 candle closes at 58.8, more than a range height (1) under its 60-61 range: out for the day, though it
+// rallies above its high at 10:00, inside the entry window. Its whole last minute stays under 59, so the close Astra
+// observes is under the level however coarse the polling (here 20 s: the trade at 9:33:40, the bar's 58.95 high).
+const demoB = day([bar(0, 60.5, 61, 60, 60.6), bar(1, 60.6, 60.9, 60.1, 60.2), bar(2, 60.2, 60.4, 58.7, 58.9), bar(3, 58.9, 58.95, 58.6, 58.8)],
+  m => m < 30 ? 60.3 : ramp(61.5, 63, 30, 120)(m));
+// DEMOC wicks to 68.5 in its third minute, under its 69 cancel level, but every candle closes back in its 70-71 range: a wick
+// never cancels. It breaks out at 9:50 and rallies like DEMOA.
+const demoC = day([bar(0, 70.5, 71, 70, 70.6), bar(1, 70.6, 70.9, 70.2, 70.6), bar(2, 70.6, 70.9, 68.5, 70.5)],
+  m => m < 20 ? 70.5 : m < 210 ? ramp(71.5, 79, 20, 210)(m) : ramp(79, 76, 210, 389)(m));
 const bars: BarsFile = { data: { results: [["DEMOA", demoA], ["DEMOB", demoB], ["DEMOC", demoC]].map(([symbol, list]) =>
   ({ symbol: symbol as string, interval: "minute", bounds: "regular", bars: list as MinuteBar[] })) } };
 // One replay of the invented day through the paper service, shared by the tests below; coarse polling keeps it quick.
@@ -67,48 +72,50 @@ test("the replay market trades every second, publishes bars after their minute, 
   await assert.rejects(market.optionQuotes([atm.id, atm.id]), /Invalid option IDs/, "duplicates are refused, as by the provider");
   await assert.rejects(market.optionQuotes(["00000000-0000-4000-8000-00000000ffff"]), /Invalid option IDs/, "so are ids it never listed");
 });
-test("a replay through the paper service meets its claims: the breakout enters, low failures never do, even a both-break bar", async () => {
+test("a replay through the paper service meets its claims: breakouts enter, a candle closing under the cancel level never does, a wick never cancels", async () => {
   const result = await replayed();
-  const claims = checkOracle(result, bars, date, settings, { enters: ["DEMOA"], lowFails: ["DEMOB", "DEMOC"] });
+  const claims = checkOracle(result, bars, date, settings, { enters: ["DEMOA", "DEMOC"], cancels: ["DEMOB"] });
   assert.deepEqual(claims.filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`), []);
-  assert.deepEqual(claims.filter(k => k.modeled).map(k => k.id), ["DEMOA-size", "DEMOA-first-target", "DEMOA-breakeven", "DEMOA-closed"]);
-  assert.ok(result.events.some(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOC" && e.data.reason === "opening_low_failed"),
-    "the both-break bar counts as a low failure, never an entry");
+  assert.deepEqual(claims.filter(k => k.modeled).map(k => k.id),
+    ["DEMOA-size", "DEMOA-first-target", "DEMOA-closed", "DEMOC-size", "DEMOC-first-target", "DEMOC-closed"]);
+  const cancel = result.events.find(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB")!;
+  assert.deepEqual([cancel.data.reason, cancel.data.observedClose, cancel.data.cancelLevel, cancel.at], ["opening_low_failed", 58.95, 59, open + 240000]);
+  assert.ok(!result.events.some(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOC"), "DEMOC's wick under its cancel level is not a cancel");
 });
 test("the claims fail for the wrong reasons: a write-off, a stock dropped by another rule, a late or missing entry", async () => {
   const result = await replayed();
-  const lastSale = result.events.filter(e => e.type === "paper_sale").at(-1)!;
+  const lastSale = result.events.filter(e => e.type === "paper_sale" && e.data.symbol === "DEMOA").at(-1)!;
   const writtenOff = { ...result, events: [...result.events.filter(e => e !== lastSale), { at: close, type: "written_off", data: { symbol: "DEMOA", quantity: lastSale.data.quantity } }] };
-  const failed = checkOracle(writtenOff, bars, date, settings, { enters: ["DEMOA"], lowFails: ["DEMOB"] }).filter(k => !k.pass).map(k => k.id);
+  const failed = checkOracle(writtenOff, bars, date, settings, { enters: ["DEMOA"], cancels: ["DEMOB"] }).filter(k => !k.pass).map(k => k.id);
   assert.deepEqual(failed, ["clean", "DEMOA-closed"]);
-  assert.ok(checkOracle(result, bars, date, settings, { enters: ["DEMOB"], lowFails: [] }).some(k => k.id === "DEMOB-entry" && !k.pass));
-  // DEMOB dropped by the entry window instead of its opening low must not count as the low rule working.
+  assert.ok(checkOracle(result, bars, date, settings, { enters: ["DEMOB"], cancels: [] }).some(k => k.id === "DEMOB-entry" && !k.pass));
+  // DEMOB dropped by the entry window instead of its cancel must not count as the cancel rule working.
   const windowed = { ...result, events: result.events.map(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" ? { ...e, data: { ...e.data, reason: "entry_window_closed" } } : e) };
-  assert.ok(checkOracle(windowed, bars, date, settings, { enters: [], lowFails: ["DEMOB"] }).some(k => k.id === "DEMOB-low" && !k.pass));
-  // The modeled claims fail too: over the cap, the wrong first-target quantity, breakeven before the target.
+  assert.ok(checkOracle(windowed, bars, date, settings, { enters: [], cancels: ["DEMOB"] }).some(k => k.id === "DEMOB-cancel" && !k.pass));
+  // The modeled claims fail too: over the cap, the wrong first-target quantity; and a stop on a candle the bars say held.
   const edit = (type: string, change: (d: any) => any) => ({ ...result, events: result.events.map(e => e.type === type && e.data.symbol === "DEMOA" ? { ...e, data: change(e.data) } : e) });
-  const fails = (r: ReplayResult, id: string) => checkOracle(r, bars, date, settings, { enters: ["DEMOA"], lowFails: [] }).some(k => k.id === id && !k.pass);
+  const fails = (r: ReplayResult, id: string) => checkOracle(r, bars, date, settings, { enters: ["DEMOA"], cancels: [] }).some(k => k.id === id && !k.pass);
   assert.ok(fails(edit("paper_entry", d => ({ ...d, committedCents: 200001 })), "DEMOA-size"));
   assert.ok(fails(edit("paper_entry", d => ({ ...d, strike: d.stockPrice * 1.1 })), "DEMOA-size"), "a strike 10% away is not near the money");
   let first = true;
   assert.ok(fails(edit("paper_sale", d => first && d.reason === "profit_target" ? (first = false, { ...d, quantity: d.quantity - 1 }) : d), "DEMOA-first-target"));
-  const target = result.events.find(e => e.type === "paper_sale" && e.data.reason === "profit_target")!;
-  assert.ok(fails({ ...result, breakevenAt: { DEMOA: target.at - 1 } }, "DEMOA-breakeven"));
-  // A low disqualification earlier than the fixture's first trade below the low is not the rule working.
+  const held = { at: open + 30 * 60000, type: "exit_triggered", data: { symbol: "DEMOA", exit: "protective_stop", candleEnd: new Date(open + 30 * 60000).toISOString(),
+    observedClose: 51, stopLevel: 49.5 } };
+  assert.ok(fails({ ...result, events: [...result.events, held] }, "DEMOA-stop"), "the bars closed that candle above the stop");
+  // A cancel earlier than the end of the fixture's first candle closing under the cancel level is not the rule working.
   const early = { ...result, events: result.events.map(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" ? { ...e, at: open + 120000 } : e) };
-  assert.ok(checkOracle(early, bars, date, settings, { enters: [], lowFails: ["DEMOB"] }).some(k => k.id === "DEMOB-low" && !k.pass));
+  assert.ok(checkOracle(early, bars, date, settings, { enters: [], cancels: ["DEMOB"] }).some(k => k.id === "DEMOB-cancel" && !k.pass));
   // An entry one poll after the first observed trade above the high is not the breakout entry.
   const late = { ...result, events: result.events.map(e => e.type === "option_selection" && e.data.symbol === "DEMOA"
     ? { ...e, data: { ...e.data, stock: { ...e.data.stock, tradeAt: new Date(Date.parse(e.data.stock.tradeAt) + settings.pollMs).toISOString() } } } : e) };
-  assert.ok(checkOracle(late, bars, date, settings, { enters: ["DEMOA"], lowFails: [] }).some(k => k.id === "DEMOA-entry" && !k.pass));
+  assert.ok(checkOracle(late, bars, date, settings, { enters: ["DEMOA"], cancels: [] }).some(k => k.id === "DEMOA-entry" && !k.pass));
 });
 test("bars published late take the range-retry path and the claims still hold", async t => {
   const lagDir = mkdtempSync(join(tmpdir(), "astra-replay-test-")); t.after(() => rmSync(lagDir, { recursive: true, force: true }));
   const result = await runReplay({ date, symbols: ["DEMOA", "DEMOB", "DEMOC"], regular: bars, volatility: { DEMOA: 0.9, DEMOB: 0.9, DEMOC: 0.9 },
     barLagMs: 30000, settings, dataDir: lagDir });
-  assert.deepEqual(checkOracle(result, bars, date, settings, { enters: ["DEMOA"], lowFails: ["DEMOB", "DEMOC"] }).filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`), []);
-  assert.ok(result.events.some(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" && e.data.lowSeen !== undefined),
-    "DEMOB's low was judged when its late range arrived");
+  assert.deepEqual(checkOracle(result, bars, date, settings, { enters: ["DEMOA", "DEMOC"], cancels: ["DEMOB"] }).filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`), []);
+  assert.ok(result.events.filter(e => e.type === "opening_range").every(e => e.at >= open + 150000), "every range arrived late, through the retry path");
   await assert.rejects(runReplay({ date, symbols: ["DEMOA"], regular: bars, volatility: {}, barLagMs: 0, settings: { ...settings, pollMs: 7000 }, dataDir: lagDir }),
     /divides a minute/);
 });

@@ -43,7 +43,7 @@ export function fixture(t: TestContext, symbols = setup.symbols) {
   const options = { market, clock: () => now, ready: () => true, auto: false };
   const service = new TradingAgentService(directory, undefined, undefined, options);
   t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { directory, service, market, options, prices, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
+  return { directory, service, market, options, prices, now: () => now, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
     setBid: (v: number) => { bid = v; }, staleStock: (v: number) => { stockAge = v; }, staleOption: (v: number) => { optionAge = v; },
     /** Make reads fail (all four when none are named) until restore(). */
     outage: (...only: Read[]) => { for (const read of only.length ? only : ["quotes", "bars", "catalog", "options"] as const) down.add(read); },
@@ -56,4 +56,10 @@ export async function entered(f: ReturnType<typeof fixture>, symbols = setup.sym
   f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
   f.advance(); f.prices[symbols[0]!] = 106; await f.service.paper.tick(setup.runId);
   assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
+}
+/** Finish the two-minute candle in progress (on the grid from 9:32) at the stock prices already set: a poll a second
+ *  before its end, then one at it. Candle rules (the cancel before entry, the protective stop after) act on its close. */
+export async function finishCandle(f: ReturnType<typeof fixture>, tick: () => Promise<unknown> = () => f.service.paper.tick(setup.runId)) {
+  const end = open + 120000 + (Math.floor((f.now() - open - 120000) / 120000) + 1) * 120000;
+  f.setTime(end - 1000); await tick(); f.setTime(end); await tick();
 }

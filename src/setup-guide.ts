@@ -59,11 +59,13 @@ export interface Guide {
 interface Plan {
   symbols: string[]; perTradeCents: number; perDayCents: number; positions: number; minimumContracts: number;
   entryWindowMinutes: number; first: number; middle: number; final: number; backstop: number; stopBuffer: number; flattenLeadMinutes: number;
+  tolerance: number; candleMinutes: number;
 }
 const DEFAULT_PLAN: Plan = { symbols: [], perTradeCents: SETTINGS.budgetCentsPerPosition.default, perDayCents: SETTINGS.budgetCentsPerDay.default,
   positions: SETTINGS.maximumPositions.default, minimumContracts: SETTINGS.minimumContracts.default, entryWindowMinutes: ENTRY_WINDOW_MINUTES.default,
   first: SETTINGS.firstTargetMultiple.default, middle: SETTINGS.middleTargetMultiple.default, final: SETTINGS.finalTargetMultiple.default,
-  backstop: SETTINGS.backstopFraction.default, stopBuffer: SETTINGS.stopBufferFraction.default, flattenLeadMinutes: SETTINGS.flattenLeadMinutes.default };
+  backstop: SETTINGS.backstopFraction.default, stopBuffer: SETTINGS.stopBufferFraction.default, flattenLeadMinutes: SETTINGS.flattenLeadMinutes.default,
+  tolerance: SETTINGS.openingLowToleranceRanges.default, candleMinutes: SETTINGS.candleMinutes.default };
 /** A saved run's pinned settings, or null when they don't look like this strategy's. */
 function planOf(config: unknown): Plan | null {
   const c = config as Record<string, unknown> | null;
@@ -71,7 +73,10 @@ function planOf(config: unknown): Plan | null {
   const plan: Plan = { symbols: Array.isArray(c?.symbols) ? c.symbols.filter((s): s is string => typeof s === "string") : [],
     perTradeCents: n("budgetCentsPerPosition"), perDayCents: n("budgetCentsPerDay"), positions: n("maximumPositions"), minimumContracts: n("minimumContracts"),
     entryWindowMinutes: n("entryWindowMinutes"), first: n("firstTargetMultiple"), middle: n("middleTargetMultiple"), final: n("finalTargetMultiple"),
-    backstop: n("backstopFraction"), stopBuffer: n("stopBufferFraction"), flattenLeadMinutes: n("flattenLeadMinutes") };
+    backstop: n("backstopFraction"), stopBuffer: n("stopBufferFraction"), flattenLeadMinutes: n("flattenLeadMinutes"),
+    // A plan saved before these settings existed shows the defaults it would get.
+    tolerance: typeof c?.openingLowToleranceRanges === "number" ? c.openingLowToleranceRanges : SETTINGS.openingLowToleranceRanges.default,
+    candleMinutes: typeof c?.candleMinutes === "number" ? c.candleMinutes : SETTINGS.candleMinutes.default };
   return plan.symbols.length && Object.values(plan).every(v => typeof v !== "number" || Number.isFinite(v)) ? plan : null;
 }
 
@@ -84,6 +89,8 @@ const day = (date: string) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC"
 const dollars = (cents: number) => "$" + (cents / 100).toLocaleString("en-US");
 const percent = (fraction: number) => `${Number((fraction * 100).toPrecision(12))}%`;
 const count = (n: number, thing: string) => `${n} ${thing}${n === 1 ? "" : "s"}`;
+/** The cancel's depth in words: range heights are the high minus the low. */
+const heights = (n: number) => n === 0 ? "anywhere" : n === 1 ? "a full range height (the high minus the low)" : `${n} range heights (the high minus the low)`;
 /** Whether a paper run can still enter today, from its strategy state and pinned settings: the stocks that can still
  *  enter (watching, waiting for their range, or mid-entry) and whether the day's stock limit is used up (entered stocks
  *  count even after they close). Undefined when the strategy reports no per-stock state. */
@@ -117,13 +124,14 @@ function strategyLines(p: Plan, s: SessionInfo): string[] {
   return [
     `Here is what Astra does on ${s.day}, on paper only: simulated trades on real Robinhood prices, no real orders.`,
     `The first ${OPENING_RANGE_MINUTES} minutes after the ${s.opens} open set each stock's opening high and low.`,
-    `If a stock then trades above that high before ${s.entriesUntil}, Astra buys call options on it; if the price is back at or below the high when it goes to buy, it waits for the next breakout. If it trades below the low first, that stock is done for the day.`,
+    `If a stock then trades above that high before ${s.entriesUntil}, Astra buys call options on it; if the price is back at or below the high when it goes to buy, it waits for the next breakout. ` +
+      `If a ${p.candleMinutes}-minute candle closes ${heights(p.tolerance)} below the low first, that stock is done for the day; a dip that recovers before its candle closes does not count.`,
     `Limits: at most ${count(p.positions, "stock")} entered per day, ${dollars(p.perTradeCents)} of option premium per trade and ${dollars(p.perDayCents)} per day.`,
     `Which option: the strike closest to the stock price where at least ${count(p.minimumContracts, "contract")} fit under the per-trade limit, ` +
       (expiry ? `expiring ${expiry} (${rule}).` : `with ${rule}.`),
     `Exits: half the contracts (rounded up) sell when the option reaches ${p.first}x its entry price${p.first >= 2 ? ", which recovers at least the premium paid" : ""}; ` +
       `the last one sells at ${p.final}x and any in between at ${p.middle}x.`,
-    `Stops: before that first sale, a drop ${percent(p.stopBuffer)} below the opening low sells everything; after it, a fall back to the stock's entry price does. ` +
+    `Stops: from the purchase until everything is sold, a ${p.candleMinutes}-minute candle closing ${p.stopBuffer > 0 ? `more than ${percent(p.stopBuffer)} ` : ""}below the lowest price from the open to the purchase sells everything. ` +
       `A safety stop sells if the option falls to ${percent(p.backstop)} of its entry price, and anything still held sells at ${s.closeOut}.`,
     "Premium is treated as money you can lose in full; the per-trade and per-day limits are the risk control. Every number here is a setting you can change.",
   ];
@@ -276,5 +284,5 @@ export function setupGuide(input: GuideInput): Guide {
     defaults: { maxPremiumPerTradeDollars: p.perTradeCents / 100, maxPremiumPerDayDollars: p.perDayCents / 100, maximumPositions: p.positions,
       minimumContracts: p.minimumContracts, entryWindowMinutes: p.entryWindowMinutes, firstTargetMultiple: p.first, middleTargetMultiple: p.middle,
       finalTargetMultiple: p.final, backstopPercent: Number((p.backstop * 100).toPrecision(12)), stopBufferPercent: Number((p.stopBuffer * 100).toPrecision(12)),
-      flattenLeadMinutes: p.flattenLeadMinutes } });
+      flattenLeadMinutes: p.flattenLeadMinutes, openingLowToleranceRanges: p.tolerance, candleMinutes: p.candleMinutes } });
 }

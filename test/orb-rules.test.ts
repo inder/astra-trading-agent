@@ -1,67 +1,108 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { OrbOptionsEngine, SETTINGS, SETTING_KEYS, replayOpeningRange, validSetting, type OrbOptionsConfig } from "../src/orb-options.ts";
+import { OrbOptionsEngine, SETTINGS, SETTING_KEYS, replayOpeningRange, validSetting, type OrbIntent, type OrbOptionsConfig } from "../src/orb-options.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
-import { breakevenStopHit, breakoutAbove, openingLowBroken, protectiveStopHit, protectiveStopLevel } from "../src/orb-rules.ts";
+import { sessionTimes } from "../src/daily-history.ts";
+import { barCandleCloses, breakoutAbove, cancelLevel, newCandleState, observeCandles, protectiveStopHit, protectiveStopLevel, setupCancelled,
+  stopAnchor, type CandleClose } from "../src/orb-rules.ts";
 
 // Each rule lives once in orb-rules.ts. These tests hold every caller to the same answer on the same input, because a
 // rule kept in two places drifts: one half changes and the other keeps the old behavior with its own tests still green.
+// The boundary tests pin each rule outright, so a change to a rule itself fails here too.
 
-const config: OrbOptionsConfig = { ...openingRangeConfig({ date: "2026-09-08", symbols: ["CRWV"], includePremarketLeadMinutes: 0 }), minimumContracts: 2 };
-const range = { high: 105, low: 100, startMs: 0, endMs: 120000 };
+const config: OrbOptionsConfig = { ...openingRangeConfig({ date: "2026-09-08", symbols: ["CRWV"], includePremarketLeadMinutes: 0 }),
+  minimumContracts: 2, maxObservationGapMs: 60000 };
+const OPEN = sessionTimes(config.date).open, END = OPEN + 120000, CANDLE = 120000;
+const range = { high: 105, low: 100, startMs: OPEN, endMs: END };   // cancel level 95
 const id = "00000000-0000-0000-0000-000000000001";
-const prices = [99, 99.99, 99.9, 100, 100.01, 104.99, 105, 105.01, 106];
+const candle = (close: number | null, n = 1): CandleClose => ({ start: END + (n - 1) * CANDLE, end: END + n * CANDLE, close, closeTradeAt: close === null ? null : END + n * CANDLE - 1000 });
+const acts = (intents: OrbIntent[]) => intents.filter(i => i.kind !== "candle_unobserved");
+/** Feed an engine one candle closing at `close` (trades every 30 s at that price, then one at the candle's end). */
+const feed = (e: OrbOptionsEngine, n: number, close: number) =>
+  [30000, 60000, 90000, CANDLE - 1000, CANDLE].flatMap(t => e.observe("CRWV", close, END + (n - 1) * CANDLE + t));
 
-test("the engine's opening-low and breakout decisions are the rules' decisions", () => {
-  for (const price of prices) {
-    const e = new OrbOptionsEngine(config); e.setRange("CRWV", range);
-    const intents = e.observe("CRWV", price, 120001), after = e.snapshot().symbols.CRWV!;
-    assert.equal(after.status === "disqualified" && after.endReason === "opening_low_failed", openingLowBroken(price, range).fired, `low at ${price}`);
-    assert.equal(intents[0]?.kind === "enter_calls", breakoutAbove(price, range).fired, `breakout at ${price}`);
-  }
-});
-
-test("a low seen while the range bars were pending, and a reversed entry quote, use the same opening-low rule", () => {
-  for (const price of prices.filter(p => p <= 105)) {
-    const pending = new OrbOptionsEngine(config); pending.observe("CRWV", price, Date.parse("2026-09-08T13:32:00.500Z"));
-    pending.setRange("CRWV", { ...range, startMs: Date.parse("2026-09-08T13:30:00Z"), endMs: Date.parse("2026-09-08T13:32:00Z") });
-    assert.equal(pending.snapshot().symbols.CRWV!.endReason === "opening_low_failed", openingLowBroken(price, range).fired, `pending at ${price}`);
-    const entry = new OrbOptionsEngine(config); entry.setRange("CRWV", range); entry.observe("CRWV", 106, 120001);
-    entry.failEntry("CRWV", { newerPrice: price });
-    assert.equal(entry.snapshot().symbols.CRWV!.endReason === "opening_low_failed", openingLowBroken(price, range).fired, `entry quote at ${price}`);
-  }
-});
-
-test("the replay's bar outcome uses the same rules as the engine", () => {
-  const bars = (high: string, low: string) => ({ data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "regular", bars: [
-    { begins_at: "1970-01-01T00:00:00Z", high_price: "105", low_price: "100", session: "reg" },
-    { begins_at: "1970-01-01T00:01:00Z", high_price: "104", low_price: "101", session: "reg" },
-    { begins_at: "1970-01-01T00:02:00Z", high_price: high, low_price: low, open_price: low, session: "reg" }] }] } });
-  for (const [high, low] of [["104", "99.99"], ["104", "100"], ["105.01", "100"], ["105", "100"], ["106", "99"]] as const) {
-    const outcome = replayOpeningRange(bars(high, low), "CRWV", 0).outcome;
-    const up = breakoutAbove(+high, range).fired, down = openingLowBroken(+low, range).fired;
-    assert.equal(outcome, up && down ? "ambiguous" : down ? "disqualified" : up ? "qualified" : "no_event", `${high}/${low}`);
-  }
-});
-
-test("the engine's protective stop fires exactly where the rule says", () => {
-  const level = protectiveStopLevel(range, config.stopBufferFraction);
-  for (const price of [level - 0.01, level, level + 0.01, 100]) {
-    const e = new OrbOptionsEngine(config); e.setRange("CRWV", range); e.observe("CRWV", 106, 120001);
-    e.confirmEntry("CRWV", id, 4, 106, 4, 2);
-    const intents = e.observe("CRWV", price, 121000);
-    assert.equal(intents[0]?.kind === "sell_to_close" && intents[0].reason === "protective_stop", protectiveStopHit(price, level).fired, `stop at ${price}`);
-  }
-});
-
-test("each rule's boundary is pinned outright, so a change to a rule itself fails here", () => {
+test("each rule's boundary is pinned outright", () => {
   const r = { high: 105, low: 100 };
-  assert.equal(openingLowBroken(100, r).fired, false); assert.equal(openingLowBroken(99.99, r).fired, true);
   assert.equal(breakoutAbove(105, r).fired, false); assert.equal(breakoutAbove(105.01, r).fired, true);
-  assert.equal(protectiveStopLevel(r, 0.001), 99.9);
-  assert.equal(protectiveStopHit(99.9, 99.9).fired, false); assert.equal(protectiveStopHit(99.89, 99.9).fired, true);
-  assert.equal(breakevenStopHit(106, 106).fired, true); assert.equal(breakevenStopHit(106.01, 106).fired, false);
+  assert.equal(cancelLevel(r, 1), 95); assert.equal(cancelLevel(r, 0), 100); assert.equal(cancelLevel(r, 0.5), 97.5);
+  assert.equal(setupCancelled(candle(95), r, 1).fired, false); assert.equal(setupCancelled(candle(94.99), r, 1).fired, true);
+  assert.equal(setupCancelled(candle(null), r, 1).fired, false, "an unknown close never cancels");
+  assert.equal(stopAnchor(100, null, 99.5, 98.7), 98.7); assert.equal(stopAnchor(100, 101, null), 100, "never above the range low");
+  assert.equal(protectiveStopLevel(100, 0), 100); assert.equal(protectiveStopLevel(100, 0.01), 99);
+  assert.equal(protectiveStopHit(candle(100), 100, 100).fired, false); assert.equal(protectiveStopHit(candle(99.99), 100, 100).fired, true);
+  assert.equal(protectiveStopHit(candle(null), 100, 100).fired, false, "an unknown close never sells");
+});
+
+test("candles close on the fixed grid from the range's end, from observed trades only", () => {
+  const settle = 1000, gap = 5000, closes = (st = newCandleState(END, 2)) => (p: number, t: number, o = t) => observeCandles(st, p, t, o, 2, settle, gap);
+  // A trade at or after the end finishes the candle; its close is the last trade before the end.
+  let seen = closes();
+  assert.deepEqual(seen(101, END + 118000), []); assert.deepEqual(seen(102, END + 119500), []);
+  assert.deepEqual(seen(103, END + 120000), [{ start: END, end: END + 120000, close: 102, closeTradeAt: END + 119500 }]);
+  // A quiet stock: no new trade, but a fetch a poll past the end finishes it with the last trade.
+  seen = closes(); seen(101, END + 117000);
+  assert.deepEqual(seen(101, END + 117000, END + 120500), [], "not yet a poll past the end");
+  assert.equal(seen(101, END + 117000, END + 121000)[0]?.close, 101);
+  // A trade printed before the end but fetched after it is that candle's close.
+  seen = closes(); seen(101, END + 116000);
+  assert.equal(seen(99, END + 119900, END + 121000)[0]?.close, 99);
+  // Not watching near the end: the close is unknown, never assumed; several candles crossed at once each answer for themselves.
+  seen = closes(); seen(101, END + 10000);
+  assert.deepEqual(seen(104, END + 3 * CANDLE + 5000).map(c => c.close), [null, null, null]);
+  seen = closes(); seen(101, END + 118000);
+  assert.deepEqual(seen(104, END + 2 * CANDLE + 1000).map(c => c.close), [101, null], "the first was watched to its end, the second was not");
+  // An older fetch arriving late changes nothing.
+  seen = closes(); seen(101, END + 119000, END + 119000);
+  assert.deepEqual(seen(90, END + 118000, END + 118500), []);
+  assert.equal(seen(102, END + 120000)[0]?.close, 101);
+  // A 3-minute grid starts at the range's end too: no candle straddles it, none is skipped.
+  const three = newCandleState(END, 3); observeCandles(three, 100, END + 179000, END + 179000, 3, settle, gap);
+  assert.deepEqual(observeCandles(three, 100, END + 180000, END + 180000, 3, settle, gap).map(c => [c.start, c.end]), [[END, END + 180000]]);
+});
+
+test("the replay's bar candles agree with the candles built from the per-second path", () => {
+  // A minute bar's path visits open, low, high, close; polled each second, the candle close is the last minute's close.
+  const bars = Array.from({ length: 6 }, (_, i) => ({ at: END + i * 60000, close: 100 + (i % 3) - 1 }));
+  const st = newCandleState(END, 2), polled: CandleClose[] = [];
+  for (const b of bars) for (let sec = 0; sec < 60; sec++) {
+    const price = sec === 59 ? b.close : 100 + sec / 100, t = b.at + sec * 1000;
+    polled.push(...observeCandles(st, price, t, t, 2, 1000, 5000));
+  }
+  polled.push(...observeCandles(st, 100, END + 6 * 60000, END + 6 * 60000, 2, 1000, 5000));
+  assert.deepEqual(polled.map(c => [c.end, c.close]), barCandleCloses(bars, END, 2).map(c => [c.end, c.close]));
+});
+
+test("the engine's cancel is the rule's decision, before entry, whether the candle closed while watching or while the range was pending", () => {
+  for (const close of [94, 94.99, 95, 96, 99.99, 101]) {
+    const decision = setupCancelled(candle(close), range, config.openingLowToleranceRanges).fired;
+    const watching = new OrbOptionsEngine(config); watching.setRange("CRWV", range); feed(watching, 1, close);
+    assert.equal(watching.snapshot().symbols.CRWV!.endReason === "opening_low_failed", decision, `watching, close ${close}`);
+    const pending = new OrbOptionsEngine(config); feed(pending, 1, close); pending.setRange("CRWV", range);
+    assert.equal(pending.snapshot().symbols.CRWV!.endReason === "opening_low_failed", decision, `pending, close ${close}`);
+    // The replay's bar reading of the same candle.
+    const bar = (minute: number, c: number) => ({ begins_at: new Date(minute * 60000).toISOString(), high_price: String(Math.max(c, 103)), low_price: String(Math.min(c, 100)),
+      open_price: String(c), close_price: String(c), session: "reg" });
+    const raw = { data: { results: [{ symbol: "CRWV", interval: "minute", bounds: "regular", bars: [bar(0, 102), { ...bar(1, 104), high_price: "105" }, bar(2, close), bar(3, close)] }] } };
+    assert.equal(replayOpeningRange(raw, "CRWV", 0).outcome === "disqualified", decision, `replay, close ${close}`);
+  }
+});
+
+test("the engine's protective stop is the rule's decision on each candle after entry", () => {
+  for (const close of [98, 99.89, 99.9, 99.91, 100, 104]) {
+    const e = new OrbOptionsEngine(config); e.setRange("CRWV", range);
+    assert.equal(acts(e.observe("CRWV", 106, END + 1000))[0]?.kind, "enter_calls"); e.confirmEntry("CRWV", id, 4, 106, 4, 2);
+    const p = e.snapshot().symbols.CRWV!.position!, decision = protectiveStopHit(candle(close), p.stopLevel, p.stopAnchor).fired;
+    const sold = acts(feed(e, 1, close)).some(i => i.kind === "sell_to_close" && i.reason === "protective_stop");
+    assert.equal(sold, decision, `close ${close} against ${p.stopLevel}`);
+  }
+});
+
+test("the engine's breakout is the rule's decision", () => {
+  for (const price of [104.99, 105, 105.01, 106]) {
+    const e = new OrbOptionsEngine(config); e.setRange("CRWV", range);
+    assert.equal(acts(e.observe("CRWV", price, END + 1000))[0]?.kind === "enter_calls", breakoutAbove(price, range).fired, `breakout at ${price}`);
+  }
 });
 
 test("every settings row checks its own range and integer-ness", () => {
@@ -82,8 +123,18 @@ test("every settings row has a default the config pins and a unique chat name", 
 });
 
 test("a saved run's config hash does not move: same settings, same JSON, key for key", () => {
-  // Pinned from main before the settings table existed (strategy 0.9.0 defaults). A changed hash makes re-configuring
-  // a saved run ID with identical settings fail as "different settings".
+  // Pinned at strategy 0.10.0's defaults: the 0.9.0 key order, then each new setting appended. A changed hash makes
+  // re-configuring a saved run ID with identical settings fail as "different settings".
   const json = JSON.stringify(openingRangeConfig({ date: "2026-09-14", symbols: ["CRWV", "NOW"], includePremarketLeadMinutes: 0 }));
-  assert.equal(createHash("sha256").update(json).digest("hex"), "e0d18e9ab01988d17a31110724f2592e20953a2c79b151d6395eee01131c6b34");
+  assert.equal(createHash("sha256").update(json).digest("hex"), "17ad250ae9b4c7d60e1ec70bd171f7d7f66a432742a3146fcfc6e532921ee558");
+});
+
+test("each settings row's chat unit is pinned, so a mislabelled unit cannot pass the round trip", () => {
+  assert.deepEqual(Object.fromEntries(SETTING_KEYS.map(k => [k, SETTINGS[k].mcp.unit])), {
+    entryWindowMinutes: "whole", budgetCentsPerPosition: "dollars", budgetCentsPerDay: "dollars", minimumContracts: "whole",
+    maximumContractsPerTrade: "whole", maximumPositions: "whole", maxOptionSpreadFraction: "percent", feeReserveCentsPerContract: "whole",
+    firstTargetMultiple: "multiple", middleTargetMultiple: "multiple", finalTargetMultiple: "multiple", backstopFraction: "percent",
+    stopBufferFraction: "percent", flattenLeadMinutes: "whole", pollMs: "seconds", maxQuoteAgeMs: "seconds", maxObservationGapMs: "seconds",
+    rangeDeadlineMs: "seconds", maxEntryQuoteBatches: "whole", maxEntryAttempts: "whole", heartbeatMs: "seconds", readFailureHaltMs: "seconds",
+    openingLowToleranceRanges: "multiple", candleMinutes: "whole" });
 });

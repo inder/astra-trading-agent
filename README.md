@@ -525,8 +525,13 @@ even if it later rallies; a wick or a single print below the low never does
 fixed grid from the range's end (9:32–9:34, 9:34–9:36, …), never a rolling window.
 A candle's close is the last trade Astra observed before the candle ended, not the
 exchange's official close; when Astra was not watching closely enough to know it,
-the journal says so (`candle_unobserved`) and no rule acts on that candle. A quote
-too old to act on still finishes a quiet stock's candles. Each entry re-reads the stock first. If that quote is a
+the journal says so (`candle_unobserved`) and no rule acts on that candle. A close counts
+only when Astra saw a fresh trade (at most `maxQuoteAgeSeconds` old) within
+`maxObservationGapSeconds` of the candle's end, so with the defaults a stock that has
+not traded in roughly the last 10 seconds of a candle gets no close for it: neither
+the cancel nor the protective stop acts on that candle (the option-price safety stop
+still does). A quote too old to act on can mark a candle as ended, but never supplies
+its price. Each entry re-reads the stock first. If that quote is a
 later trade back at or below the high, the attempt stops and the stock is watched
 again, so a later breakout can still buy while the low holds (`maxEntryAttempts`,
 default 3). A quote no newer than the breakout trade stops the attempt the same way

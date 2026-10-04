@@ -369,8 +369,9 @@ export class OrbOptionsEngine {
     }
     return intents;
   }
-  /** A quote too old to act on still says which candles have ended and at what price. It feeds only the candles (and
-   *  the stop anchor's low): never an entry, and never the observation-gap rules. */
+  /** A quote too old to act on can still say a candle has ended (its close then comes from the last fresh trade, if one
+   *  was seen near the end), but never supplies a price. It feeds only the candles (and the stop anchor's low): never an
+   *  entry, and never the observation-gap rules. */
   observeCandlesOnly(symbol: string, stockPrice: number, at: number, observedAt: number): OrbIntent[] {
     const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
     return this.#candles(symbol, s, stockPrice, at, observedAt, false);

@@ -247,7 +247,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       const fresh = this.#fresh(q);
       this.#latest.set(q.symbol, { price: q.price, tradeAt: q.tradeAt, fresh });
       if (!fresh) {
-        // Too old to act on, but still the last trade: it finishes a quiet stock's candles (cancel and stop only).
+        // Too old to act on: it can mark a candle as ended (the close is still the last fresh trade), never price one.
         const before = this.#engine.snapshot().symbols[q.symbol]!;
         if (this.#validTrade(q) && !(this.#saved.resumed && before.status !== "open")) {
           for (const intent of this.#engine.observeCandlesOnly(q.symbol, q.price!, Date.parse(q.tradeAt!), Date.parse(q.retrievedAt)))

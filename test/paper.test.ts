@@ -11,7 +11,7 @@ import { OrbPaperRuntime, sessionTimes } from "../src/orb-paper-runtime.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
 import type { AgentStrategy } from "../src/agent-strategies.ts";
 import { StepError } from "../src/paper-runtime.ts";
-import { EntrySkip } from "../src/orb-options.ts";
+import { EntrySkip, SETTINGS, SETTING_KEYS } from "../src/orb-options.ts";
 import type { PaperMarket } from "../src/paper-market.ts";
 import { date, open, close, id, setup, fixture, entered } from "./paper-fixture.ts";
 
@@ -801,6 +801,14 @@ test("chat settings arrive in human units and are pinned to the run in internal 
     defaults.maximumPositions, defaults.maxOptionSpreadFraction, defaults.feeReserveCentsPerContract, defaults.entryWindowMinutes], [200000, 400000, 4, null, 2, .2, 100, 90]);
   assert.deepEqual([defaults.firstTargetMultiple, defaults.middleTargetMultiple, defaults.finalTargetMultiple, defaults.backstopFraction, defaults.stopBufferFraction,
     defaults.flattenLeadMinutes], [2, 3, 5, .5, .001, 1]);
+  // Every settings row, sent explicitly at its default in chat units, pins exactly the defaults: each chat name maps to
+  // its own setting at the right scale (the configure schema is generated from the table, so this is the guard).
+  const chatDefaults = Object.fromEntries(SETTING_KEYS.filter(k => SETTINGS[k].default !== null).map(k => {
+    const { name, unit } = SETTINGS[k].mcp, v = SETTINGS[k].default as number;
+    return [name, unit === "dollars" ? v / 100 : unit === "percent" ? v * 100 : unit === "seconds" ? v / 1000 : v];
+  }));
+  const explicit = JSON.parse(((await configure({ runId: "explicit", ...chatDefaults })).content as any)[0].text).config;
+  assert.deepEqual({ ...explicit }, { ...defaults });
   // Exit settings: multiples as multiples, the backstop and stop buffer in percent.
   const exits = JSON.parse(((await configure({ runId: "exits", firstTargetMultiple: 1.5, middleTargetMultiple: 2.5, finalTargetMultiple: 4,
     backstopPercent: 40, stopBufferPercent: .7, flattenLeadMinutes: 5 })).content as any)[0].text).config;

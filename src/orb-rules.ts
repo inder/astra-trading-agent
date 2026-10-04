@@ -1,6 +1,6 @@
 // The opening-range strategy's rules, each written once. The engine, the paper runtime's view and the replay harness
-// call these; none of them restates a rule. A rule returns its decision with the evidence the journal records, so a
-// review can see why it fired. A new rule is a new function here plus its settings row in orb-options.ts SETTINGS.
+// call these; none of them restates a rule. A rule returns its decision with the observation behind it, so a caller
+// can record why it fired. A new rule is a new function here plus its settings row in orb-options.ts SETTINGS.
 
 /** The part of an opening range a rule reads. */
 export interface RangeLevels { high: number; low: number }

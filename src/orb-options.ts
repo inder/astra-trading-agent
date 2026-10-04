@@ -16,7 +16,7 @@ export interface SettingSpec { default: number | null; min: number; max: number;
   mcp: { name: string; unit: SettingUnit; description: string } }
 const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
   description: string): SettingSpec & { default: D } => ({ default: default_, min, max, integer, mcp: { name, unit, description } });
-/** User settings: the one table every layer reads. parseOrbOptionsConfig checks each row's range, orb-config fills its
+/** User settings: the one table every layer reads, in the order the chat tool lists them. parseOrbOptionsConfig checks each row's range, orb-config fills its
  *  default, and the MCP configure tool exposes it in human units. A new rule's setting is one row here. Premium is
  *  treated as money lost, so the caps are the risk control. maximumContractsPerTrade null = bounded only by the
  *  displayed ask size. Cross-setting constraints stay hand-written in parseOrbOptionsConfig. */
@@ -38,8 +38,6 @@ export const SETTINGS = {
     "Cents reserved per contract for fees inside the cap; default {default}."),
   // Exits (founder rules): sell ceil(n/2) at the first target, the last contract at the final target, any in between at the
   // middle; the stock-based stop sits a buffer below the opening-range low; the Robinhood backstop sells at a fraction of entry.
-  stopBufferFraction: setting(0.001, 0, 0.05, false, "stopBufferPercent", "percent",
-    "How far below the opening-range low the stock stop sits, in percent; default {default}."),
   firstTargetMultiple: setting(2, 1.1, 20, false, "firstTargetMultiple", "multiple",
     "Option bid as a multiple of entry at which half the contracts (rounded up) sell; default {default}x."),
   middleTargetMultiple: setting(3, 1.1, 50, false, "middleTargetMultiple", "multiple",
@@ -47,6 +45,8 @@ export const SETTINGS = {
   finalTargetMultiple: setting(5, 1.1, 100, false, "finalTargetMultiple", "multiple", "Multiple for the last contract; default {default}x."),
   backstopFraction: setting(0.5, 0.05, 0.95, false, "backstopPercent", "percent",
     "Robinhood safety stop as a percent of the entry premium; default {default}."),
+  stopBufferFraction: setting(0.001, 0, 0.05, false, "stopBufferPercent", "percent",
+    "How far below the opening-range low the stock stop sits, in percent; default {default}."),
   // Minutes before the close when everything still held sells and new entries stop (founder default 1 = 3:59 pm ET).
   flattenLeadMinutes: setting(1, 1, 60, true, "flattenLeadMinutes", "whole",
     "Minutes before the close when everything still held sells and new entries stop; default {default} (3:59 pm ET)."),
@@ -59,9 +59,6 @@ export const SETTINGS = {
   // How long after the first two-minute candle to keep retrying its bars before skipping a stock.
   rangeDeadlineMs: setting(60_000, 0, 600_000, true, "rangeDeadlineSeconds", "seconds",
     "How long after 9:32 ET to keep retrying the opening-range bars before skipping a stock; default {default}."),
-  // How long market-data reads may keep failing before the run halts.
-  readFailureHaltMs: setting(60_000, 5000, 900_000, true, "readFailureHaltSeconds", "seconds",
-    "How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default {default}."),
   // Entry quoting: batches of the nearest strikes quoted before giving up (15 x 20 = the old whole-catalog cap of 300).
   maxEntryQuoteBatches: setting(3, 1, 15, true, "maxEntryQuoteBatches", "whole",
     "Most batches of 20 nearest strikes quoted at an entry before skipping it; default {default}."),
@@ -73,6 +70,9 @@ export const SETTINGS = {
   // Journal heartbeat: latest prices, the price range seen, marks and read failures, between state changes.
   heartbeatMs: setting(60_000, 5000, 600_000, true, "heartbeatSeconds", "seconds",
     "Seconds between journal heartbeats (latest prices, price range seen, marks, read failures); default {default}."),
+  // How long market-data reads may keep failing before the run halts.
+  readFailureHaltMs: setting(60_000, 5000, 900_000, true, "readFailureHaltSeconds", "seconds",
+    "How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default {default}."),
 } as const satisfies Record<string, SettingSpec>;
 export type SettingKey = keyof typeof SETTINGS;
 export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];
@@ -81,7 +81,7 @@ export const ENTRY_WINDOW_MINUTES = SETTINGS.entryWindowMinutes;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 /** A setting's value is in its row's range (null only where the default is null). */
-const validSetting = (key: SettingKey, v: unknown) => (v === null && SETTINGS[key].default === null) || inRange(v, SETTINGS[key], SETTINGS[key].integer);
+export const validSetting = (key: SettingKey, v: unknown) => (v === null && SETTINGS[key].default === null) || inRange(v, SETTINGS[key], SETTINGS[key].integer);
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
   const keys: string[] = ["date", "symbols", "openingRangeMinutes", "includePremarketLeadMinutes", ...SETTING_KEYS];

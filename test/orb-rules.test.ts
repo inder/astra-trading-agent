@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OrbOptionsEngine, SETTINGS, SETTING_KEYS, parseOrbOptionsConfig, replayOpeningRange, type OrbOptionsConfig } from "../src/orb-options.ts";
+import { createHash } from "node:crypto";
+import { OrbOptionsEngine, SETTINGS, SETTING_KEYS, replayOpeningRange, validSetting, type OrbOptionsConfig } from "../src/orb-options.ts";
 import { openingRangeConfig } from "../src/orb-config.ts";
-import { breakoutAbove, openingLowBroken, protectiveStopHit, protectiveStopLevel } from "../src/orb-rules.ts";
+import { breakevenStopHit, breakoutAbove, openingLowBroken, protectiveStopHit, protectiveStopLevel } from "../src/orb-rules.ts";
 
 // Each rule lives once in orb-rules.ts. These tests hold every caller to the same answer on the same input, because a
 // rule kept in two places drifts: one half changes and the other keeps the old behavior with its own tests still green.
@@ -54,15 +55,35 @@ test("the engine's protective stop fires exactly where the rule says", () => {
   }
 });
 
-test("every settings row is validated, defaulted and exposed under a unique chat name", () => {
+test("each rule's boundary is pinned outright, so a change to a rule itself fails here", () => {
+  const r = { high: 105, low: 100 };
+  assert.equal(openingLowBroken(100, r).fired, false); assert.equal(openingLowBroken(99.99, r).fired, true);
+  assert.equal(breakoutAbove(105, r).fired, false); assert.equal(breakoutAbove(105.01, r).fired, true);
+  assert.equal(protectiveStopLevel(r, 0.001), 99.9);
+  assert.equal(protectiveStopHit(99.9, 99.9).fired, false); assert.equal(protectiveStopHit(99.89, 99.9).fired, true);
+  assert.equal(breakevenStopHit(106, 106).fired, true); assert.equal(breakevenStopHit(106.01, 106).fired, false);
+});
+
+test("every settings row checks its own range and integer-ness", () => {
+  for (const key of SETTING_KEYS) {
+    const row = SETTINGS[key], step = row.integer ? 1 : Math.max(row.min, 0.001);
+    assert.ok(validSetting(key, row.min) && validSetting(key, row.max), `${key} accepts its bounds`);
+    assert.ok(!validSetting(key, row.min - step) && !validSetting(key, row.max + step), `${key} rejects beyond its bounds`);
+    assert.equal(validSetting(key, null), row.default === null, `${key} null only where the default is null`);
+    if (row.integer) assert.ok(!validSetting(key, row.min + 0.5), `${key} must be whole`);
+  }
+});
+
+test("every settings row has a default the config pins and a unique chat name", () => {
   const names = SETTING_KEYS.map(k => SETTINGS[k].mcp.name);
   assert.equal(new Set(names).size, names.length);
   const defaults = openingRangeConfig({ date: "2026-09-08", symbols: ["CRWV"], includePremarketLeadMinutes: 0 });
-  for (const key of SETTING_KEYS) {
-    const row = SETTINGS[key];
-    assert.equal(defaults[key], row.default, `${key} default`);
-    if (row.default === null) continue;
-    assert.throws(() => parseOrbOptionsConfig({ ...defaults, [key]: row.max + (row.integer ? 1 : row.max) }), `${key} above its range`);
-    assert.throws(() => parseOrbOptionsConfig({ ...defaults, [key]: row.min - (row.integer ? 1 : Math.max(row.min, 0.001)) }), `${key} below its range`);
-  }
+  for (const key of SETTING_KEYS) assert.equal(defaults[key], SETTINGS[key].default, `${key} default`);
+});
+
+test("a saved run's config hash does not move: same settings, same JSON, key for key", () => {
+  // Pinned from main before the settings table existed (strategy 0.9.0 defaults). A changed hash makes re-configuring
+  // a saved run ID with identical settings fail as "different settings".
+  const json = JSON.stringify(openingRangeConfig({ date: "2026-09-14", symbols: ["CRWV", "NOW"], includePremarketLeadMinutes: 0 }));
+  assert.equal(createHash("sha256").update(json).digest("hex"), "e0d18e9ab01988d17a31110724f2592e20953a2c79b151d6395eee01131c6b34");
 });

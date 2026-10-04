@@ -1,6 +1,7 @@
 import { EntrySkip, OrbOptionsEngine, backstopPrice, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type OrbCallSelection, type SaleReason } from "./orb-options.ts";
 import { CalendarCoverageError, sessionTimes } from "./daily-history.ts";
+import { protectiveStopLevel } from "./orb-rules.ts";
 import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperEvent, type PaperPosition, type PaperControl } from "./paper-runtime.ts";
 
@@ -387,7 +388,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       positions.push({ symbol, contractId: h.contract.id, strike: h.contract.strike, expiration: h.contract.expiration,
         quantity: p.remainingQuantity, entryPrice: h.entryPrice, entryStockPrice: p.entryStockPrice,
         markBid: mark?.bid ?? null, markAt: mark?.updatedAt ?? null, stage: p.stage, backstop: p.backstopPrice,
-        stop: p.stage === "breakeven" ? p.entryStockPrice : state.range!.low * (1 - this.#config.stopBufferFraction) });
+        stop: p.stage === "breakeven" ? p.entryStockPrice : protectiveStopLevel(state.range!, this.#config.stopBufferFraction) });
     }
     return { positions, committedCents: this.#saved.committedCents, realizedPnlCents: this.#saved.realizedPnlCents,
       unrealizedPnlCents: positions.some(p => p.markBid === null) ? null : positions.reduce((sum, p) => sum + Math.round((p.markBid! - p.entryPrice) * 10000 * p.quantity), 0),

@@ -1,87 +1,103 @@
 import { addDays, isTradingDay, isWeekEnder, sessionTimes, tradingSessionsBetween } from "./daily-history.ts";
+import { breakevenStopHit, breakoutAbove, openingLowBroken, protectiveStopHit, protectiveStopLevel } from "./orb-rules.ts";
 import { timestamp } from "./validation.ts";
 export interface CallQuote { id: string; bid: number; ask: number; askSize: number; updatedAt: string; retrievedAt: string }
 
-export interface OrbOptionsConfig {
-  date: string; symbols: string[]; openingRangeMinutes: 2; stopBufferFraction: number;
-  budgetCentsPerPosition: number; budgetCentsPerDay: number; minimumContracts: number; maximumContractsPerTrade: number | null;
-  maximumPositions: number; firstTargetMultiple: number; middleTargetMultiple: number; finalTargetMultiple: number; backstopFraction: number;
-  feeReserveCentsPerContract: number; maxOptionSpreadFraction: number;
-  maxQuoteAgeMs: number; maxObservationGapMs: number; pollMs: number; rangeDeadlineMs: number; readFailureHaltMs: number;
-  maxEntryQuoteBatches: number; maxEntryAttempts: number; heartbeatMs: number;
-  includePremarketLeadMinutes: 0 | 2; entryWindowMinutes: number; flattenLeadMinutes: number;
-}
+/** A run's pinned configuration: the run's identity plus one value per SETTINGS row, in internal units. */
+export type OrbOptionsConfig = { date: string; symbols: string[]; openingRangeMinutes: 2; includePremarketLeadMinutes: 0 | 2 }
+  & { [K in Exclude<SettingKey, "maximumContractsPerTrade">]: number } & { maximumContractsPerTrade: number | null };
 /** The opening range: the first two minutes of the regular session. A new run must start before it completes. */
 export const OPENING_RANGE_MINUTES = 2;
-/** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
-export const ENTRY_WINDOW_MINUTES = { default: 90, min: 5, max: 390 } as const;
-/** User settings: founder defaults and validated ranges, shared by the MCP schema and config parsing. Premium is treated
- *  as money lost, so the caps are the risk control. maximumContractsPerTrade null = bounded only by the displayed ask size. */
+/** How a setting is entered at the chat edge (MCP), versus its internal unit in the pinned config. */
+export type SettingUnit = "dollars" | "percent" | "seconds" | "whole" | "multiple";
+/** One user setting: the founder default, the validated range, and how the chat edge names and describes it.
+ *  `{default}` in the description is replaced by the default in the chat unit. */
+export interface SettingSpec { default: number | null; min: number; max: number; integer: boolean;
+  mcp: { name: string; unit: SettingUnit; description: string } }
+const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
+  description: string): SettingSpec & { default: D } => ({ default: default_, min, max, integer, mcp: { name, unit, description } });
+/** User settings: the one table every layer reads. parseOrbOptionsConfig checks each row's range, orb-config fills its
+ *  default, and the MCP configure tool exposes it in human units. A new rule's setting is one row here. Premium is
+ *  treated as money lost, so the caps are the risk control. maximumContractsPerTrade null = bounded only by the
+ *  displayed ask size. Cross-setting constraints stay hand-written in parseOrbOptionsConfig. */
 export const SETTINGS = {
-  budgetCentsPerPosition: { default: 200_000, min: 10_000, max: 5_000_000 },
-  budgetCentsPerDay: { default: 400_000, min: 10_000, max: 10_000_000 },
-  minimumContracts: { default: 4, min: 1, max: 100 },
-  maximumContractsPerTrade: { default: null, min: 1, max: 1_000_000 },
-  maximumPositions: { default: 2, min: 1, max: 10 },
-  maxOptionSpreadFraction: { default: 0.2, min: 0.01, max: 0.5 },
-  feeReserveCentsPerContract: { default: 100, min: 0, max: 1000 },
+  entryWindowMinutes: setting(90, 5, 390, true, "entryWindowMinutes", "whole",
+    "Minutes after the 9:30 ET open during which new entries may start; default {default} (11:00 ET). Open positions are managed all day."),
+  budgetCentsPerPosition: setting(200_000, 10_000, 5_000_000, true, "maxPremiumPerTradeDollars", "dollars",
+    "Most premium one trade may commit, treated as money that can be lost entirely; default {default}."),
+  budgetCentsPerDay: setting(400_000, 10_000, 10_000_000, true, "maxPremiumPerDayDollars", "dollars",
+    "Most premium committed per day across trades (sales never refund it); default {default}."),
+  minimumContracts: setting(4, 1, 100, true, "minimumContracts", "whole",
+    "Fewest contracts per entry; the strike nearest the money that fits this many is chosen, then filled to the cap. Default {default}."),
+  maximumContractsPerTrade: setting(null, 1, 1_000_000, true, "maximumContractsPerTrade", "whole",
+    "Optional ceiling on contracts per entry; by default only the displayed ask size limits the fill."),
+  maximumPositions: setting(2, 1, 10, true, "maximumPositions", "whole", "Most stocks entered per day; default {default}."),
+  maxOptionSpreadFraction: setting(0.2, 0.01, 0.5, false, "maxOptionSpreadPercent", "percent",
+    "Widest bid-ask spread accepted, as a percent of the midpoint; default {default}."),
+  feeReserveCentsPerContract: setting(100, 0, 1000, true, "feeReserveCentsPerContract", "whole",
+    "Cents reserved per contract for fees inside the cap; default {default}."),
   // Exits (founder rules): sell ceil(n/2) at the first target, the last contract at the final target, any in between at the
   // middle; the stock-based stop sits a buffer below the opening-range low; the Robinhood backstop sells at a fraction of entry.
-  stopBufferFraction: { default: 0.001, min: 0, max: 0.05 },
-  firstTargetMultiple: { default: 2, min: 1.1, max: 20 },
-  middleTargetMultiple: { default: 3, min: 1.1, max: 50 },
-  finalTargetMultiple: { default: 5, min: 1.1, max: 100 },
-  backstopFraction: { default: 0.5, min: 0.05, max: 0.95 },
+  stopBufferFraction: setting(0.001, 0, 0.05, false, "stopBufferPercent", "percent",
+    "How far below the opening-range low the stock stop sits, in percent; default {default}."),
+  firstTargetMultiple: setting(2, 1.1, 20, false, "firstTargetMultiple", "multiple",
+    "Option bid as a multiple of entry at which half the contracts (rounded up) sell; default {default}x."),
+  middleTargetMultiple: setting(3, 1.1, 50, false, "middleTargetMultiple", "multiple",
+    "Multiple for contracts between the first half and the last one; default {default}x."),
+  finalTargetMultiple: setting(5, 1.1, 100, false, "finalTargetMultiple", "multiple", "Multiple for the last contract; default {default}x."),
+  backstopFraction: setting(0.5, 0.05, 0.95, false, "backstopPercent", "percent",
+    "Robinhood safety stop as a percent of the entry premium; default {default}."),
   // Minutes before the close when everything still held sells and new entries stop (founder default 1 = 3:59 pm ET).
-  flattenLeadMinutes: { default: 1, min: 1, max: 60 },
+  flattenLeadMinutes: setting(1, 1, 60, true, "flattenLeadMinutes", "whole",
+    "Minutes before the close when everything still held sells and new entries stop; default {default} (3:59 pm ET)."),
   // Market-data timing. The gap rule itself is an invariant (never infer an unobserved price path); its length is a setting.
-  pollMs: { default: 1000, min: 250, max: 30_000 },
-  maxQuoteAgeMs: { default: 5000, min: 1000, max: 60_000 },
-  maxObservationGapMs: { default: 5000, min: 1000, max: 60_000 },
+  pollMs: setting(1000, 250, 30_000, true, "pollSeconds", "seconds", "Seconds between market-data polls; default {default}."),
+  maxQuoteAgeMs: setting(5000, 1000, 60_000, true, "maxQuoteAgeSeconds", "seconds",
+    "Oldest a stock or option quote may be when fetched and still be acted on; default {default}; at least one poll."),
+  maxObservationGapMs: setting(5000, 1000, 60_000, true, "maxObservationGapSeconds", "seconds",
+    "Longest gap between observations before a watched stock is dropped for the day, so an unseen price path is never assumed; default {default}; at least two polls."),
   // How long after the first two-minute candle to keep retrying its bars before skipping a stock.
-  rangeDeadlineMs: { default: 60_000, min: 0, max: 600_000 },
+  rangeDeadlineMs: setting(60_000, 0, 600_000, true, "rangeDeadlineSeconds", "seconds",
+    "How long after 9:32 ET to keep retrying the opening-range bars before skipping a stock; default {default}."),
   // How long market-data reads may keep failing before the run halts.
-  readFailureHaltMs: { default: 60_000, min: 5000, max: 900_000 },
+  readFailureHaltMs: setting(60_000, 5000, 900_000, true, "readFailureHaltSeconds", "seconds",
+    "How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default {default}."),
   // Entry quoting: batches of the nearest strikes quoted before giving up (15 x 20 = the old whole-catalog cap of 300).
-  maxEntryQuoteBatches: { default: 3, min: 1, max: 15 },
+  maxEntryQuoteBatches: setting(3, 1, 15, true, "maxEntryQuoteBatches", "whole",
+    "Most batches of 20 nearest strikes quoted at an entry before skipping it; default {default}."),
   // Entry attempts per stock per day (founder rule): an attempt whose own stock quote is back at or below the opening high
   // returns the stock to watching, so a later breakout still enters while the low holds. 1 = the first attempt only. A
   // quote no newer than the breakout trade uses an attempt too: it bounds retries while a lagging feed repeats a trade.
-  maxEntryAttempts: { default: 3, min: 1, max: 10 },
+  maxEntryAttempts: setting(3, 1, 10, true, "maxEntryAttempts", "whole",
+    "Entry attempts per stock per day. An attempt whose own quote is back at or below the opening high (or is no newer than the breakout trade) uses one attempt and returns the stock to watching for a later breakout while the low holds; default {default}, 1 = the first attempt only."),
   // Journal heartbeat: latest prices, the price range seen, marks and read failures, between state changes.
-  heartbeatMs: { default: 60_000, min: 5000, max: 600_000 },
-} as const;
+  heartbeatMs: setting(60_000, 5000, 600_000, true, "heartbeatSeconds", "seconds",
+    "Seconds between journal heartbeats (latest prices, price range seen, marks, read failures); default {default}."),
+} as const satisfies Record<string, SettingSpec>;
+export type SettingKey = keyof typeof SETTINGS;
+export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];
+/** User-tunable minutes after the 9:30 open during which new entries may start (founder default 90 = 11:00 ET). */
+export const ENTRY_WINDOW_MINUTES = SETTINGS.entryWindowMinutes;
 const inRange = (v: unknown, r: { min: number; max: number }, integer = true) =>
   typeof v === "number" && (integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
+/** A setting's value is in its row's range (null only where the default is null). */
+const validSetting = (key: SettingKey, v: unknown) => (v === null && SETTINGS[key].default === null) || inRange(v, SETTINGS[key], SETTINGS[key].integer);
 export function parseOrbOptionsConfig(raw: unknown): OrbOptionsConfig {
   const c = raw as OrbOptionsConfig;
-  const keys = ["date", "symbols", "openingRangeMinutes", "stopBufferFraction", "budgetCentsPerPosition",
-    "budgetCentsPerDay", "minimumContracts", "maximumContractsPerTrade", "maximumPositions", "firstTargetMultiple", "middleTargetMultiple", "finalTargetMultiple", "backstopFraction",
-    "feeReserveCentsPerContract", "maxOptionSpreadFraction", "maxQuoteAgeMs", "maxObservationGapMs", "pollMs", "rangeDeadlineMs", "readFailureHaltMs",
-    "maxEntryQuoteBatches", "maxEntryAttempts", "heartbeatMs",
-    "includePremarketLeadMinutes", "entryWindowMinutes", "flattenLeadMinutes"];
+  const keys: string[] = ["date", "symbols", "openingRangeMinutes", "includePremarketLeadMinutes", ...SETTING_KEYS];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) ||
     c.symbols.length < 1 || c.symbols.length > 20 || new Set(c.symbols).size !== c.symbols.length ||
     c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) || c.openingRangeMinutes !== 2 ||
-    !inRange(c.stopBufferFraction, SETTINGS.stopBufferFraction, false) || !inRange(c.backstopFraction, SETTINGS.backstopFraction, false) ||
-    !inRange(c.firstTargetMultiple, SETTINGS.firstTargetMultiple, false) || !inRange(c.middleTargetMultiple, SETTINGS.middleTargetMultiple, false) ||
-    !inRange(c.finalTargetMultiple, SETTINGS.finalTargetMultiple, false) ||
+    SETTING_KEYS.some(k => !validSetting(k, c[k])) ||
     !(c.firstTargetMultiple < c.middleTargetMultiple && c.middleTargetMultiple < c.finalTargetMultiple) ||
-    !inRange(c.budgetCentsPerPosition, SETTINGS.budgetCentsPerPosition) || !inRange(c.budgetCentsPerDay, SETTINGS.budgetCentsPerDay) ||
-    c.budgetCentsPerDay < c.budgetCentsPerPosition || !inRange(c.minimumContracts, SETTINGS.minimumContracts) ||
-    !(c.maximumContractsPerTrade === null || (inRange(c.maximumContractsPerTrade, SETTINGS.maximumContractsPerTrade) && c.maximumContractsPerTrade >= c.minimumContracts)) ||
-    !inRange(c.maximumPositions, SETTINGS.maximumPositions) || !inRange(c.feeReserveCentsPerContract, SETTINGS.feeReserveCentsPerContract) ||
-    !inRange(c.maxOptionSpreadFraction, SETTINGS.maxOptionSpreadFraction, false) || !inRange(c.flattenLeadMinutes, SETTINGS.flattenLeadMinutes) ||
+    c.budgetCentsPerDay < c.budgetCentsPerPosition ||
+    !(c.maximumContractsPerTrade === null || c.maximumContractsPerTrade >= c.minimumContracts) ||
     // The cheapest possible contract is $0.01 (100 cents) plus the fee reserve: a minimum that can never fit trades nothing all day.
     c.minimumContracts * (100 + c.feeReserveCentsPerContract) > c.budgetCentsPerPosition ||
-    !inRange(c.pollMs, SETTINGS.pollMs) || !inRange(c.maxQuoteAgeMs, SETTINGS.maxQuoteAgeMs) || !inRange(c.maxObservationGapMs, SETTINGS.maxObservationGapMs) ||
-    !inRange(c.rangeDeadlineMs, SETTINGS.rangeDeadlineMs) || !inRange(c.readFailureHaltMs, SETTINGS.readFailureHaltMs) ||
-    !inRange(c.maxEntryQuoteBatches, SETTINGS.maxEntryQuoteBatches) || !inRange(c.maxEntryAttempts, SETTINGS.maxEntryAttempts) ||
-    !inRange(c.heartbeatMs, SETTINGS.heartbeatMs) || c.heartbeatMs < c.pollMs ||
+    c.heartbeatMs < c.pollMs ||
     // A poll must fit inside the gap twice (one missed poll is not a gap) and a quote must be allowed to age one poll.
     c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs || c.readFailureHaltMs < 2 * c.pollMs ||
-    ![0, 2].includes(c.includePremarketLeadMinutes) ||
-    !Number.isSafeInteger(c.entryWindowMinutes) || c.entryWindowMinutes < ENTRY_WINDOW_MINUTES.min || c.entryWindowMinutes > ENTRY_WINDOW_MINUTES.max)
+    ![0, 2].includes(c.includePremarketLeadMinutes))
     throw new Error("Invalid opening-range options configuration");
   return structuredClone(c);
 }
@@ -120,7 +136,7 @@ export function replayOpeningRange(raw: unknown, symbol: string, startMs: number
     const at = timestamp(b?.begins_at); if (at < range.endMs || b?.interpolated === true) continue;
     const high = Number(b.high_price), low = Number(b.low_price);
     if (!(high > 0 && low > 0 && high >= low)) throw new Error("Invalid replay bar");
-    const up = high > range.high, down = low < range.low;
+    const up = breakoutAbove(high, range).fired, down = openingLowBroken(low, range).fired;
     if (up && down) return { symbol, range, outcome: "ambiguous", eventAt: b.begins_at, eventPrice: null };
     if (down) return { symbol, range, outcome: "disqualified", eventAt: b.begins_at, eventPrice: low };
     if (up) {
@@ -268,7 +284,7 @@ export class OrbOptionsEngine {
     s.openingRange = structuredClone(range); s.range = { ...structuredClone(range), setup: "opening_range" }; s.status = "watching";
     // Trades observed while the bars were pending count: one beneath the low already ended the day. None of them can
     // enter (the entry rule is a level, so a stock still above the high enters on the next live observation).
-    if (s.lowAfterRangeEnd !== null && s.lowAfterRangeEnd < range.low) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
+    if (s.lowAfterRangeEnd !== null && openingLowBroken(s.lowAfterRangeEnd, range).fired) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
     s.lowAfterRangeEnd = null;
   }
   /** No usable opening range: the symbol has no route to an entry today. */
@@ -305,14 +321,15 @@ export class OrbOptionsEngine {
       // The founder's rule: a trade beneath the opening-range low ends the day for this symbol, even if it later rallies.
       // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
       if (at >= this.entryDeadline()!) this.disqualify(symbol, "entry_window_closed");
-      else if (stockPrice < s.openingRange.low) this.disqualify(symbol, "opening_low_failed");
-      else if (stockPrice > s.openingRange.high) return this.#reserve(symbol, stockPrice, at, observedAt, { ...structuredClone(s.openingRange), setup: "opening_range" });
+      else if (openingLowBroken(stockPrice, s.openingRange).fired) this.disqualify(symbol, "opening_low_failed");
+      else if (breakoutAbove(stockPrice, s.openingRange).fired) return this.#reserve(symbol, stockPrice, at, observedAt, { ...structuredClone(s.openingRange), setup: "opening_range" });
     }
     if (s.status !== "open" || !s.position || !s.range || s.pendingSale) return [];
     const p = s.position;
     // Before the first target: the opening-range stop. After it (founder ruling): the stock back to its entry price.
-    if (p.stage === "breakeven" ? stockPrice <= p.entryStockPrice : stockPrice < s.range.low * (1 - this.config.stopBufferFraction))
-      return this.#sellAll(symbol, p.stage === "breakeven" ? "breakeven_stop" : "protective_stop", stockPrice, at);
+    const stop = p.stage === "breakeven" ? breakevenStopHit(stockPrice, p.entryStockPrice)
+      : protectiveStopHit(stockPrice, protectiveStopLevel(s.range, this.config.stopBufferFraction));
+    if (stop.fired) return this.#sellAll(symbol, stop.reason, stockPrice, at);
     return [];
   }
   /** Option-price exits from a fresh bid: the simulated Robinhood backstop, then every newly reached target in one sale. */
@@ -348,7 +365,7 @@ export class OrbOptionsEngine {
   failEntry(symbol: string, retry?: { newerPrice: number | null }): "watching" | "skipped" | "disqualified" {
     const s = this.#need(symbol); if (s.status !== "entry_pending") throw new Error("No pending entry");
     this.#reserved--;
-    if (retry?.newerPrice != null && s.openingRange && retry.newerPrice < s.openingRange.low) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
+    if (retry?.newerPrice != null && s.openingRange && openingLowBroken(retry.newerPrice, s.openingRange).fired) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
     else s.status = retry && s.entryAttempts < this.config.maxEntryAttempts ? "watching" : "skipped";
     return s.status;
   }

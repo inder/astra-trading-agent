@@ -300,7 +300,7 @@ export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPos
 function validCandles(c: CandleState | undefined, gridStart: number, minutes: number): boolean {
   const n = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v));
   return !!c && Number.isSafeInteger(c.nextEnd) && c.nextEnd > gridStart && (c.nextEnd - gridStart) % (minutes * 60000) === 0 &&
-    n(c.lastPrice) && n(c.lastTradeMs) && n(c.lastObservedMs) && (c.lastPrice === null) === (c.lastTradeMs === null);
+    n(c.lastPrice) && n(c.lastTradeMs) && n(c.lastObservedMs) && n(c.unvouchedTradeMs) && (c.lastPrice === null) === (c.lastTradeMs === null);
 }
 export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;

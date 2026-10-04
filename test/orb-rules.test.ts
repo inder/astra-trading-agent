@@ -68,6 +68,19 @@ test("a lagging feed: a candle waits the quote-age limit for trades printed befo
   assert.deepEqual(feed(94, END + 119500, END + 122000), [], "the real last trade arrives late");
   assert.deepEqual(feed(95, END + 120500, END + 123000).map(c => c.close), [94], "the first trade at or after the end settles it");
 });
+test("a stale quote, polled every second, never supplies a close: not its own trade, not as the held trade later", () => {
+  // The reviewer's case: the last fresh look is 10 s before the end, then the feed lags 6 s (over the 5 s quote-age limit).
+  const st = newCandleState(END, 2), see = (p: number, t: number, o: number, fresh: boolean) => observeCandles(st, p, t, o, 2, 5000, 5000, fresh);
+  see(101, END + 110000, END + 110000, true);
+  const out: CandleClose[] = [];
+  for (let o = END + 111000; o <= END + 125000; o += 1000) out.push(...see(o - 6000 < END + 120000 ? 94 : 96, o - 6000, o, false));
+  assert.deepEqual(out.map(c => c.close), [null], "a stale trade from before the end makes the close unknown, never 94");
+  // A stale quote never becomes the held trade: a fresh trade after the end later finds the last FRESH trade as the
+  // candidate, and the stale stretch (no fresh look within 5 s of the end) leaves it unknown.
+  const st2 = newCandleState(END, 2), see2 = (p: number, t: number, o: number, fresh: boolean) => observeCandles(st2, p, t, o, 2, 5000, 5000, fresh);
+  see2(101, END + 118000, END + 118000, true); see2(94, END + 119000, END + 119500, false);
+  assert.deepEqual(see2(96, END + 120200, END + 120300, true).map(c => c.close), [null], "the held 101 was superseded by an untrusted 94: unknown");
+});
 test("the replay's bar candles agree with the candles built from the per-second path", () => {
   // A minute bar's path visits open, low, high, close; polled each second, the candle close is the last minute's close.
   const bars = Array.from({ length: 6 }, (_, i) => ({ at: END + i * 60000, close: 100 + (i % 3) - 1 }));

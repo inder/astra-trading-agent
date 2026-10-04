@@ -22,16 +22,19 @@ export function breakoutAbove(price: number, range: RangeLevels): RuleDecision<"
  *  official close), or null when Astra was not watching closely enough to know it. */
 export interface CandleClose { start: number; end: number; close: number | null; closeTradeAt: number | null }
 /** What a stock's candle builder remembers between observations. */
-export interface CandleState { nextEnd: number; lastPrice: number | null; lastTradeMs: number | null; lastObservedMs: number | null }
+export interface CandleState { nextEnd: number; lastPrice: number | null; lastTradeMs: number | null; lastObservedMs: number | null;
+  /** The newest trade time only a stale quote has shown: a trade after the held one that nothing fresh vouched for. */
+  unvouchedTradeMs: number | null }
 export const newCandleState = (gridStart: number, minutes: number): CandleState =>
-  ({ nextEnd: gridStart + minutes * 60000, lastPrice: null, lastTradeMs: null, lastObservedMs: null });
+  ({ nextEnd: gridStart + minutes * 60000, lastPrice: null, lastTradeMs: null, lastObservedMs: null, unvouchedTradeMs: null });
 /** Feed one observed trade (price, its trade time, when Astra fetched it); returns the candles it finishes, in order.
  *  A candle ends at B once a trade at or after B is seen (the feed is in time order) or, for a quiet stock, once a fetch
  *  lands settleMs past B: the most a fresh quote may lag, so a late-arriving trade from before B is still counted. Its
  *  close is the latest trade before B: this trade when it printed before B, else the one held from before, but only if
  *  Astra last saw a FRESH quote within maxGapMs of B. Otherwise the close is unknown and no rule may act on it: an
- *  unseen path is never inferred. A stale quote (fresh = false) can finish candles but never vouches for a close: a
- *  quiet stock and a frozen feed look the same from here. */
+ *  unseen path is never inferred. A stale quote (fresh = false) can only finish candles: it contributes no price (neither
+ *  as a close nor as the held trade) and never vouches, because a quiet stock, a lagging feed and a frozen one look the
+ *  same from here. A stale trade printed before the end makes that candle's close unknown. */
 export function observeCandles(state: CandleState, price: number, tradeMs: number, observedMs: number,
   minutes: number, settleMs: number, maxGapMs: number, fresh = true): CandleClose[] {
   if (state.lastObservedMs !== null && observedMs < state.lastObservedMs) return [];
@@ -40,15 +43,21 @@ export function observeCandles(state: CandleState, price: number, tradeMs: numbe
     const end = state.nextEnd;
     if (!((newer && tradeMs >= end) || observedMs >= end + settleMs)) break;
     let close: number | null = null, closeTradeAt: number | null = null;
-    if (newer && tradeMs < end) { close = price; closeTradeAt = tradeMs; }
-    else if (state.lastTradeMs !== null && state.lastTradeMs < end && state.lastObservedMs !== null && end - state.lastObservedMs <= maxGapMs) {
+    if (newer && tradeMs < end) {
+      // This quote's own trade printed before the end. Fresh, it is the close. Stale, it proves the held trade was not the
+      // last one, yet it cannot vouch that it is: a feed that late may still be missing trades. Unknown.
+      if (fresh) { close = price; closeTradeAt = tradeMs; }
+    } else if (state.lastTradeMs !== null && state.lastTradeMs < end && state.lastObservedMs !== null && end - state.lastObservedMs <= maxGapMs &&
+      // A stale quote showed a later trade before this end: the held trade was not the last one.
+      !(state.unvouchedTradeMs !== null && state.unvouchedTradeMs < end && state.unvouchedTradeMs > state.lastTradeMs)) {
       close = state.lastPrice; closeTradeAt = state.lastTradeMs;
     }
     closes.push({ start: end - length, end, close, closeTradeAt });
     state.nextEnd = end + length;
   }
-  if (newer) { state.lastPrice = price; state.lastTradeMs = tradeMs; }
-  if (fresh) state.lastObservedMs = observedMs;
+  // A stale quote contributes no price: it never becomes the held trade a later close reuses, and never vouches.
+  if (fresh) { if (newer) { state.lastPrice = price; state.lastTradeMs = tradeMs; } state.lastObservedMs = observedMs; }
+  else if (newer && (state.unvouchedTradeMs === null || tradeMs > state.unvouchedTradeMs)) state.unvouchedTradeMs = tradeMs;
   return closes;
 }
 /** The same candles from minute bars (the replay's reference): a candle's close is its last minute bar's close. */

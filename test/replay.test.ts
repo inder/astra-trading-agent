@@ -76,6 +76,7 @@ test("a replay through the paper service meets its claims: breakouts enter, a ca
   const result = await replayed();
   const claims = checkOracle(result, bars, date, settings, { enters: ["DEMOA", "DEMOC"], cancels: ["DEMOB"] });
   assert.deepEqual(claims.filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`), []);
+  assert.ok(claims.some(k => k.id === "DEMOA-stop-due" && k.pass && k.detail === "no candle owed a stop"));
   assert.deepEqual(claims.filter(k => k.modeled).map(k => k.id),
     ["DEMOA-size", "DEMOA-first-target", "DEMOA-closed", "DEMOC-size", "DEMOC-first-target", "DEMOC-closed"]);
   const cancel = result.events.find(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB")!;
@@ -102,6 +103,8 @@ test("the claims fail for the wrong reasons: a write-off, a stock dropped by ano
   const held = { at: open + 30 * 60000, type: "exit_triggered", data: { symbol: "DEMOA", exit: "protective_stop", candleEnd: new Date(open + 30 * 60000).toISOString(),
     observedClose: 51, stopLevel: 49.5 } };
   assert.ok(fails({ ...result, events: [...result.events, held] }, "DEMOA-stop"), "the bars closed that candle above the stop");
+  // A stop the bars say was due must have fired: raise DEMOA's stop level and the first candle after its entry owes one.
+  assert.ok(fails(edit("paper_entry", d => ({ ...d, stopLevel: 1000 })), "DEMOA-stop-due"), "a disabled stop cannot pass");
   // A cancel earlier than the end of the fixture's first candle closing under the cancel level is not the rule working.
   const early = { ...result, events: result.events.map(e => e.type === "setup_disqualified" && e.data.symbol === "DEMOB" ? { ...e, at: open + 120000 } : e) };
   assert.ok(checkOracle(early, bars, date, settings, { enters: [], cancels: ["DEMOB"] }).some(k => k.id === "DEMOB-cancel" && !k.pass));

@@ -27,11 +27,13 @@ export const newCandleState = (gridStart: number, minutes: number): CandleState 
   ({ nextEnd: gridStart + minutes * 60000, lastPrice: null, lastTradeMs: null, lastObservedMs: null });
 /** Feed one observed trade (price, its trade time, when Astra fetched it); returns the candles it finishes, in order.
  *  A candle ends at B once a trade at or after B is seen (the feed is in time order) or, for a quiet stock, once a fetch
- *  lands a poll past B. Its close is the latest trade before B: this trade when it printed before B, else the one held
- *  from before, but only if Astra last looked within maxGapMs of B. Otherwise the close is unknown and no rule may
- *  act on it: an unseen path is never inferred. */
+ *  lands settleMs past B: the most a fresh quote may lag, so a late-arriving trade from before B is still counted. Its
+ *  close is the latest trade before B: this trade when it printed before B, else the one held from before, but only if
+ *  Astra last saw a FRESH quote within maxGapMs of B. Otherwise the close is unknown and no rule may act on it: an
+ *  unseen path is never inferred. A stale quote (fresh = false) can finish candles but never vouches for a close: a
+ *  quiet stock and a frozen feed look the same from here. */
 export function observeCandles(state: CandleState, price: number, tradeMs: number, observedMs: number,
-  minutes: number, settleMs: number, maxGapMs: number): CandleClose[] {
+  minutes: number, settleMs: number, maxGapMs: number, fresh = true): CandleClose[] {
   if (state.lastObservedMs !== null && observedMs < state.lastObservedMs) return [];
   const length = minutes * 60000, newer = state.lastTradeMs === null || tradeMs > state.lastTradeMs, closes: CandleClose[] = [];
   for (;;) {
@@ -46,7 +48,7 @@ export function observeCandles(state: CandleState, price: number, tradeMs: numbe
     state.nextEnd = end + length;
   }
   if (newer) { state.lastPrice = price; state.lastTradeMs = tradeMs; }
-  state.lastObservedMs = observedMs;
+  if (fresh) state.lastObservedMs = observedMs;
   return closes;
 }
 /** The same candles from minute bars (the replay's reference): a candle's close is its last minute bar's close. */

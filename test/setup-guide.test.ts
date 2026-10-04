@@ -62,7 +62,7 @@ test("once connected it explains the strategy with the setting defaults, then as
       `${dollars(SETTINGS.budgetCentsPerDay.default)} per day`]],
     ["Which option:", [`at least ${SETTINGS.minimumContracts.default} contracts`, "expiring Friday, September 18"]],
     ["Exits:", [`reaches ${SETTINGS.firstTargetMultiple.default}x`, `at ${SETTINGS.finalTargetMultiple.default}x`, `at ${SETTINGS.middleTargetMultiple.default}x`]],
-    ["Stops:", ["candle closing below the lowest price from the open to the purchase", "until everything is sold", `${SETTINGS.backstopFraction.default * 100}% of its entry price`, "at 3:59 PM ET"]],
+    ["Stops:", ["candle closing below the lowest price from the opening range to the purchase", "until everything is sold", `${SETTINGS.backstopFraction.default * 100}% of its entry price`, "at 3:59 PM ET"]],
     ["Premium", ["money you can lose in full", "a setting you can change"]],
   ];
   for (const [prefix, parts] of expect) for (const part of parts) assert.ok(line(prefix).includes(part), `${prefix} ${part}`);

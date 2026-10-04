@@ -61,6 +61,13 @@ test("candles close on the fixed grid from the range's end, from observed trades
   assert.deepEqual(observeCandles(three, 100, END + 180000, END + 180000, 3, settle, gap).map(c => [c.start, c.end]), [[END, END + 180000]]);
 });
 
+test("a lagging feed: a candle waits the quote-age limit for trades printed before its end, so the real last trade is its close", () => {
+  const st = newCandleState(END, 2), feed = (p: number, t: number, o: number) => observeCandles(st, p, t, o, 2, 5000, 5000);
+  feed(101, END + 117000, END + 118000);
+  assert.deepEqual(feed(101, END + 118000, END + 121000), [], "a second past the end, the feed still shows a trade from before it");
+  assert.deepEqual(feed(94, END + 119500, END + 122000), [], "the real last trade arrives late");
+  assert.deepEqual(feed(95, END + 120500, END + 123000).map(c => c.close), [94], "the first trade at or after the end settles it");
+});
 test("the replay's bar candles agree with the candles built from the per-second path", () => {
   // A minute bar's path visits open, low, high, close; polled each second, the candle close is the last minute's close.
   const bars = Array.from({ length: 6 }, (_, i) => ({ at: END + i * 60000, close: 100 + (i % 3) - 1 }));

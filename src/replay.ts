@@ -88,9 +88,9 @@ export function checkOracle(result: ReplayResult, regular: BarsFile, date: strin
   const of = (type: string, symbol?: string) => result.events.filter(e => e.type === type && (!symbol || e.data?.symbol === symbol));
   const add = (id: string, claim: string, modeled: boolean, pass: boolean, detail: string) => claims.push({ id, claim, modeled, pass, detail });
   // Nothing may pass by default: a write-off, a deferred sale, a data gap or a halt would also leave nothing held at the close.
-  const unclean = [...of("written_off"), ...of("sale_deferred"), ...of("data_gap"),
+  const unclean = [...of("written_off"), ...of("sale_deferred"), ...of("data_gap"), ...of("candle_unobserved"),
     ...of("setup_disqualified").filter(e => ["observation_gap", "range_unavailable", "late_first_quote"].includes(e.data.reason))];
-  add("clean", "the session ran to the close with no write-off, deferred sale, data gap, halt or data-driven disqualification", false,
+  add("clean", "the session ran to the close with no write-off, deferred sale, data gap, unobserved candle, halt or data-driven disqualification", false,
     !result.halted && result.complete && result.ordersSubmitted === 0 && !unclean.length,
     result.halted ? `halted: ${result.halted}` : unclean.map(e => e.type + (e.data.reason ? `:${e.data.reason}` : "")).join(", ") || "clean");
   for (const symbol of expected.cancels) {
@@ -120,6 +120,14 @@ export function checkOracle(result: ReplayResult, regular: BarsFile, date: strin
     add(`${symbol}-stop`, `${symbol}'s protective stop, if it fired, fired on a candle whose bar close is beneath its stop level`, false,
       stops.every(e => { const k = o.candles.find(k => k.end === Date.parse(e.data.candleEnd)); return !!k && k.close! < e.data.stopLevel; }),
       stops.length ? stops.map(e => `candle ending ${e.data.candleEnd} closed ${e.data.observedClose} under ${e.data.stopLevel}`).join("; ") : "never fired");
+    // And the reverse: the first candle after the entry that the bars close under the stop level, while contracts are still
+    // held, must be the one the stop fired on. Without this a disabled stop would pass every other claim.
+    const entryAt = entries[0]?.at, soldOutAt = (() => { let left = n; for (const s of sales) { left -= s.data.quantity; if (left <= 0) return s.at; } return Infinity; })();
+    const due = entry && entryAt !== undefined ? o.candles.find(k => k.end > entryAt && k.close! < entry.stopLevel) : undefined;
+    const owed = due && due.end <= soldOutAt ? due : undefined;
+    add(`${symbol}-stop-due`, `${symbol}'s protective stop fires on the first candle the bars close under its stop level while it is held`, false,
+      !owed || stops.some(e => Date.parse(e.data.candleEnd) === owed.end),
+      owed ? `bars close ${owed.close} under ${entry.stopLevel} at ${et(owed.end)}; stop ${stops.length ? `fired on ${stops.map(e => e.data.candleEnd).join(", ")}` : "never fired"}` : "no candle owed a stop");
     const sold = sales.reduce((sum, s) => sum + s.data.quantity, 0), last = sales.at(-1);
     add(`${symbol}-closed`, `${symbol} is fully sold by 3:59 ET by a target, its protective stop or the close-out`, true,
       n > 0 && sold === n && !!last && last.at <= close - c.flattenLeadMinutes * 60000 && ["profit_target", "protective_stop", "session_close"].includes(last.data.reason),

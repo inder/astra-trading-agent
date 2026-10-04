@@ -131,7 +131,7 @@ function strategyLines(p: Plan, s: SessionInfo): string[] {
       (expiry ? `expiring ${expiry} (${rule}).` : `with ${rule}.`),
     `Exits: half the contracts (rounded up) sell when the option reaches ${p.first}x its entry price${p.first >= 2 ? ", which recovers at least the premium paid" : ""}; ` +
       `the last one sells at ${p.final}x and any in between at ${p.middle}x.`,
-    `Stops: from the purchase until everything is sold, a ${p.candleMinutes}-minute candle closing ${p.stopBuffer > 0 ? `more than ${percent(p.stopBuffer)} ` : ""}below the lowest price from the open to the purchase sells everything. ` +
+    `Stops: from the purchase until everything is sold, a ${p.candleMinutes}-minute candle closing ${p.stopBuffer > 0 ? `more than ${percent(p.stopBuffer)} ` : ""}below the lowest price from the opening range to the purchase sells everything. ` +
       `A safety stop sells if the option falls to ${percent(p.backstop)} of its entry price, and anything still held sells at ${s.closeOut}.`,
     "Premium is treated as money you can lose in full; the per-trade and per-day limits are the risk control. Every number here is a setting you can change.",
   ];

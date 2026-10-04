@@ -373,14 +373,14 @@ export class OrbOptionsEngine {
    *  the stop anchor's low): never an entry, and never the observation-gap rules. */
   observeCandlesOnly(symbol: string, stockPrice: number, at: number, observedAt: number): OrbIntent[] {
     const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
-    return this.#candles(symbol, s, stockPrice, at, observedAt);
+    return this.#candles(symbol, s, stockPrice, at, observedAt, false);
   }
   /** One observed trade through the candle builder: the cancel rule before entry, the protective stop after it. */
-  #candles(symbol: string, s: SymbolState, price: number, at: number, observedAt: number): OrbIntent[] {
+  #candles(symbol: string, s: SymbolState, price: number, at: number, observedAt: number, fresh = true): OrbIntent[] {
     const beforeEntry = ["forming", "watching", "entry_pending"].includes(s.status);
     if (beforeEntry && at >= this.#rangeEndMs) s.lowestTrade = Math.min(s.lowestTrade ?? price, price);
     const out: OrbIntent[] = [];
-    for (const c of observeCandles(s.candles, price, at, observedAt, this.config.candleMinutes, this.config.pollMs, this.config.maxObservationGapMs)) {
+    for (const c of observeCandles(s.candles, price, at, observedAt, this.config.candleMinutes, this.config.maxQuoteAgeMs, this.config.maxObservationGapMs, fresh)) {
       if (c.close === null) {
         // One note per stretch of unknown candles (a long gap would otherwise write one per candle).
         const last = out.at(-1);
@@ -488,7 +488,8 @@ export class OrbOptionsEngine {
         (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)) ||
         !(s.endEvidence === null || (typeof s.endEvidence === "object" && !Array.isArray(s.endEvidence))) || !validCandles(s.candles, this.#rangeEndMs, this.config.candleMinutes) ||
         !(s.lowestTrade === null || (Number.isFinite(s.lowestTrade) && s.lowestTrade > 0)) ||
-        !(s.lowestClose === null || (Number.isFinite(s.lowestClose.close) && s.lowestClose.close! > 0)))
+        !(s.lowestClose === null || (Number.isFinite(s.lowestClose.close) && s.lowestClose.close! > 0 && Number.isSafeInteger(s.lowestClose.start) &&
+          s.lowestClose.end > s.lowestClose.start && Number.isSafeInteger(s.lowestClose.end))))
         throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;

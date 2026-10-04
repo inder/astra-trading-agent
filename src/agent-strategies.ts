@@ -18,7 +18,7 @@ export interface AgentStrategy {
 
 export const openingRangeStrategy: AgentStrategy = {
   id: "opening-range-options", version: "0.10.0", name: "Opening-range call options",
-  description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a two-minute candle closing a full range height below its low first ends the day for that stock; after entry, a two-minute close below the day's low so far sells.",
+  description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a candle (by default two minutes) closing more than the set tolerance (by default one range height) below its low first ends the day for that stock; after entry, a candle closing below the day's low so far sells.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
   paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
   preview: input => openingRangeConfig(input),

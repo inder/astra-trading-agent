@@ -869,3 +869,39 @@ test("MCP client configures, starts, asks P&L, reviews a close, and reads the au
   await call("stop_paper_run", { runId: setup.runId });
   assert.equal((await call("list_paper_runs", {})).runs[0].status, "stopped");
 });
+
+test("the stop's anchor includes minute-bar lows between polls; if those bars can't be read it rests on what was seen", async t => {
+  const f = fixture(t, ["DEMOA"]); f.setLaterBarLow(97.5);
+  f.service.paper.configure({ ...setup, symbols: ["DEMOA"] }); await f.service.paper.start(setup.runId);
+  for (let t = 120000; t < 185000; t += 5000) { f.setTime(open + t); await f.service.paper.tick(setup.runId); }
+  f.setTime(open + 185000); f.prices.DEMOA = 106; await f.service.paper.tick(setup.runId);   // a bar since 9:32 dipped to 97.50
+  const entry = f.service.paper.status(setup.runId).events.find(e => e.type === "paper_entry")!.data as any;
+  assert.deepEqual([entry.anchorBarLow, entry.stopAnchor, entry.stopLevel], [97.5, 97.5, 97.5]);
+  const g = fixture(t, ["DEMOA"]); g.setLaterBarLow(97.5);
+  g.service.paper.configure({ ...setup, symbols: ["DEMOA"] }); await g.service.paper.start(setup.runId);
+  for (let t = 120000; t < 185000; t += 5000) { g.setTime(open + t); await g.service.paper.tick(setup.runId); }
+  g.setTime(open + 185000); g.prices.DEMOA = 106; const bars = g.market.bars;
+  g.market.bars = async () => { throw new Error("test-only bars outage"); };
+  await g.service.paper.tick(setup.runId); g.market.bars = bars;
+  const fallback = g.service.paper.status(setup.runId).events.find(e => e.type === "paper_entry")!.data as any;
+  assert.deepEqual([fallback.anchorBarLow, fallback.stopAnchor], [null, 100], "the entry still happens; the anchor is the range low and observed trades");
+});
+test("a cancel finished by a stale quote is journaled with its evidence, and a stale quote never vouches for a close", async t => {
+  const f = fixture(t, ["DEMOA"]);
+  const runtime = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0, maxObservationGapMs: 60000 }), f.market, f.options.clock);
+  f.setTime(open + 120000); f.prices.DEMOA = 101; await runtime.step();
+  for (let t = 5000; t <= 115000; t += 5000) { f.setTime(open + 120000 + t); f.prices.DEMOA = t < 115000 ? 101 : 94; await runtime.step(); }
+  // The feed then goes quiet: the last trade, 94 at 9:33:55, keeps coming back; a stale quote still finishes the candle.
+  f.staleStock(6000); f.setTime(open + 246000);   // a fetch the quote-age limit (5 s) past the candle end
+  const events = await runtime.step();
+  assert.deepEqual(events.filter(e => e.type === "setup_disqualified").map(e => [(e.data as any).reason, (e.data as any).observedClose, (e.data as any).staleQuote]),
+    [["opening_low_failed", 94, true]]);
+  // A feed that stays frozen: later candles end unobserved, journaled, and no rule acts on them.
+  const g = fixture(t, ["DEMOA"]);
+  const frozen = new OrbPaperRuntime(openingRangeConfig({ date, symbols: ["DEMOA"], includePremarketLeadMinutes: 0 }), g.market, g.options.clock);
+  g.setTime(open + 120000); g.prices.DEMOA = 104; await frozen.step();
+  g.staleStock(6000); g.prices.DEMOA = 90; const notes: any[] = [];
+  for (let t = 10000; t <= 250000; t += 10000) { g.setTime(open + 120000 + t); notes.push(...await frozen.step()); }
+  assert.ok(notes.some(e => e.type === "candle_unobserved"), "the frozen stretch is said");
+  assert.ok(!notes.some(e => e.type === "setup_disqualified" && (e.data as any).reason === "opening_low_failed"), "an unvouched close never cancels");
+});

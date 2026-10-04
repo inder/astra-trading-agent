@@ -246,9 +246,14 @@ export class OrbPaperRuntime implements PaperRuntime {
       this.#latest.set(q.symbol, { price: q.price, tradeAt: q.tradeAt, fresh });
       if (!fresh) {
         // Too old to act on, but still the last trade: it finishes a quiet stock's candles (cancel and stop only).
-        if (this.#validTrade(q) && !(this.#saved.resumed && this.#engine.snapshot().symbols[q.symbol]!.status !== "open"))
+        const before = this.#engine.snapshot().symbols[q.symbol]!;
+        if (this.#validTrade(q) && !(this.#saved.resumed && before.status !== "open")) {
           for (const intent of this.#engine.observeCandlesOnly(q.symbol, q.price!, Date.parse(q.tradeAt!), Date.parse(q.retrievedAt)))
             events.push(...await this.#handle(intent));
+          const after = this.#engine.snapshot().symbols[q.symbol]!;
+          if ((before.status === "watching" || before.status === "forming") && after.status === "disqualified")
+            events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt, staleQuote: true, ...after.endEvidence } });
+        }
         continue;
       }
       this.#saved.lastQuoteAt = q.tradeAt;

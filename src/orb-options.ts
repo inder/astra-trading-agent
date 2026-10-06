@@ -15,7 +15,7 @@ export type SettingUnit = "dollars" | "percent" | "seconds" | "whole" | "multipl
  *  `{default}` in the description is replaced by the default in the chat unit. */
 export interface SettingSpec { default: number | null; min: number; max: number; integer: boolean;
   mcp: { name: string; unit: SettingUnit; description: string } }
-const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
+export const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
   description: string): SettingSpec & { default: D } => ({ default: default_, min, max, integer, mcp: { name, unit, description } });
 /** User settings: the one table every layer reads, in the order the chat tool lists them. parseOrbOptionsConfig checks each row's range, orb-config fills its
  *  default, and the MCP configure tool exposes it in human units. A new rule's setting is one row here. Premium is

@@ -212,7 +212,7 @@ export class BoxPaperRuntime implements PaperRuntime {
       try { out = st.scanner!.push(st.queue[0]!, supportsAt); }
       catch (error) {
         if (!(error instanceof NeedsData)) throw error;
-        if (this.#inflight.has(`today:${symbol}`)) return;   // a read is already on its way
+        if (this.#inflight.has(`today:${symbol}`) || now < st.todayRetryAt) return;   // a read is on its way, or the last one failed a moment ago
         if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) { st.degraded = true; continue; }
         st.todayAttempts++; this.#fetchToday(symbol, st, now);
         return;
@@ -223,6 +223,8 @@ export class BoxPaperRuntime implements PaperRuntime {
   }
   /** Read today's minute bars in the background. A success makes them current and clears any degradation; a failure backs off. */
   #fetchToday(symbol: string, st: SymbolState, now: number): void {
+    // Today's bars share the prefetch's cap on reads in flight, so twenty stocks cannot ask at once; a symbol that is refused waits for its next turn.
+    if ([...this.#inflight].filter(k => k.startsWith("today:")).length >= MAX_IN_FLIGHT) return;
     this.#launch(`today:${symbol}`, TODAY_READ_DEADLINE_MS, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
       const result = r.ok ? ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute") : undefined;
       if (r.ok && Array.isArray(result?.bars)) {
@@ -230,7 +232,9 @@ export class BoxPaperRuntime implements PaperRuntime {
         st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; st.todayBackoffMs = this.#config.maxObservationGapMs;
       } else {
         this.#reads.failed("bars", this.#clock(), ev, r.ok ? new Error("No minute bars for the day") : r.error);
-        st.todayRetryAt = this.#clock() + st.todayBackoffMs; st.todayBackoffMs = Math.min(st.todayBackoffMs * 2, MAX_TODAY_BACKOFF_MS);
+        // A short pause between the first tries (the candle is waiting); once degraded, a doubling backoff.
+        st.todayRetryAt = this.#clock() + (st.degraded ? st.todayBackoffMs : this.#config.pollMs);
+        if (st.degraded) st.todayBackoffMs = Math.min(st.todayBackoffMs * 2, MAX_TODAY_BACKOFF_MS);
       }
       this.#drain(symbol, st, this.#clock(), ev);
     });

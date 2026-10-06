@@ -7,7 +7,7 @@ import { sessionTimes } from "../src/daily-history.ts";
 import { BOX_FIRST_HALF, BOX_SECOND_HALF, BREAKOUT, DAY, INSIDE_AFTER, PRE_BOX, laggardDailies, referenceBars, runawayDailies } from "./box-fixture.ts";
 
 // Every price here is invented, shaped like SOXL, RKT and IBM on 2026-10-05. Times are New York wall clock (the box
-// 9:46..10:12, the first close above it ending 10:14); a candle is named by its start.
+// 9:46 to 10:14, the first close above it on the candle that closes at 10:16); a candle is named by its start.
 const config = boxConfig(DAY, ["SOXL"]), gated = boxConfig(DAY, ["SOXL"], { useRunawayGate: 1 });
 const et = (iso: string) => new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" });
 const scan = (o = {}, c = config, daily = runawayDailies()) => scanDay(referenceBars(o), daily, c);
@@ -122,6 +122,7 @@ test("the reference day: one box, 9:46 to 10:14, floor 158.08, high 160.22, heig
   assert.deepEqual([b.decision!.direction, et(b.decision!.candleStart), et(b.decision!.candleEnd), b.decision!.close], ["up", "10:14", "10:16", 160.71]);
   assert.equal(scan({}, boxConfig(DAY, ["X"], { contractionMaxRatio: 0.7 })).boxes.filter(x => x.box.height === 2.14).length, 0, "at the old 0.7 this box is not found");
   assert.equal((b.support as any).kind, "anchored_vwap");
+  assert.equal(b.lowAtFormation, 158.08, "the support was judged against the low the box had when it formed");
 });
 test("the breakout candle would still fit under the height limit, yet it is not swallowed into the box", () => {
   const s = scan(), limit = config.maxBoxHeightAtr * s.atr!, b = s.boxes[0]!;

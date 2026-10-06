@@ -151,6 +151,7 @@ test("with the gate off (the default) a stock is journaled as watched, never as 
   const events = await flaky(() => {}, false);
   const verdict = of(events, "universe_checked")[0]!.data;
   assert.deepEqual([verdict.status, verdict.runaway, verdict.runawayGate], ["watched", null, "off"]);
+  assert.ok(timeline({ events, halted: null, complete: true, ordersSubmitted: 0, pollMs: 1000, firstTick: 0 }).some(l => /SOXL {2}watched \(runaway gate off\)/.test(l)), "the replay timeline names the gate-off verdict");
   assert.ok(!events.some(e => e.type === "universe_checked" && e.data.runaway === true));
   assert.equal(of(events, "box_decided").length, 1);
 });

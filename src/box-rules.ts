@@ -156,7 +156,7 @@ export interface BoxLevels { start: number; end: number; high: number; low: numb
 export interface BoxRecord {
   status: "live" | "decided" | "voided";
   box: { start: string; end: string; high: number; low: number; height: number; heightToAtr: number; candles: number; wickOutsideCandles: number };
-  support: unknown; formedAt: string; contractionAtFormation: Record<string, unknown>; contraction: Record<string, unknown>;
+  support: unknown; /** The box low when the box formed (the live low can later extend under it within the height limit); the support was judged against this. */ lowAtFormation: number; formedAt: string; contractionAtFormation: Record<string, unknown>; contraction: Record<string, unknown>;
   decision: { direction: "up" | "down"; candleStart: string; candleEnd: string; close: number } | null;
   voided: { reason: "candle_unobserved"; candleStart: string } | null;
   /** Long-only. Journaled for an up decision, never opened in this version. */
@@ -224,7 +224,7 @@ export function scanBoxes(candles: readonly Candle[], supportsAt: (asOf: number)
   return out;
 }
 
-interface LiveBox { from: number; to: number; high: number; low: number; wicks: number; support: unknown; formedAt: number; atFormation: Record<string, unknown> }
+interface LiveBox { from: number; to: number; high: number; low: number; lowAtFormation: number; wicks: number; support: unknown; formedAt: number; atFormation: Record<string, unknown> }
 /** A box the scanner has just formed, decided or voided. */
 export interface BoxEvent { type: "formed" | "decided" | "voided"; record: BoxRecord }
 /** Thrown by a `supportsAt` that cannot answer yet (the data it needs has not arrived). The scanner leaves its state exactly as
@@ -255,7 +255,7 @@ export class BoxScanner {
   }
   #record(l: LiveBox, status: BoxRecord["status"], extra: Partial<BoxRecord>): BoxRecord {
     const cs = this.#candles, c = this.#config, inside = cs.slice(l.from, l.to + 1), before = cs.slice(Math.max(0, l.from - c.contractionLookbackCandles), l.from);
-    return { status, box: this.#boxOf(l), support: l.support, formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
+    return { status, box: this.#boxOf(l), support: l.support, lowAtFormation: shown(l.lowAtFormation), formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
       contraction: { ...contraction(inside, before, c).evidence }, decision: null, voided: null, entries: null, ...extra };
   }
   /** The box still open, as it stands now. */
@@ -300,7 +300,7 @@ export class BoxScanner {
     if (!squeeze.fired) return [];
     const at = supportUnderBox(low, supportsAt(c.end), this.#atr, config);
     if (!at.fired) return [];
-    this.#live = { from: pending, to: i, high, low, wicks: 0, support: at.evidence.support, formedAt: c.end, atFormation: { ...squeeze.evidence } };
+    this.#live = { from: pending, to: i, high, low, lowAtFormation: low, wicks: 0, support: at.evidence.support, formedAt: c.end, atFormation: { ...squeeze.evidence } };
     return [{ type: "formed", record: this.#record(this.#live, "live", {}) }];
   }
   #end(l: LiveBox, status: "decided" | "voided", extra: Partial<BoxRecord>, i: number): BoxEvent[] {

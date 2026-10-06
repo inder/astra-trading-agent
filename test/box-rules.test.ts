@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BOX_SETTINGS, BOX_SETTING_KEYS, boxConfig, parseBoxConfig } from "../src/box-settings.ts";
-import { anchoredVwaps, barCandles, contraction, prepareDay, runawayGate, scanDay, sizedEntry, type Support, staticSupports, supportUnderBox, vwapBars, type Candle } from "../src/box-rules.ts";
+import { anchoredVwaps, barCandles, beforeBox, contraction, prepareDay, supportCluster, runawayGate, scanDay, sizedEntry, type Support, staticSupports, supportUnderBox, vwapBars, type Candle } from "../src/box-rules.ts";
 import { barCandleCloses } from "../src/orb-rules.ts";
 import { sessionTimes } from "../src/daily-history.ts";
 import { BOX_FIRST_HALF, BOX_SECOND_HALF, BREAKOUT, DAY, INSIDE_AFTER, PRE_BOX, laggardDailies, referenceBars, runawayDailies } from "./box-fixture.ts";
@@ -14,7 +14,7 @@ const scan = (o = {}, c = config, daily = runawayDailies()) => scanDay(reference
 
 test("settings: every number is a row with the founder's placeholder default, and out-of-range or unknown values are refused", () => {
   const d = Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, BOX_SETTINGS[k].default]));
-  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.15); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
+  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportKind], [20, 21, 2]); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
   assert.equal(d.contractionLookbackCandles, 5); assert.equal(d.riskCents, 50_000); assert.equal(d.breakoutLookbackSessions, 10); assert.equal(d.maxBelowHighFraction, 0.1);
   assert.equal(parseBoxConfig(config).symbols[0], "SOXL");
   assert.throws(() => boxConfig(DAY, ["SOXL"], { maxBoxHeightAtr: 5 }), /Invalid/);
@@ -116,13 +116,17 @@ test("the reference day: one box, 9:46 to 10:14, floor 158.08, high 160.22, heig
   assert.deepEqual([et(b.box.start), et(b.box.end)], ["09:46", "10:14"]);
   assert.equal(b.box.low, 158.08); assert.equal(b.box.high, 160.22); assert.equal(b.box.height, 2.14);
   assert.ok(Math.abs(b.box.heightToAtr - 2.14 / s.atr!) < 0.001 && b.box.heightToAtr < 0.25 && b.box.heightToAtr > 0.17, `${b.box.heightToAtr}`);
-  // The founder's real bars gave about 0.75: over the old 0.7 limit, under the 0.8 default.
+  // Measured against the session so far (the default since INTC 2026-10-06), the box is well under the 0.8 limit.
   const ratio = (b.contraction as any).ratio as number;
-  assert.ok(ratio > 0.7 && ratio <= 0.8 && (b.contraction as any).evaluable, `${ratio}`);
+  assert.ok(ratio > 0.5 && ratio <= 0.7 && (b.contraction as any).evaluable, `${ratio}`);
+  // Against only the five candles before it, the founder's real bars gave about 0.75: over the old 0.7 limit, under 0.8.
+  const local = scan({}, boxConfig(DAY, ["X"], { contractionBaseline: 0 })).boxes[0]!, localRatio = (local.contraction as any).ratio as number;
+  assert.ok(localRatio > 0.7 && localRatio <= 0.8, `${localRatio}`);
   assert.deepEqual([b.decision!.direction, et(b.decision!.candleStart), et(b.decision!.candleEnd), b.decision!.close], ["up", "10:14", "10:16", 160.71]);
-  assert.equal(scan({}, boxConfig(DAY, ["X"], { contractionMaxRatio: 0.7 })).boxes.filter(x => x.box.height === 2.14).length, 0, "at the old 0.7 this box is not found");
+  assert.equal(scan({}, boxConfig(DAY, ["X"], { contractionMaxRatio: 0.7, contractionBaseline: 0 })).boxes.filter(x => x.box.height === 2.14).length, 0, "at the old 0.7, against the candles just before it, this box is not found");
   assert.equal((b.support as any).kind, "anchored_vwap");
-  assert.equal(b.lowAtFormation, 158.08, "the support was judged against the low the box had when it formed");
+  // Against the session so far the box is quiet enough to form at the first bottom (158.15); the second (158.08) then extends it.
+  assert.equal(b.lowAtFormation, 158.15, "the support was judged against the low the box had when it formed");
 });
 test("the breakout candle would still fit under the height limit, yet it is not swallowed into the box", () => {
   const s = scan(), limit = config.maxBoxHeightAtr * s.atr!, b = s.boxes[0]!;
@@ -150,7 +154,8 @@ test("pre-box candles that happen to fit under the limit are not pulled into the
 
 test("near miss: a box a hair too tall is rejected, a hair shorter is accepted", () => {
   const s = scan(), ratio = 2.14 / s.atr!;
-  const tooTall = scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio - 0.003) * 1e3) / 1e3 }));
+  // The height rule does not depend on the contraction baseline; the local one keeps this fixture's later, shorter box.
+  const tooTall = scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio - 0.003) * 1e3) / 1e3, contractionBaseline: 0 }));
   // The 2.14-tall box is not accepted. A shorter one, starting later (after the first candle that would make it too tall), still forms.
   assert.ok(tooTall.boxes.length >= 1 && tooTall.boxes.every(b => b.box.height < 2.14 && et(b.box.start) !== "09:46"));
   assert.equal(scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio + 0.003) * 1e3) / 1e3 })).boxes.length, 1);
@@ -167,21 +172,21 @@ test("near miss: a box whose only support sits above it is rejected: a level abo
   // The only VWAPs anywhere near are at 175, above the box; the other supports are switched off.
   assert.equal(scan({ priorTypical: [175, 175, 175] }, boxConfig(DAY, ["X"], { useAverages: 0, useBrokenResistance: 0 })).boxes.length, 0);
   const at = (low: number, supports: Support[] = [{ kind: "average", label: "x", lo: 100, hi: 100 }], c = config) => supportUnderBox(low, supports, 10, c).fired;
-  assert.ok(at(100), "a support exactly at the box low counts"); assert.ok(at(101.5), "within the reach (0.15 ATR = 1.5) above it");
+  assert.ok(at(100), "a support exactly at the box low counts"); assert.ok(at(100.8), "within the reach (0.08 ATR = 0.8) above it");
   assert.ok(!at(99.99), "a support one cent above the box low is not its support"); assert.ok(!at(99.5), "a support half a point above");
   assert.ok(at(99.5, [{ kind: "average", label: "x", lo: 100, hi: 100 }], boxConfig(DAY, ["X"], { supportSlackAtr: 0.1 })), "slack is the founder's only tolerance for one above");
-  assert.ok(!at(101.51), "just past the reach");
+  assert.ok(!at(100.81), "just past the reach");
   const zone: Support[] = [{ kind: "broken_resistance", label: "zone", lo: 98, hi: 102 }];
-  assert.ok(at(100, zone), "a box low inside a support zone rests on it"); assert.ok(at(103.4, zone) && !at(103.6, zone), "reach is measured from the zone's top");
+  assert.ok(at(100, zone), "a box low inside a support zone rests on it"); assert.ok(at(102.7, zone) && !at(102.9, zone), "reach is measured from the zone's top");
   assert.ok(!at(97.5, zone), "a zone entirely above the box low is not a support");
 });
-test("near miss: a box 0.3 ATR above its nearest support is rejected, and one 0.1 ATR above it is accepted (the founder's supports were 0.05 and 0.12 ATR below)", () => {
+test("near miss: a box 0.12 ATR above its nearest support is rejected, and one 0.05 ATR above it is accepted (the founder's real supports were 0.04 and 0.05 ATR below)", () => {
   const s = scan(), atr = s.atr!, box = s.boxes[0]!, low = box.box.low;
   // Put the Oct 1 VWAP exactly `gap` ATRs under the box low by shifting the prior sessions' typical price.
   const vwapFor = (gap: number) => { const want = low - gap * atr, base = scanDay(referenceBars(), runawayDailies(), config).supports.find(x => x.label.includes("10-01"))!.lo; return want - base; };
   const run = (gap: number) => { const shift = vwapFor(gap); return scan({ priorTypical: [150, 153.5 + shift, 162 + shift] }, boxConfig(DAY, ["X"], { useBrokenResistance: 0, useAverages: 0, vwapMaxSessionsBack: 2 })); };
-  assert.equal(run(0.3).boxes.filter(b => b.box.height === 2.14).length, 0);
-  assert.equal(run(0.1).boxes.filter(b => b.box.height === 2.14).length, 1);
+  assert.equal(run(0.12).boxes.filter(b => b.box.height === 2.14).length, 0);
+  assert.equal(run(0.05).boxes.filter(b => b.box.height === 2.14).length, 1);
 });
 test("near miss: a box too short (under 10 minutes) is not a box", () => {
   assert.equal(scan({}, boxConfig(DAY, ["X"], { minBoxMinutes: 120 })).boxes.filter(b => b.status === "decided").length, 0);
@@ -239,10 +244,50 @@ test("a close at a new high inside a still-tight window does not discard the win
   assert.deepEqual([b.status, b.decision?.direction, et(b.decision!.candleEnd)], ["decided", "up", "10:16"]);
 });
 test("a candle that closes beyond the run before it cannot be the candle on which the box forms; it stays in the window and the box forms on the next candle", () => {
-  const plain = scan().boxes[0]!, formedEnd = Date.parse(plain.formedAt);
+  // The rule does not depend on the contraction baseline; the local one makes the box form on the 10:08 candle this test modifies.
+  const local = boxConfig(DAY, ["X"], { contractionBaseline: 0 }), plain = scan({}, local).boxes[0]!, formedEnd = Date.parse(plain.formedAt);
   // The candle the box forms on (ending 10:08, the fourth of the second half) now closes at a new high, still inside the height limit.
   const second = BOX_SECOND_HALF.map(c => [...c] as [number, number, number, number]); second[3] = [159.9, 160.26, 159.7, 160.25];   // calm (range 0.56), so contraction and support still hold on it
-  const b = scan({ second }).boxes.find(x => et(x.box.start) === "09:46")!;
+  const b = scan({ second }, local).boxes.find(x => et(x.box.start) === "09:46")!;
   assert.ok(b, "the window survived");
   assert.ok(Date.parse(b.formedAt) > formedEnd, `formed at ${b.formedAt}, not on the breakout candle ending ${plain.formedAt}`);
+});
+
+// ---- The daily-average supports, the session baseline and the cluster, without private bars (INTC 2026-10-06 shaped them).
+const linear = (n: number) => { const time = Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10)), close = time.map((_, i) => i + 1);
+  return { time, open: close, high: close.map(c => c + 0.5), low: close.map(c => c - 0.5), close }; };
+const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, ...o }), null)
+  .filter(x => x.kind === "average").map(x => [x.label, Math.round(x.lo * 1e6) / 1e6]));
+test("daily averages: the 20/21 SMA and EMA from the closes before the day, exact on a straight line", () => {
+  // Closes 1..60: a 20-day SMA is 50.5 and, on a straight line, a converged 20-day EMA lags by (20 - 1) / 2 too; the 21s give 50.
+  assert.deepEqual(averages(60), { "20-day SMA": 50.5, "20-day EMA": 50.5, "21-day SMA": 50, "21-day EMA": 50 });
+  assert.deepEqual(Object.keys(averages(41)), ["20-day SMA", "20-day EMA", "21-day SMA"], "an EMA needs twice its period of history: 41 sessions seed the 20 but not the 21");
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 0 })), ["20-day SMA", "21-day SMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 1 })), ["20-day EMA", "21-day EMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportLongPeriod: 20 })), ["20-day SMA", "20-day EMA"], "equal periods are not doubled");
+  assert.deepEqual(averages(60, { useAverages: 0 }), {});
+});
+test("the session baseline is every observed candle since 9:32 before the box; the local one is the few just before it", () => {
+  const c = (i: number, range: number, known = true): Candle => ({ start: i, end: i + 1, high: 100 + range, low: 100, close: known ? 100 : null });
+  const cs = [c(0, 2), c(1, 2, false), c(2, 2), c(3, 1), c(4, 1), c(5, 1), c(6, 1), c(7, 1), c(8, 0.2)];
+  assert.deepEqual(beforeBox(cs, 8, boxConfig(DAY, ["X"])).map(x => x.start), [0, 2, 3, 4, 5, 6, 7], "an unobserved candle earlier in the day is left out, never blocks");
+  assert.deepEqual(beforeBox(cs, 8, boxConfig(DAY, ["X"], { contractionBaseline: 0 })).map(x => x.start), [3, 4, 5, 6, 7]);
+});
+test("the cluster lists every level within reach of the box low, flags the ones above it, and measures the averages' spread", () => {
+  const cfg = boxConfig(DAY, ["X"]), reach = cfg.supportReachAtr * 10;   // ATR 10: reach 0.8
+  const supports: Support[] = [{ kind: "average", label: "20-day SMA", lo: 99.5, hi: 99.5 }, { kind: "average", label: "20-day EMA", lo: 100.05, hi: 100.05 },
+    { kind: "average", label: "21-day SMA", lo: 100 - reach - 0.01, hi: 100 - reach - 0.01 }, { kind: "anchored_vwap", label: "VWAP", lo: 102, hi: 102 }];
+  const k = supportCluster(100, supports, 10, cfg);
+  assert.deepEqual([k.withinReach, k.atOrBelow, k.above], [2, 1, 1]);
+  assert.deepEqual(k.levels.map(l => [l.label, l.fromBoxLowAtr, l.above]), [["20-day SMA", -0.05, false], ["20-day EMA", 0.005, true]]);
+  assert.equal(k.averagesSpreadAtr, 0.086, "the three averages span 99.19..100.05");
+  assert.equal(supportCluster(100, [supports[0]!], 10, cfg).averagesSpreadAtr, null, "one average has no spread");
+  const zone = supportCluster(100, [{ kind: "broken_resistance", label: "zone", lo: 99.5, hi: 101 }], 10, cfg).levels[0]!;
+  assert.deepEqual([zone.above, zone.fromBoxLowAtr], [false, 0], "a zone spanning the box low: not above it, and no distance (its edge is at the low)");
+  // The box's own support never comes from above: the 3-cent-higher EMA is listed, but the SMA under it is the support.
+  assert.equal(supportUnderBox(100, supports, 10, cfg).support!.label, "20-day SMA");
+});
+test("under the default settings the reference box is rejected when the height limit is a hair lower than it", () => {
+  const s = scan(), ratio = 2.14 / s.atr!;
+  assert.equal(scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio - 0.003) * 1e3) / 1e3 })).boxes.filter(b => b.box.height === 2.14).length, 0);
 });

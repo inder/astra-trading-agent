@@ -15,7 +15,10 @@ export const BOX_SETTINGS = {
   breakoutLookbackSessions: setting(10, 1, 120, true, "breakoutLookbackSessions", "whole", "A daily close through a prior resistance zone must have happened within this many sessions; default {default}."),
   // Supports (each type on or off: 1 or 0).
   useBrokenResistance: setting(1, 0, 1, true, "useBrokenResistance", "whole", "1 = a resistance zone the price closed above (and the high of that breakout session) is a support; 0 = not. Default {default}."),
-  useAverages: setting(1, 0, 1, true, "useAverages", "whole", "1 = the short and long moving averages are supports; 0 = not. Default {default}."),
+  useAverages: setting(1, 0, 1, true, "useAverages", "whole", "1 = the daily moving averages below are supports; 0 = not. Default {default}."),
+  averageSupportShortPeriod: setting(20, 2, 200, true, "averageSupportShortPeriod", "whole", "Sessions in the first daily moving average offered as a support; default {default}."),
+  averageSupportLongPeriod: setting(21, 2, 200, true, "averageSupportLongPeriod", "whole", "Sessions in the second daily moving average offered as a support; default {default}."),
+  averageSupportKind: setting(2, 0, 2, true, "averageSupportKind", "whole", "Which daily averages are supports: 0 = simple, 1 = exponential, 2 = both; default {default}."),
   useAnchoredVwaps: setting(1, 0, 1, true, "useAnchoredVwaps", "whole", "1 = a VWAP anchored at the regular-session open 1..N sessions back is a support; 0 = not. Default {default}."),
   vwapMaxSessionsBack: setting(3, 1, 5, true, "vwapMaxSessionsBack", "whole", "Anchor VWAPs at the open this many sessions back and fewer (1 to N); default {default}."),
   vwapIncludesToday: setting(1, 0, 1, true, "vwapIncludesToday", "whole", "1 = an anchored VWAP also counts today's minute bars up to the candle just finished (never later); 0 = through the prior close only. Default {default}."),
@@ -24,9 +27,10 @@ export const BOX_SETTINGS = {
   candleMinutes: SETTINGS.candleMinutes,   // one row, shared with the opening-range strategy: the same grid from 9:32 ET
   maxBoxHeightAtr: setting(0.25, 0.02, 2, false, "maxBoxHeightAtr", "multiple", "Tallest a box may be (highest high minus lowest low), in ATRs; default {default}."),
   minBoxMinutes: setting(10, 2, 120, true, "minBoxMinutes", "whole", "Shortest a box may last, in minutes; default {default}."),
-  supportReachAtr: setting(0.15, 0, 3, false, "supportReachAtr", "multiple", "How far above a support the box low may sit, in ATRs; default {default}. A support must be at or below the box low."),
+  supportReachAtr: setting(0.08, 0, 3, false, "supportReachAtr", "multiple", "How far above a support the box low may sit, in ATRs; default {default}. A support must be at or below the box low."),
   supportSlackAtr: setting(0, 0, 1, false, "supportSlackAtr", "multiple", "How far above the box low a support may still sit and count, in ATRs; default {default}: a level above the box low is resistance, never its support. Raise it only to tolerate a wick that pokes through a support."),
   // Contraction.
+  contractionBaseline: setting(1, 0, 1, true, "contractionBaseline", "whole", "What a box's candles must be quieter than: 1 = the session so far (every candle since 9:32 before the box), 0 = the candles just before the box (contractionLookbackCandles of them). Default {default}."),
   contractionLookbackCandles: setting(5, 2, 30, true, "contractionLookbackCandles", "whole", "Candles before the box whose mean range the box is compared with; default {default}."),
   contractionMaxRatio: setting(0.8, 0.05, 1, false, "contractionMaxRatio", "multiple", "Largest allowed mean candle range in the box's second half, as a multiple of the mean range before the box; default {default}."),
   // Journaled levels (no position is ever opened in this version).

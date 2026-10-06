@@ -202,4 +202,5 @@ test("every guide keeps the safety rules: no automatic start, resume or save; no
   }
   assert.match(SERVER_INSTRUCTIONS, /call get_readiness/); assert.match(SERVER_INSTRUCTIONS, /Never ask for passwords, codes or tokens/);
   assert.match(SERVER_INSTRUCTIONS, /only after the user says yes to the specific plan/); assert.match(SERVER_INSTRUCTIONS, /never places real orders/);
+  assert.doesNotMatch(SERVER_INSTRUCTIONS, /one options strategy/); assert.match(SERVER_INSTRUCTIONS, /well before 9:32/);
 });

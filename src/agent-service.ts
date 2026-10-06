@@ -383,6 +383,31 @@ export class TradingAgentService {
   }
   // Readiness must answer even when run storage can't be read.
   #guideOrNull() { try { return this.guide(); } catch { return null; } }
+  /** A support-box run's day, read back from its journal: each stock's verdict and supports, and its boxes (live, decided, voided or
+   *  expired) with their evidence (a live box is shown as formed: the journal records its formation, not each later extension; a box left open by a stopped or halted run is `unresolved`). Read-only; the journal is the only source, so nothing here is newer than what was written. */
+  supportSetups(runId: string) {
+    const run = this.paper.status(runId);
+    if (run.strategyId !== "support-box") throw new Error("This is not a support-box run");
+    type Box = Record<string, unknown> & { box: { start: string } };
+    const bySymbol = new Map<string, { verdict: unknown; supports: unknown; boxes: Map<string, Box>; unobservedCandles: number }>();
+    const of = (symbol: string) => { let s = bySymbol.get(symbol); if (!s) bySymbol.set(symbol, s = { verdict: null, supports: null, boxes: new Map(), unobservedCandles: 0 }); return s; };
+    for (let after = -1; ;) {
+      const pages = this.paper.events(runId, after, 100);
+      if (!pages.length) break;
+      for (const page of pages) {
+        for (const e of page.events) {
+          const d = e.data as { symbol?: string; box?: { start: string } } | undefined; if (!d?.symbol) continue;
+          if (e.type === "universe_checked") of(d.symbol).verdict = d;
+          else if (e.type === "supports") of(d.symbol).supports = d;
+          else if (e.type === "candle_unobserved") of(d.symbol).unobservedCandles++;
+          else if (e.type.startsWith("box_") && d.box) of(d.symbol).boxes.set(d.box.start, { ...(d as object), outcome: e.type === "box_formed" ? (run.status === "running" ? "live" : "unresolved") : e.type.slice(4) } as unknown as Box);
+        }
+        after = page.revision;
+      }
+    }
+    return { runId, date: run.date, runStatus: run.status, watchOnly: true, ordersSubmitted: 0, positions: 0, rangesFrom: "observed_trades",
+      symbols: [...bySymbol].map(([symbol, s]) => ({ symbol, verdict: s.verdict, supports: s.supports, boxes: [...s.boxes.values()], unobservedCandles: s.unobservedCandles })) };
+  }
   catalog() { return this.strategies.map(({ id, version, name, description, capabilities }) => ({ id, version, name, description, capabilities })); }
   #strategy(id: string) {
     const strategy = this.strategies.find(s => s.id === id);

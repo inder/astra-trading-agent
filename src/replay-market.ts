@@ -2,11 +2,12 @@ import { preferredWeeklyExpiration, type CallQuote, type OrbCallContract } from 
 import { addDays, isWeekEnder, sessionTimes } from "./daily-history.ts";
 import type { EquityMarketQuote } from "./market-data.ts";
 import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
+import type { DailyBars } from "./levels.ts";
 
 // A replay market: REAL minute bars drive the stock side; the option side is MODELED (Black-Scholes at a stated
 // volatility) because historical option quotes are not available. Nothing here contains market data.
 
-export interface MinuteBar { begins_at: string; open_price: string; high_price: string; low_price: string; close_price: string; session?: string; interpolated?: boolean }
+export interface MinuteBar { begins_at: string; open_price: string; high_price: string; low_price: string; close_price: string; volume?: string; session?: string; interpolated?: boolean }
 export interface BarsFile { data: { results: { symbol: string; interval: string; bounds: string; bars: MinuteBar[] }[] } }
 
 const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
@@ -49,13 +50,23 @@ export interface ReplayMarketOptions {
   /** Modeled bid-ask spread as a fraction of the option's value (at least one tick each side). */
   spreadFraction?: number;
   askSize?: number;
+  /** Daily history per symbol (sessions before the replayed day), for strategies that read it; without it the market offers none. */
+  daily?: Record<string, DailyBars>;
 }
 export class ReplayMarket implements PaperMarket {
-  #o: Required<Omit<ReplayMarketOptions, "extended">> & { extended?: BarsFile };
+  #o: Required<Omit<ReplayMarketOptions, "extended" | "daily">> & { extended?: BarsFile; daily?: Record<string, DailyBars> };
   #bars = new Map<string, Map<number, MinuteBar>>();
   #contracts = new Map<string, OrbCallContract>();
+  /** Present only when the replay was given daily history (a market without it journals that context as unavailable). */
+  dailyBars?: PaperMarket["dailyBars"];
   constructor(options: ReplayMarketOptions) {
     this.#o = { barLagMs: 0, spreadFraction: 0.04, askSize: 50, ...options };
+    const daily = options.daily;
+    if (daily) this.dailyBars = async (symbol, startMs, endMs) => {
+      const all = daily[symbol]; if (!all) throw new Error(`No daily bars for ${symbol}`);
+      const keep = all.time.map((t, i) => Date.parse(`${t}T12:00:00Z`) >= startMs - 86400000 && Date.parse(`${t}T00:00:00Z`) <= endMs ? i : -1).filter(i => i >= 0);
+      return { bars: { time: keep.map(i => all.time[i]!), open: keep.map(i => all.open[i]!), high: keep.map(i => all.high[i]!), low: keep.map(i => all.low[i]!), close: keep.map(i => all.close[i]!) } };
+    };
     for (const r of options.regular.data.results)
       this.#bars.set(r.symbol, new Map(r.bars.map(b => [Date.parse(b.begins_at), b])));
   }

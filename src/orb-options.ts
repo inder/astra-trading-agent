@@ -15,7 +15,7 @@ export type SettingUnit = "dollars" | "percent" | "seconds" | "whole" | "multipl
  *  `{default}` in the description is replaced by the default in the chat unit. */
 export interface SettingSpec { default: number | null; min: number; max: number; integer: boolean;
   mcp: { name: string; unit: SettingUnit; description: string } }
-const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
+export const setting = <D extends number | null>(default_: D, min: number, max: number, integer: boolean, name: string, unit: SettingUnit,
   description: string): SettingSpec & { default: D } => ({ default: default_, min, max, integer, mcp: { name, unit, description } });
 /** User settings: the one table every layer reads, in the order the chat tool lists them. parseOrbOptionsConfig checks each row's range, orb-config fills its
  *  default, and the MCP configure tool exposes it in human units. A new rule's setting is one row here. Premium is
@@ -82,7 +82,7 @@ export const SETTINGS = {
     "How far below the opening-range low a candle must close to end a stock's day before entry, in range heights (range high minus low); default {default}. A wick or a single print never ends it."),
   // Both candle rules use one grid, starting when the opening range ends and never rolling.
   candleMinutes: setting(2, 1, 30, true, "candleMinutes", "whole",
-    "Length in minutes of the candles whose closes decide the cancel before entry and the protective stop after it, on a grid starting when the opening range ends (9:32 ET); default {default}."),
+    "Length in minutes of the candles the strategy's rules read, on a grid starting when the opening range ends (9:32 ET): for the opening-range strategy their closes decide the cancel before entry and the protective stop after it; for support-box they make the boxes. Default {default}."),
 } as const satisfies Record<string, SettingSpec>;
 export type SettingKey = keyof typeof SETTINGS;
 export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];

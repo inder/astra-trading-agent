@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
-import { SETTINGS, SETTING_KEYS, type SettingSpec, type SettingUnit } from "./orb-options.ts";
+import { SETTINGS, type SettingSpec, type SettingUnit } from "./orb-options.ts";
+import { BOX_SETTINGS } from "./box-settings.ts";
 import { SERVER_INSTRUCTIONS } from "./setup-guide.ts";
 import { SYMBOL_PROBLEMS } from "./symbol-check.ts";
 import { VERSION } from "./version.ts";
@@ -100,16 +101,21 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     whole: { toChat: v => v, integer: true, show: v => `${v}`, toInternal: v => v },
     multiple: { toChat: v => v, integer: false, show: v => `${v}`, toInternal: v => v },
   };
-  const settingSchema = Object.fromEntries(SETTING_KEYS.map(key => {
-    const r: SettingSpec = SETTINGS[key], u = chat[r.mcp.unit], n = z.number().min(u.toChat(r.min)).max(u.toChat(r.max));
+  // Every strategy's rows, by internal key. A row two strategies share (the market-data timing) is one object, so one chat setting.
+  for (const key of Object.keys(BOX_SETTINGS)) if (key in SETTINGS && (SETTINGS as Record<string, unknown>)[key] !== (BOX_SETTINGS as Record<string, unknown>)[key]) throw new Error(`Setting ${key} is defined differently by two strategies`);
+  const ALL: Record<string, SettingSpec> = { ...SETTINGS, ...BOX_SETTINGS }, ALL_KEYS = Object.keys(ALL);
+  const names = ALL_KEYS.map(k => ALL[k]!.mcp.name);
+  if (new Set(names).size !== names.length) throw new Error("Two settings share a chat name");
+  const settingSchema = Object.fromEntries(ALL_KEYS.map(key => {
+    const r: SettingSpec = ALL[key]!, u = chat[r.mcp.unit], n = z.number().min(u.toChat(r.min)).max(u.toChat(r.max));
     return [r.mcp.name, (u.integer ? n.int() : n).optional()
       .describe(r.mcp.description.replace("{default}", r.default === null ? "none" : u.show(r.default)))];
   }));
   /** Chat-edge arguments back to internal units; arguments that are not settings pass through unchanged. */
   const toConfig = (args: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...args };
-    for (const key of SETTING_KEYS) {
-      const { name, unit } = SETTINGS[key].mcp; if (!(name in out)) continue;
+    for (const key of ALL_KEYS) {
+      const { name, unit } = ALL[key]!.mcp; if (!(name in out)) continue;
       const v = out[name] as number | undefined; delete out[name];
       out[key] = v === undefined ? undefined : chat[unit].toInternal(v);
     }
@@ -118,7 +124,7 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
     inputSchema: z.object({ ...configSchema, runId, date, ...settingSchema }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
     a => guarded(() => service.paper.configure(toConfig(a) as unknown as Parameters<typeof service.paper.configure>[0]), "always"));
-  server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data, only after the user says yes to the plan. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
+  server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data, only after the user says yes to the plan. Start before the opening two-minute candle completes, and for the support-box strategy well before 9:32 ET: each stock needs several reads before the open (20 stocks can take a minute or more). No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId), "always"));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting, only after the user says yes. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId, true), "always"));
@@ -131,6 +137,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",
     inputSchema: z.object({ runId, after: z.number().int().min(-1).default(-1), limit: z.number().int().min(1).max(100).default(20) }).strict(), annotations: readOnly },
     a => guarded(() => ({ pages: service.paper.events(a.runId, a.after, a.limit) })));
+  server.registerTool("get_support_setups", { description: "Read a support-box run's boxes for the day: each stock's verdict and supports, and every box found (live as formed, decided up or down, voided, expired, or unresolved when the run stopped with it open) with its evidence and the entry, stop and share count it journaled. Watch-only: the strategy holds no positions and places no orders. Candle highs and lows are the trades Astra observed, so boxes can be tighter than minute bars show.",
+    inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.supportSetups(a.runId)));
   server.registerTool("get_daily_pnl", { description: "Aggregate this installation's simulated option P&L for a date, not brokerage account performance. Includes feesExcluded and missing-mark indicators.",
     inputSchema: z.object({ date }).strict(), annotations: readOnly }, a => guarded(() => service.paper.daily(a.date)));
   server.registerTool("propose_position_change", { description: "Propose a trim by percentage of current whole contracts, or close all, ONLY for this run's PAPER position. Returns exact rounded quantity and a short-lived local browser review URL. The user approves in the browser; requesting this tool does not execute the sale.",

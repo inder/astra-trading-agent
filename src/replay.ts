@@ -6,6 +6,9 @@ import { TradingAgentService } from "./agent-service.ts";
 import { sessionTimes } from "./daily-history.ts";
 import { openingRangeConfig, type StrategySettings } from "./orb-config.ts";
 import { ReplayMarket, pathPrice, type BarsFile } from "./replay-market.ts";
+import type { DailyBars } from "./levels.ts";
+import { scanDay, type BoxBar } from "./box-rules.ts";
+import { boxConfig, type BoxConfig } from "./box-settings.ts";
 import { barCandleCloses, breakoutAbove, setupCancelled } from "./orb-rules.ts";
 
 // Replays one session through Astra's own paper service: REAL minute bars (read from a private fixtures folder, never
@@ -15,6 +18,8 @@ import { barCandleCloses, breakoutAbove, setupCancelled } from "./orb-rules.ts";
 export interface ReplayInput {
   date: string; symbols: string[]; regular: BarsFile; volatility: Record<string, number>;
   barLagMs: number; settings: StrategySettings; dataDir: string;
+  /** The strategy to run (default: opening-range-options) and, for strategies that read it, each symbol's daily history before the day. */
+  strategyId?: string; daily?: Record<string, DailyBars>;
 }
 export interface ReplayEvent { at: number; type: string; data: any }
 export interface ReplayResult {
@@ -27,11 +32,11 @@ export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
   // Claims compare tick times with whole seconds and whole minutes, so ticks must land on both.
   if (pollMs % 1000 || 60000 % pollMs) throw new Error("Replay needs a poll interval of whole seconds that divides a minute");
   let now = firstTick; const clock = () => now;
-  const market = new ReplayMarket({ regular: input.regular, clock, volatility: input.volatility, barLagMs: input.barLagMs });
+  const market = new ReplayMarket({ regular: input.regular, clock, volatility: input.volatility, barLagMs: input.barLagMs, ...(input.daily ? { daily: input.daily } : {}) });
   const service = new TradingAgentService(input.dataDir, undefined, undefined, { market, clock, ready: () => true, auto: false });
   const runId = "replay"; let halted: string | null = null;
   try {
-    service.paper.configure({ runId, strategyId: "opening-range-options", date: input.date, symbols: input.symbols, includePremarket: false, ...input.settings });
+    service.paper.configure({ runId, strategyId: input.strategyId ?? "opening-range-options", date: input.date, symbols: input.symbols, includePremarket: false, ...input.settings });
     await service.paper.start(runId);
     for (;;) {
       let status;
@@ -155,6 +160,12 @@ export function timeline(result: ReplayResult): string[] {
     else if (e.type === "paper_sale") lines.push(`${at}  ${d.symbol}  SELL ${d.quantity} (${d.reason}${d.targets ? ` ${d.targets.join("x, ")}x` : ""}) at ${d.assumedFill} MODELED; stock ${d.stockPrice}; P&L ${dollars(d.realizedPnlCents)}`);
     else if (e.type === "written_off") lines.push(`${at}  ${d.symbol}  WRITTEN OFF ${d.quantity}: ${dollars(d.realizedPnlCents)}`);
     else if (e.type === "run_halted") lines.push(`${at}  halted: ${d.detail}`);
+    else if (e.type === "universe_checked") lines.push(`${at}  ${d.symbol}  ${d.status === "runaway" ? "runaway" : d.status === "watched" ? "watched (runaway gate off)" : d.status === "not_runaway" ? "not a runaway" : `unavailable (${d.reason})`}${d.atr14 != null ? ` ATR ${d.atr14}` : ""}`);
+    else if (e.type === "supports") lines.push(`${at}  ${d.symbol}  supports before the open: ${d.supports.map((x: any) => `${x.label} ${x.lo === x.hi ? x.lo : `${x.lo}-${x.hi}`}`).join("; ")}${d.vwapAnchorsMissing.length ? ` (no VWAP for ${d.vwapAnchorsMissing.join(", ")})` : ""}`);
+    else if (e.type === "box_formed") lines.push(`${at}  ${d.symbol}  BOX formed ${et(Date.parse(d.box.start))}-${et(Date.parse(d.box.end))} ${d.box.low}-${d.box.high} (${d.box.heightToAtr} ATR) on ${d.support?.label}; contraction ${d.contractionAtFormation.ratio}`);
+    else if (e.type === "box_decided") lines.push(`${at}  ${d.symbol}  BOX decided ${d.decision.direction} on the candle ending ${et(Date.parse(d.decision.candleEnd))} (close ${d.decision.close}); box ${et(Date.parse(d.box.start))}-${et(Date.parse(d.box.end))} ${d.box.low}-${d.box.high}${d.entries ? `; entry A ${d.entries.A.price} x ${d.entries.A.shares}, B ${d.entries.B.price} x ${d.entries.B.shares}, stop ${d.entries.stop} (journal only)` : ""}`);
+    else if (e.type === "box_voided") lines.push(`${at}  ${d.symbol}  BOX voided: ${d.voided.reason}`);
+    else if (e.type === "box_expired") lines.push(`${at}  ${d.symbol}  BOX still open at the close ${d.box.low}-${d.box.high}`);
   }
   if (result.halted) lines.push(`halted: ${result.halted}`);
   return lines;
@@ -176,7 +187,45 @@ export function loadFixtures(dir: string, date: string): { regular: BarsFile; sy
   return { regular, symbols: Object.keys(counts) };
 }
 
-const USAGE = "usage: npm run replay -- <YYYY-MM-DD> [--fixtures DIR] [--iv SYMBOL=0.9,...] [--lag SECONDS] [--check] [--out DIR]";
+/** The support-box replay's private fixtures: `<dir>/support-box.json` = { regular: BarsFile with volume, the sessions before the day and the day itself;
+ *  daily: { SYMBOL: split-adjusted daily bars before the day } }. Never in this repository. */
+export function loadBoxFixtures(dir: string): { regular: BarsFile; daily: Record<string, DailyBars>; symbols: string[] } {
+  if (!existsSync(dir)) throw new Error(`Replay fixtures not found at ${dir}. They are private; pass --fixtures or set ASTRA_REPLAY_FIXTURES.`);
+  const file = JSON.parse(readFileSync(join(dir, "support-box.json"), "utf8"));
+  const symbols = (file.regular?.data?.results ?? []).map((r: { symbol: string }) => r.symbol) as string[];
+  if (!symbols.length || symbols.some(s => !file.daily?.[s]?.time?.length)) throw new Error("The support-box fixtures need minute bars and daily bars for every symbol");
+  return { regular: file.regular, daily: file.daily, symbols };
+}
+const BOX_EVENTS = new Set(["configured", "started", "universe_checked", "supports", "box_formed", "box_decided", "box_voided", "box_expired", "candle_unobserved",
+  "heartbeat", "data_gap", "data_restored", "session_ended", "stopped", "run_halted"]);
+/** The support-box replay's claims. They compare the live runtime with the offline scan of the SAME minute bars (`scanDay`). The replay
+ *  polls every second along a modeled path that touches each bar's open, low, high and close, so the observed ranges equal the bars':
+ *  this checks the plumbing (grid, bucketing, ordering, support lookups, journal), not live fidelity (docs/decisions/0002). */
+export function checkBoxes(result: ReplayResult, regular: BarsFile, daily: Record<string, DailyBars>, date: string, symbols: string[], settings: StrategySettings = {}): Claim[] {
+  const claims: Claim[] = [], add = (id: string, claim: string, pass: boolean, detail: string) => claims.push({ id, claim, modeled: false, pass, detail });
+  const config = boxConfig(date, symbols, settings as never), of = (type: string, symbol: string) => result.events.filter(e => e.type === type && e.data?.symbol === symbol);
+  const stray = result.events.filter(e => !BOX_EVENTS.has(e.type));
+  add("clean", "the run completed with no halt, no data gap, no order, no position and only the documented event types", !result.halted && result.complete && result.ordersSubmitted === 0 &&
+    !stray.length && !result.events.some(e => e.type === "data_gap"), result.halted ? `halted: ${result.halted}` : stray.length ? `unexpected: ${stray.map(e => e.type).join(", ")}` : "clean");
+  for (const symbol of symbols) {
+    const bars = (regular.data.results.find(r => r.symbol === symbol)?.bars ?? []) as BoxBar[], reference = scanDay(bars, daily[symbol]!, config);
+    const verdicts = of("universe_checked", symbol);
+    const expected = reference.unavailable ? "unavailable" : reference.runaway ? (reference.runaway.fired ? "runaway" : "not_runaway") : "watched";
+    add(`${symbol}-verdict`, `${symbol} gets exactly one verdict, and it is the offline scan's: ${expected}`, verdicts.length === 1 && verdicts[0]!.data.status === expected,
+      verdicts.map(v => v.data.status).join(",") || "none");
+    if (expected === "not_runaway" || expected === "unavailable") { add(`${symbol}-no-boxes`, `${symbol} is ${expected === "unavailable" ? "unavailable" : "not a runaway"}, so no box is searched for`, !result.events.some(e => e.type.startsWith("box_") && e.data?.symbol === symbol), "none expected"); continue; }
+    const engine = result.events.filter(e => ["box_decided", "box_voided", "box_expired"].includes(e.type) && e.data?.symbol === symbol).map(e => e.data);
+    const key = (b: any) => JSON.stringify([b.box.start, b.box.end, b.box.low, b.box.high, b.status === "live" ? "expired" : b.status, b.decision?.direction ?? null, b.decision?.candleEnd ?? null]);
+    const want = reference.boxes.map(key), got = engine.map(b => key({ ...b, status: b.status === "live" ? "expired" : b.status }));
+    add(`${symbol}-boxes`, `${symbol}'s boxes (start, end, floor, high, outcome, decision candle) equal the offline scan of the same bars`, JSON.stringify(want) === JSON.stringify(got),
+      `${engine.length} from the run, ${reference.boxes.length} offline${want.join() === got.join() ? "" : `; run ${got.join(" | ")} vs offline ${want.join(" | ")}`}`);
+    const unobserved = of("candle_unobserved", symbol).length;
+    add(`${symbol}-observed`, `${symbol} had no unobserved candle`, unobserved === 0, `${unobserved} unobserved`);
+  }
+  return claims;
+}
+
+const USAGE = "usage: npm run replay -- <YYYY-MM-DD> [--fixtures DIR] [--iv SYMBOL=0.9,...] [--lag SECONDS] [--strategy opening-range-options|support-box] [--check] [--out DIR]";
 // Strategy 0.10.0 on the article's day, read off the bars by the same rules: CRWV breaks out first and enters; SOXL
 // closes a candle a range height under its low at 9:44 and is out; MU never breaks out (its 14:50 cancel lands after
 // the 11:00 entry window, so the window, not the cancel, ends its day by default).
@@ -195,6 +244,20 @@ async function main(argv: string[]): Promise<number> {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { console.error(USAGE); return 2; }
   const root = flag("--fixtures") ?? process.env.ASTRA_REPLAY_FIXTURES;
   if (!root) { console.error(`Replay fixtures are private and not in this repository: pass --fixtures DIR or set ASTRA_REPLAY_FIXTURES.\n${USAGE}`); return 1; }
+  const strategy = flag("--strategy") ?? "opening-range-options";
+  if (strategy === "support-box") {
+    // Watch-only: the live runtime on real minute bars (private fixtures), checked against the offline scan of the same bars.
+    const dir = join(root, date), box = loadBoxFixtures(dir), out = flag("--out") ?? join(dir, "replay-output");
+    mkdirSync(out, { recursive: true });
+    const result = await runReplay({ date, symbols: box.symbols, regular: box.regular, volatility: {}, barLagMs: 0, settings: {}, dataDir: mkdtempSync(join(out, "box-")), strategyId: "support-box", daily: box.daily });
+    console.log(`REPLAY ${date}: support-box (watch-only) on real minute bars from ${dir}; observed ranges follow the modeled minute path, polled every second (docs/decisions/0002)`);
+    for (const line of timeline(result)) console.log(line);
+    if (!argv.includes("--check")) return 0;
+    const claims = checkBoxes(result, box.regular, box.daily, date, box.symbols);
+    for (const k of claims) console.log(`  ${k.pass ? "PASS" : "FAIL"}  ${k.claim}: ${k.detail}`);
+    return claims.every(k => k.pass) ? 0 : 1;
+  }
+  if (strategy !== "opening-range-options") { console.error(USAGE); return 2; }
   const dir = join(root, date), { regular, symbols } = loadFixtures(dir, date);
   const volatility = Object.fromEntries(symbols.map(s => [s, 0.9]));
   for (const pair of (flag("--iv") ?? "").split(",").filter(Boolean)) {

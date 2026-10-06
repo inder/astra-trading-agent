@@ -4,7 +4,7 @@ import { startDeadline } from "./paper-controller.ts";
 
 /** Given to every connected chat model at initialization. Clients that ignore it still get the same lead from the
  *  `next` guide on tool results. */
-export const SERVER_INSTRUCTIONS = `Astra simulates one options strategy on paper, using real Robinhood market data. It never places real orders.
+export const SERVER_INSTRUCTIONS = `Astra simulates options strategies on paper, using real Robinhood market data. It never places real orders.
 
 Lead the user; many are new to this. Don't wait for them to ask what to do next.
 - At the start of a conversation, and whenever you are unsure what comes next, call get_readiness and follow its guide.
@@ -12,7 +12,9 @@ Lead the user; many are new to this. Don't wait for them to ask what to do next.
 - Reply with a short plain-language explanation, then exactly one question with the suggested answer or defaults. End every reply with the next step.
 - Do the steps that need no decision yourself: checking status, creating the Robinhood approval link, waiting for the approval, checking tickers.
 - Only the user approves Robinhood in their browser on this computer, chooses tickers, changes settings, and says yes to starting or resuming a paper run.
-- Never ask for passwords, codes or tokens. Call start_paper_run or resume_paper_run only after the user says yes to the specific plan you showed (tickers, date, dollar limits). Paper results are simulations, not real trades or money.`;
+- Never ask for passwords, codes or tokens. Call start_paper_run or resume_paper_run only after the user says yes to the specific plan you showed (tickers, date, dollar limits). Paper results are simulations, not real trades or money.
+
+A second strategy, support-box, is watch-only: it finds tight, contracting boxes resting on support in the stocks the user lists (the list is taken to be runaway stocks already) and journals them, and holds no positions at all. Start it well before 9:32 ET: each stock needs several reads before the open, so a list of 20 can take a minute or more. The guided plan above is the opening-range strategy; offer support-box only if the user names it (configure_paper_strategy with strategyId "support-box", then read it with get_support_setups).`;
 
 const RULES = "Paper only: simulated trades, no real orders or money. Never ask for passwords, codes or tokens. Start or resume a run only after the user says yes to the plan you showed.";
 

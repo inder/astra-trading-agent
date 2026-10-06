@@ -46,6 +46,13 @@ cross-origin or non-GET request, that two concurrent reports share one listener,
 that the policy the server sends admits the script the page pins. Account data in
 these tests is invented; no real account is read by the suite.
 
+The watch-only support-box strategy (0.1.0) is tested on invented bars shaped like the founder's SOXL, RKT and IBM
+days: the runaway gate, supports, the box and its near-misses (too tall, no contraction, below support, not a runaway, an
+unobserved candle), the journaled entry levels, and the live runtime driven through the replay harness on those bars, whose
+claims compare the run with an offline scan of the same bars. That comparison checks plumbing, not live fidelity (the replay
+polls every second along a modeled path). A real-bar check exists but needs private fixtures and has not been run in this
+repository's CI.
+
 ## Attended acceptance gate
 
 After installation, follow [the full walkthrough](PAPER-WORKFLOW.md). The owner
@@ -56,6 +63,9 @@ The chosen chat application's MCP setup also needs an owner acceptance test.
 No real-account readiness or trading performance is claimed.
 
 ## Known limits
+
+- The support-box strategy is watch-only: no positions, fills or orders, no paper shares, no exits. It cannot be resumed after a stop or
+  halt, its observed candle ranges can be narrower than the exchange's, and its box and gate numbers are placeholders the founder tunes.
 
 - Trading is PAPER only: no real orders and no live flag. Real accounts are read,
   but only read — balances, equity positions and option positions, when asked, for the portfolio

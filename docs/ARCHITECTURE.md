@@ -26,6 +26,10 @@ synthetic adapter, and optional `paperFactory`. The factory returns a
 Register it in `agentStrategies`; do not add strategy-specific chat parsing.
 The initial implementation is `orb-paper-runtime.ts`, with the deterministic
 engine in `orb-options.ts` and supported settings in `orb-config.ts`.
+The second is the watch-only `support-box` strategy: pure rules and an incremental scanner in `box-rules.ts`, its settings table in
+`box-settings.ts` (the same row pattern and, for market-data timing, the same row objects), and its runtime in `box-paper-runtime.ts`.
+It reuses the candle builder, levels engine and replay harness, holds no positions, and reads every slow input through detached,
+deadline-bound reads so a read never delays a quote poll.
 
 Runtime adapters do not own credentials, transports, scheduling, approval or
 file paths. The common controller owns lifecycle boundaries. The current setup

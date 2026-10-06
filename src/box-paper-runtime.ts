@@ -225,9 +225,9 @@ export class BoxPaperRuntime implements PaperRuntime {
   //   todayAttempts        +1 when a read is actually LAUNCHED (never when the cap turns it away); 0 when a read succeeds
   //   todayRetryAt         a launched read failed: now + one poll before degrading, now + the backoff once degraded
   //   todayBackoffMs       doubled when a read fails while degraded (cap 60 s); reset when a read succeeds
-  //   degraded             true: a launched read failed and todayAttempts reached the cap; false: a read succeeded
+  //   degraded             true: a launched read failed and todayAttempts is at or above the cap (it keeps counting while degraded); false: a read succeeded
   //   today (bars, fetchedAt)   a read succeeded
-  //   closing              the session close (the last candles use what there is)
+  //   closing              the session close (the last candles use what there is); journaled as degraded only for a candle the bars in hand do not cover
   /** Read today's minute bars in the background; true when a read was launched. A success makes them current and clears any degradation. */
   #fetchToday(symbol: string, st: SymbolState, now: number): boolean {
     // Today's bars share the prefetch's cap on reads in flight, so twenty stocks cannot ask at once; a symbol that is refused waits for its next turn, and nothing is counted.
@@ -257,7 +257,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     st.counts[e.type === "formed" ? "formed" : e.type === "decided" ? "decided" : "voided"]++;
     // The last minute the VWAP could see: bars lag, so this may be earlier than the candle's end.
     const through = st.today ? Math.max(0, ...st.today.bars.filter(b => b.at + 60000 <= candle.end).map(b => b.at + 60000)) : 0;
-    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded || st.closing, ...e.record } };
+    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded || (st.closing && !(st.today && st.today.fetchedAt >= candle.end)), ...e.record } };
   }
 
   // ---- The close.

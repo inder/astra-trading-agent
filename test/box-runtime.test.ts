@@ -245,3 +245,20 @@ test("after the outage recovers, a box that forms matches the offline scan: the 
   }
   assert.ok(reads.peak() <= 3);
 });
+
+test("a success resets the attempt count: two failures, a success, then one failure for a later box does not degrade it", async () => {
+  let reads!: ReturnType<typeof todayReads>;
+  // Reads 1 and 2 fail and 3 succeeds for the first box; the second box needs fresh bars later: read 4 fails once, then reads succeed.
+  const events = await flaky((m, c) => { reads = todayReads(m, c, (_c, n) => n === 1 || n === 2 || n === 4); }, false, {}, { symbols: ["SOXL"], bars: referenceBars({ extra: SECOND_BOX }) });
+  const formed = of(events, "box_formed");
+  assert.equal(formed.length, 2); assert.ok(reads.calls.length >= 5);
+  assert.equal(formed[0]!.data.vwapTodayDegraded, false); assert.equal(formed[1]!.data.vwapTodayDegraded, false, "one failed read after a success is attempt 1 again, not attempt 4");
+});
+test("at the session close, candles still waiting for today's bars are processed on what there is, and journaled as degraded only because no fresh bars cover them", async () => {
+  const { close } = sessionTimes(DAY);
+  const events = await flaky((m, c) => { todayReads(m, c, () => false, 8 * 3600000); });   // every read outlasts the session
+  const formed = of(events, "box_formed")[0]!.data;
+  assert.deepEqual([formed.vwapTodayDegraded, formed.vwapThrough], [true, null]);
+  assert.ok(of(events, "box_formed")[0]!.at >= close, "nothing was journaled before the close: the candles waited");
+  assert.equal(of(events, "box_decided")[0]!.data.decision.close, 160.71);
+});

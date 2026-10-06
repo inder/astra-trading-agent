@@ -93,6 +93,9 @@ export function anchoredVwaps(bars: readonly VwapBar[], daily: DailyBars, config
   const out: Support[] = [], n = daily.time.length;
   for (let k = 1; k <= config.vwapMaxSessionsBack && n - k >= 0; k++) {
     let pv = 0, v = 0;
+    // An anchored VWAP needs every session from its anchor to the prior close: a missing one would silently anchor it later.
+    const complete = daily.time.slice(n - k).every(day => { const { open, close } = sessionTimes(day); return bars.some(b => b.at >= open && b.at < close); });
+    if (!complete) continue;
     for (const day of [...daily.time.slice(n - k), config.date]) {
       const { open, close } = sessionTimes(day), until = day === config.date ? (config.vwapIncludesToday ? Math.min(asOf, close) : open) : close;
       for (const b of bars) if (b.at >= open && b.at + 60000 <= until) { pv += b.typical * b.volume; v += b.volume; }

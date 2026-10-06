@@ -18,13 +18,15 @@ type Source = "daily" | "bars" | "quotes";
 const MAX_IN_FLIGHT = 3;
 /** Tries at today's minute bars for one candle before its supports use the prior sessions only (journaled). */
 const MAX_TODAY_ATTEMPTS = 3;
+/** How long a read of today's minute bars may take. It blocks nothing (the candle waits, the quote polls go on), so it is generous. */
+const TODAY_READ_DEADLINE_MS = 30_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 const shownSupport = (s: Support) => ({ kind: s.kind, label: s.label, lo: Math.round(s.lo * 1e4) / 1e4, hi: Math.round(s.hi * 1e4) / 1e4 });
 
 interface SymbolState {
   phase: Phase; head: DayHead | null; prior: VwapBar[]; anchorsPending: string[]; anchorsMissing: string[];
   scanner: BoxScanner | null; candles: CandleState; slots: Map<number, { high: number; low: number; trades: number }>; lastTradeCounted: number;
-  queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
+  dailyRetryAt: number; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
   counts: { formed: number; decided: number; voided: number; expired: number; unobserved: number };
 }
 type Arrival = (events: PaperEvent[]) => void;
@@ -39,7 +41,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     this.#config = parseBoxConfig(raw); this.#market = market; this.#clock = clock;
     this.#session = sessionTimes(this.#config.date); this.#grid = this.#session.open + OPENING_RANGE_MINUTES * 60000;
     for (const symbol of this.#config.symbols) this.#symbols.set(symbol, { phase: "loading", head: null, prior: [], anchorsPending: [], anchorsMissing: [],
-      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, queue: [],
+      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, queue: [],
       today: null, todayAttempts: 0, degraded: false, counts: { formed: 0, decided: 0, voided: 0, expired: 0, unobserved: 0 } });
   }
   get pollMs() { return this.#config.pollMs; }
@@ -100,6 +102,7 @@ export class BoxPaperRuntime implements PaperRuntime {
       if (this.#inflight.size >= MAX_IN_FLIGHT) return;
       if (st.phase !== "loading") continue;
       if (st.head === null && !this.#inflight.has(`daily:${symbol}`)) {
+        if (now < st.dailyRetryAt) continue;
         if (!daily) { this.#settle(symbol, st, "unavailable", events, { reason: "daily_bars_not_supported" }); continue; }
         this.#launch(`daily:${symbol}`, budget, () => daily.call(this.#market, symbol, this.#session.open - this.#config.historyDays * 86400000, this.#session.open),
           (r, _at, ev) => this.#dailyArrived(symbol, r, ev));
@@ -114,7 +117,8 @@ export class BoxPaperRuntime implements PaperRuntime {
   #dailyArrived(symbol: string, r: { ok: true; value: { bars: import("./levels.ts").DailyBars } } | { ok: false; error: unknown }, events: PaperEvent[]): void {
     const st = this.#symbols.get(symbol)!;
     if (st.phase !== "loading" || st.head !== null) return;   // the gate already settled this symbol
-    if (!r.ok) { this.#reads.failed("daily", this.#clock(), events, r.error); this.#settle(symbol, st, "unavailable", events, { reason: "daily_bars_unavailable", detail: String((r.error as Error)?.message ?? r.error).slice(0, 200) }); return; }
+    // A failed or slow read is tried again after a pause while there is time before 9:32; the gate settles whatever is still unread.
+    if (!r.ok) { this.#reads.failed("daily", this.#clock(), events, r.error); st.dailyRetryAt = this.#clock() + this.#config.maxObservationGapMs; return; }
     this.#reads.succeeded("daily", this.#clock(), events);
     const head = prepareDay(r.value.bars, this.#config), evidence = { evidence: head.runaway.evidence, atr14: head.atr === null ? null : Math.round(head.atr * 1e4) / 1e4 };
     if (!head.runaway.fired) { st.head = head; this.#settle(symbol, st, "not_runaway", events, evidence); return; }
@@ -168,9 +172,11 @@ export class BoxPaperRuntime implements PaperRuntime {
     const tradeMs = Date.parse(q.tradeAt!), length = c.candleMinutes * 60000;
     // Bucketed by the trade's own time, once per distinct trade, and before candles are harvested: the trade that finishes a
     // candle is still inside it when it printed before the end.
-    if (fresh && tradeMs >= this.#grid && tradeMs > st.lastTradeCounted) {
+    const slot = Math.floor((tradeMs - this.#grid) / length);
+    // A slot below the candle still open has already been harvested: a trade that first shows up after its candle closed is not counted.
+    if (fresh && tradeMs >= this.#grid && tradeMs > st.lastTradeCounted && slot >= (st.candles.nextEnd - this.#grid) / length - 1) {
       st.lastTradeCounted = tradeMs;
-      const slot = Math.floor((tradeMs - this.#grid) / length), held = st.slots.get(slot);
+      const held = st.slots.get(slot);
       st.slots.set(slot, held ? { high: Math.max(held.high, q.price!), low: Math.min(held.low, q.price!), trades: held.trades + 1 } : { high: q.price!, low: q.price!, trades: 1 });
     }
     for (const close of observeCandles(st.candles, q.price!, tradeMs, Date.parse(q.retrievedAt), c.candleMinutes, c.maxQuoteAgeMs, c.maxObservationGapMs, fresh)) {
@@ -196,13 +202,14 @@ export class BoxPaperRuntime implements PaperRuntime {
       try { out = st.scanner!.push(st.queue[0]!, supportsAt); }
       catch (error) {
         if (!(error instanceof NeedsData)) throw error;
+        if (this.#inflight.has(`today:${symbol}`)) return;   // a read is already on its way
         if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) { st.degraded = true; continue; }
-        if (!this.#inflight.has(`today:${symbol}`)) {
+        {
           st.todayAttempts++;
-          this.#launch(`today:${symbol}`, c.maxObservationGapMs, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
+          this.#launch(`today:${symbol}`, TODAY_READ_DEADLINE_MS, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
             if (r.ok) {
               const result = ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute");
-              if (Array.isArray(result?.bars)) { this.#reads.succeeded("bars", this.#clock(), ev); st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; }
+              if (Array.isArray(result?.bars)) { this.#reads.succeeded("bars", this.#clock(), ev); st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; }
               else this.#reads.failed("bars", this.#clock(), ev, new Error("No minute bars for the day"));
             } else this.#reads.failed("bars", this.#clock(), ev, r.error);
             this.#drain(symbol, st, this.#clock(), ev);

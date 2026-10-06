@@ -93,3 +93,52 @@ test("a support-box run cannot be resumed and its runtime refuses a checkpoint o
   assert.throws(() => new BoxPaperRuntime(boxConfig(DAY, ["SOXL"]), market, () => open, { complete: false }), /cannot be resumed/);
   await assert.rejects(new BoxPaperRuntime(boxConfig(DAY, ["SOXL"]), market, () => open).control({ symbol: "SOXL", quantity: 1, expectedQuantity: 1, action: "close" }), /no positions/);
 });
+
+// ---- Detached reads that fail, stall or arrive late (the happy path above answers instantly).
+async function flaky(tweak: (market: ReplayMarket) => void) {
+  const dir = mkdtempSync(join(root, `fl${n++}-`)), { close } = sessionTimes(DAY);
+  let now = open - 120000;
+  const market = new ReplayMarket({ regular: file({ SOXL: referenceBars() }), clock: () => now, volatility: {}, daily: { SOXL: runawayDailies() } });
+  tweak(market);
+  const service = new TradingAgentService(dir, undefined, undefined, { market, clock: () => now, ready: () => true, auto: false });
+  try {
+    service.paper.configure({ runId: "flaky", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000 });
+    await service.paper.start("flaky");
+    for (let guard = 0; guard < 30000; guard++) { const s = await service.paper.tick("flaky"); if (s.status === "completed") break; now += 1000; if (now > close + 3600000) break; }
+    const events: Journal[] = [];
+    for (let after = -1; ;) { const pages = service.paper.events("flaky", after, 100); if (!pages.length) break; for (const p of pages) { for (const e of p.events) events.push({ at: Date.parse(p.at), type: e.type, data: e.data }); after = p.revision; } }
+    return events;
+  } finally { await service.close(); }
+}
+type Journal = { at: number; type: string; data: any };
+const of = (events: Journal[], type: string) => events.filter(e => e.type === type);
+test("a daily-history read that fails twice is tried again before 9:32 and the stock is still scanned", async () => {
+  let failures = 2;
+  const events = await flaky(m => { const real = m.dailyBars!; m.dailyBars = async (...a) => { if (failures-- > 0) throw new Error("429 too many requests"); return real.apply(m, a); }; });
+  assert.deepEqual(of(events, "universe_checked").map(e => e.data.status), ["runaway"]);
+  assert.equal(of(events, "box_decided").length, 1);
+});
+test("a daily-history read that never answers is settled at 9:32 as not read before the open, once, and the stock is never scanned", async () => {
+  const events = await flaky(m => { m.dailyBars = () => new Promise(() => {}); });
+  assert.deepEqual(of(events, "universe_checked").map(e => [e.data.status, e.data.reason]), [["unavailable", "not_read_before_open"]]);
+  assert.ok(of(events, "universe_checked")[0]!.at >= grid);
+  assert.equal(of(events, "box_formed").length + of(events, "supports").length, 0);
+});
+test("a prior session's minute bars that cannot be read are named as missing anchors; the supports still go out and the stock is scanned", async () => {
+  const events = await flaky(m => { const real = m.bars.bind(m); m.bars = async (s, a, b, x) => { if (b - a > 6 * 3600000 && new Date(a).toISOString().startsWith("2026-10-01")) throw new Error("boom"); return real(s, a, b, x); }; });
+  const supports = of(events, "supports")[0]!.data;
+  assert.deepEqual(supports.vwapAnchorsMissing, ["2026-10-01"]);   // and the VWAP from 09-30, which needs that session too, is not built
+  assert.deepEqual(supports.supports.filter((x: any) => x.kind === "anchored_vwap").map((x: any) => x.label), ["VWAP from 2026-10-02 open"]);
+});
+test("today's minute bars failing twice, then answering, wait the box candle out without degrading the VWAP", async () => {
+  let failures = 2;
+  const events = await flaky(m => { const real = m.bars.bind(m); m.bars = async (s, a, b, x) => { if (a === open && failures-- > 0) throw new Error("timeout"); return real(s, a, b, x); }; });
+  const formed = of(events, "box_formed")[0]!.data;
+  assert.equal(formed.vwapTodayDegraded, false); assert.ok(formed.vwapThrough);
+  assert.equal(of(events, "box_decided")[0]!.data.decision.close, 160.71);
+});
+test("today's minute bars that never come degrade the box's VWAP to the prior sessions after three tries, and say so", async () => {
+  const events = await flaky(m => { const real = m.bars.bind(m); m.bars = async (s, a, b, x) => { if (a === open) throw new Error("down"); return real(s, a, b, x); }; });
+  assert.equal(of(events, "box_formed")[0]!.data.vwapTodayDegraded, true);
+  assert.ok(of(events, "data_gap").some(e => e.data.source === "bars"));
+});

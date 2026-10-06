@@ -184,3 +184,9 @@ test("the candle that breaks out cannot also form the box that it breaks out of"
 test("a box's minutes must be a whole number of candles", () => {
   assert.throws(() => boxConfig(DAY, ["X"], { minBoxMinutes: 11 }), /Invalid/);
 });
+test("an anchored VWAP is not built when a session between its anchor and the prior close has no minute bars", () => {
+  const daily = runawayDailies(), all = referenceBars();
+  const without = vwapBars(all.filter(b => !b.begins_at.startsWith("2026-10-01")));   // Oct 1 missing
+  const labels = anchoredVwaps(without, daily, config, sessionTimes(DAY).open).map(s => s.label);
+  assert.deepEqual(labels, ["VWAP from 2026-10-02 open"], "the anchors at Oct 1 and Sep 30 both need Oct 1");
+});

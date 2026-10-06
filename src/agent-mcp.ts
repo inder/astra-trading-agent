@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
-import { SETTINGS, SETTING_KEYS, type SettingSpec, type SettingUnit } from "./orb-options.ts";
+import { SETTINGS, type SettingSpec, type SettingUnit } from "./orb-options.ts";
+import { BOX_SETTINGS } from "./box-settings.ts";
 import { SERVER_INSTRUCTIONS } from "./setup-guide.ts";
 import { SYMBOL_PROBLEMS } from "./symbol-check.ts";
 import { VERSION } from "./version.ts";
@@ -100,16 +101,20 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     whole: { toChat: v => v, integer: true, show: v => `${v}`, toInternal: v => v },
     multiple: { toChat: v => v, integer: false, show: v => `${v}`, toInternal: v => v },
   };
-  const settingSchema = Object.fromEntries(SETTING_KEYS.map(key => {
-    const r: SettingSpec = SETTINGS[key], u = chat[r.mcp.unit], n = z.number().min(u.toChat(r.min)).max(u.toChat(r.max));
+  // Every strategy's rows, by internal key. A row two strategies share (the market-data timing) is one object, so one chat setting.
+  const ALL: Record<string, SettingSpec> = { ...SETTINGS, ...BOX_SETTINGS }, ALL_KEYS = Object.keys(ALL);
+  const names = ALL_KEYS.map(k => ALL[k]!.mcp.name);
+  if (new Set(names).size !== names.length) throw new Error("Two settings share a chat name");
+  const settingSchema = Object.fromEntries(ALL_KEYS.map(key => {
+    const r: SettingSpec = ALL[key]!, u = chat[r.mcp.unit], n = z.number().min(u.toChat(r.min)).max(u.toChat(r.max));
     return [r.mcp.name, (u.integer ? n.int() : n).optional()
       .describe(r.mcp.description.replace("{default}", r.default === null ? "none" : u.show(r.default)))];
   }));
   /** Chat-edge arguments back to internal units; arguments that are not settings pass through unchanged. */
   const toConfig = (args: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...args };
-    for (const key of SETTING_KEYS) {
-      const { name, unit } = SETTINGS[key].mcp; if (!(name in out)) continue;
+    for (const key of ALL_KEYS) {
+      const { name, unit } = ALL[key]!.mcp; if (!(name in out)) continue;
       const v = out[name] as number | undefined; delete out[name];
       out[key] = v === undefined ? undefined : chat[unit].toInternal(v);
     }
@@ -131,6 +136,8 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",
     inputSchema: z.object({ runId, after: z.number().int().min(-1).default(-1), limit: z.number().int().min(1).max(100).default(20) }).strict(), annotations: readOnly },
     a => guarded(() => ({ pages: service.paper.events(a.runId, a.after, a.limit) })));
+  server.registerTool("get_support_setups", { description: "Read a support-box run's boxes for the day: each stock's runaway verdict and supports, and every box found (live, decided up or down, voided, expired) with its evidence and the entry, stop and share count it journaled. Watch-only: the strategy holds no positions and places no orders. Candle highs and lows are the trades Astra observed, so boxes can be tighter than minute bars show.",
+    inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.supportSetups(a.runId)));
   server.registerTool("get_daily_pnl", { description: "Aggregate this installation's simulated option P&L for a date, not brokerage account performance. Includes feesExcluded and missing-mark indicators.",
     inputSchema: z.object({ date }).strict(), annotations: readOnly }, a => guarded(() => service.paper.daily(a.date)));
   server.registerTool("propose_position_change", { description: "Propose a trim by percentage of current whole contracts, or close all, ONLY for this run's PAPER position. Returns exact rounded quantity and a short-lived local browser review URL. The user approves in the browser; requesting this tool does not execute the sale.",

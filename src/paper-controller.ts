@@ -45,6 +45,8 @@ export class PaperController {
     const s = this.#strategy(input.strategyId);
     if (!validId(input.runId) || typeof input.includePremarket !== "boolean") throw new Error("Invalid paper setup");
     const { runId: _r, strategyId: _s, date, symbols, includePremarket, ...settings } = input;
+    const foreign = Object.keys(settings).filter(k => (settings as Record<string, unknown>)[k] !== undefined && s.settingKeys && !s.settingKeys.includes(k));
+    if (foreign.length) throw new Error(`Setting ${foreign.join(", ")} does not apply to strategy ${s.id}`);
     const config = s.preview({ ...settings, date, symbols, includePremarketLeadMinutes: includePremarket ? 2 : 0 });
     const configHash = createHash("sha256").update(JSON.stringify({ strategy: s.id, version: s.version, config })).digest("hex");
     try {

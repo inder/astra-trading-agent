@@ -332,7 +332,8 @@ is a recommendation: it reports what the rules found.
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
 | "Why didn't it buy HPE?" / "What happened this morning?" | Explains each decision from the journal | `get_paper_events` |
-| "How am I doing today?" | The day's paper P&L | `get_daily_pnl` |
+| "How am I doing today?" | The day's paper P&L | `get_support_setups` | Read a support-box run's boxes for the day, live and decided, with their evidence. Watch-only; read-only |
+| `get_daily_pnl` |
 | "Trim 25% of CRWV" / "Close everything" | Proposes the sale; you approve it in your browser | `propose_position_change` |
 | "Did my trim go through?" | Reports whether you approved and what sold | `get_position_review` |
 | "Stop watching" | Stops monitoring and keeps positions (their exits pause) | `stop_paper_run` |
@@ -605,6 +606,37 @@ prices still arrive, an equity-quote outage does not halt it, so the targets, th
 backstop and the close-out keep working. An outage of option prices alone never
 halts either: exits wait for a fresh bid (never an invented one), the status shows
 `dataGapSince`, and contracts still unsold at the close are written off.
+
+### Support box (watch-only, strategy 0.1.0)
+
+A second strategy, `support-box`, watches **runaway stocks only** for a tight, contracting 2-minute box resting on support, and
+journals the first candle close above or below it. **It holds no positions, simulates no fills and submits no orders**; it only
+detects and writes down what it would have seen: the box, the support under it, how much volatility shrank, and the entry, stop
+and share count it would use. Entry and exit choices, paper shares and live trading are later versions.
+
+- **Runaway gate** (daily bars before the day): the last close above rising 10- and 21-session averages, within 10% of the
+  three-month high, and a daily close through a prior resistance zone within the last 10 sessions (by the levels engine's own break
+  rules, which lag the break by its confirming closes).
+- **Supports:** zones the price closed above and the high of the breakout session, the two averages, and VWAPs anchored at the
+  regular-session open one to three sessions back (typical price times volume over minute bars, including today's finished
+  minutes up to the candle just closed).
+- **The box:** 2-minute candles on the grid from 9:32 ET; the first run of at least 10 minutes whose height is at most 0.25 ATR(14),
+  whose low rests on a support (within 0.5 ATR above it, or no more than 0.1 ATR under it), and whose second-half mean candle range is at
+  most 0.7 of the mean range of the five candles before it. It then grows to the right; the first candle that **closes** outside it
+  decides it (up: bulls, down: bears). A wick past the height limit is counted, never a bound. A candle whose close is not known
+  voids a live box (ADR 0001).
+- **Journaled levels** for an up decision: entry A (a quarter of the box's height above its low), entry B (the decision candle's
+  close), the stop (the box low) and shares for each = risk (default $500) divided by entry minus stop. A large share count at entry
+  A is a consequence of its tiny risk per share; the journal records the notional too.
+- **Every number is a setting** (names in `configure_paper_strategy`; each has a validated range and a placeholder default the
+  founder tunes). The journal events are `universe_checked`, `supports`, `box_formed`, `box_decided`, `box_voided`, `box_expired` and
+  `candle_unobserved`; `get_support_setups` reads them back.
+
+Limits, stated plainly: candle highs and lows come from the trades Astra observed by polling, so live boxes can be tighter than
+the minute bars show ([ADR 0002](docs/decisions/0002-candle-ranges-from-observed-trades.md)); a stopped or halted watch run cannot be
+resumed and the day's run for the strategy is used up; the runaway gate counts incidental levels a fast climb passes; the only evidence so
+far is invented bars (the reference day is shaped like SOXL on 2026-10-05) and a replay that needs private real bars; and nothing
+here is a claim of profitability. The strategy is not offered by the guided setup, which leads with the opening-range strategy.
 
 ### Replay a past session
 

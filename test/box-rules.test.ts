@@ -40,7 +40,11 @@ test("near misses: a close more than the allowed distance under the high fails; 
   assert.ok(!(runawayGate(far, config).evidence.checks as any[]).find(c => c.name === "nearHigh").pass);
   const old = runawayGate(d, boxConfig(DAY, ["SOXL"], { breakoutLookbackSessions: 1 }));
   assert.ok(!old.fired); assert.ok(!(old.evidence.checks as any[]).find(c => c.name === "brokeResistance").pass);
-  assert.ok(!runawayGate({ ...d, time: d.time.slice(0, 30), open: d.open.slice(0, 30), high: d.high.slice(0, 30), low: d.low.slice(0, 30), close: d.close.slice(0, 30) }, config).fired, "too little history is not a pass");
+  const last = (k: number) => ({ time: d.time.slice(-k), open: d.open.slice(-k), high: d.high.slice(-k), low: d.low.slice(-k), close: d.close.slice(-k) });
+  const short = runawayGate(last(40), config);   // a stock with 40 sessions has not shown a three-month high
+  assert.ok(!short.fired); assert.equal(short.evidence.unavailable, "not enough daily history");
+  const stale = runawayGate({ ...d, time: d.time.map((t, i) => i === n - 1 ? "2026-10-01" : t) }, config);   // the feed lags a session
+  assert.ok(!stale.fired); assert.match(String(stale.evidence.unavailable), /previous session/);
 });
 
 test("supports: the broken zone and its breakout-session high, and the averages; each type can be switched off", () => {
@@ -105,6 +109,7 @@ test("the journaled entries: A is a quarter of the box above its low, B is the u
 });
 test("sizing: whole shares rounded down, none when the stop is not below the entry", () => {
   assert.equal(sizedEntry(100, 99, config).shares, 500); assert.equal(sizedEntry(100, 99.7, config).shares, 1666);
+  assert.equal(sizedEntry(100.42, 100.32, config).shares, 5000, "10 cents of risk is 10 cents, not 10.000000000000853");
   assert.equal(sizedEntry(100, 100, config).shares, 0); assert.equal(sizedEntry(100, 101, config).shares, 0);
 });
 test("pre-box candles that happen to fit under the limit are not pulled into the box, and a box cannot start before it has candles to compare with", () => {
@@ -119,7 +124,7 @@ test("near miss: a box a hair too tall is rejected, a hair shorter is accepted",
   const tooTall = scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio - 0.003) * 1e3) / 1e3 }));
   // The 2.14-tall box is not accepted. A shorter one may still form, and a later low (the 158.08 double bottom) that would
   // push it over the limit is counted as a wick, never as a bound.
-  assert.ok(tooTall.boxes.every(b => b.box.height < 2.14 && b.box.low > 158.08));
+  assert.ok(tooTall.boxes.length >= 1 && tooTall.boxes.every(b => b.box.height < 2.14 && b.box.low > 158.08));
   assert.equal(scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio + 0.003) * 1e3) / 1e3 })).boxes.length, 1);
 });
 test("near miss: no contraction (the second half is as busy as the first) is rejected", () => {
@@ -158,4 +163,24 @@ test("a wick through the height limit that closes inside is counted but never be
 test("a box still open when the bars end is live, with no decision", () => {
   const r = scan({ breakout: [], after: [] }).boxes;
   assert.deepEqual([r.length, r[0]!.status, r[0]!.decision], [1, "live", null]);
+});
+test("a candle still forming when the bars end is not a candle: a live box stays live instead of being voided", () => {
+  const bars = referenceBars({ breakout: [], after: [] }), partial = [...bars, { ...bars.at(-1)!, begins_at: new Date(Date.parse(bars.at(-1)!.begins_at) + 60000).toISOString() }];
+  const r = scanDay(partial, runawayDailies(), config).boxes;
+  assert.deepEqual([r.length, r[0]!.status], [1, "live"]);
+  assert.equal(barCandles(partial, DAY, 2).length, barCandles(bars, DAY, 2).length);
+});
+test("a candle with an unknown close cannot count as the volatility a box is compared with", () => {
+  const known: Candle = { start: 0, end: 1, high: 2, low: 1, close: 1.5 }, partial: Candle = { ...known, close: null };
+  const before = Array.from({ length: 5 }, () => known);
+  assert.ok(contraction([known, known, known, known], before, config).evidence.evaluable);
+  assert.ok(!contraction([known, known, known, known], [partial, ...before.slice(1)], config).evidence.evaluable);
+});
+test("the candle that breaks out cannot also form the box that it breaks out of", () => {
+  // The box would first qualify on the breakout candle itself (a close above the run): no box, and no decision from it.
+  const r = scan({ breakout: [], after: [], inside: [], second: BOX_SECOND_HALF.slice(0, 5).concat([[159.6, 161.3, 159.6, 161.2]]) });
+  assert.ok(r.boxes.every(b => b.box.high < 161));
+});
+test("a box's minutes must be a whole number of candles", () => {
+  assert.throws(() => boxConfig(DAY, ["X"], { minBoxMinutes: 11 }), /Invalid/);
 });

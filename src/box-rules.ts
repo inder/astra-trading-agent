@@ -2,7 +2,7 @@
 // finds and describes setups; it opens nothing). A rule returns its decision with the evidence the journal records, as
 // in orb-rules.ts. Every number is a row in box-settings.ts. Timestamps: a candle is named by its START; "ends" is the
 // moment it closes. The grid starts at 9:32 ET (when the opening range ends), as in the opening-range strategy.
-import { sessionTimes } from "./daily-history.ts";
+import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
 import { sessionsBefore } from "./market-data.ts";
 import { levels, parseLevelsSettings, type DailyBars, type Frame, type Zone } from "./levels.ts";
 import { OPENING_RANGE_MINUTES } from "./orb-options.ts";
@@ -29,6 +29,8 @@ const atrOf = (daily: DailyBars, n: number) =>
 
 // ---- Runaway gate (daily bars strictly before the day). "All my strategies are only for runaway stocks."
 
+/** The trading session just before `date`. */
+const previousSession = (date: string): string => { let d = addDays(date, -1); while (!isTradingDay(d)) d = addDays(d, -1); return d; };
 /** The levels frame the gate and the supports read: the engine's default (longest usable daily) frame, or null. */
 export function levelsFrame(daily: DailyBars): Frame | null {
   const lv = levels(daily, parseLevelsSettings());
@@ -44,7 +46,9 @@ const brokenAbove = (frame: Frame | null): Zone[] =>
 export function runawayGate(daily: DailyBars, config: BoxConfig, frame: Frame | null = levelsFrame(daily)): RuleDecision<"runaway"> {
   const n = daily.close.length, price = daily.close[n - 1] ?? null;
   const checks: { name: string; pass: boolean; [k: string]: unknown }[] = [];
-  const need = Math.max(config.longAveragePeriod + config.risingLookbackSessions, config.highLookbackSessions > n ? 0 : config.highLookbackSessions);
+  const need = Math.max(config.longAveragePeriod + config.risingLookbackSessions, config.highLookbackSessions);
+  const previous = previousSession(config.date);
+  if (n && daily.time[n - 1] !== previous) return { fired: false, reason: "runaway", evidence: { sessions: n, unavailable: "daily history does not end at the previous session", lastSession: daily.time[n - 1] ?? null, expected: previous } };
   if (n < need || price === null) return { fired: false, reason: "runaway", evidence: { sessions: n, needSessions: need, unavailable: "not enough daily history" } };
   for (const [name, period] of [["short", config.shortAveragePeriod], ["long", config.longAveragePeriod]] as const) {
     const now = sma(daily.close, period)!, before = sma(daily.close, period, n - config.risingLookbackSessions)!;
@@ -119,7 +123,8 @@ export function barCandles(bars: readonly BoxBar[], date: string, candleMinutes:
   });
   if (!real.length) return [];
   const closes = new Map(barCandleCloses(real, gridStart, candleMinutes).map(c => [c.end, c.close]));
-  const lastEnd = gridStart + (Math.floor((Math.max(...real.map(b => b.at)) - gridStart) / length) + 1) * length, out: Candle[] = [];
+  // Only candles that have finished: the last bar must be the candle's last minute or later, so a candle still forming is never emitted.
+  const lastEnd = gridStart + Math.floor((Math.max(...real.map(b => b.at)) + 60000 - gridStart) / length) * length, out: Candle[] = [];
   for (let end = gridStart + length; end <= lastEnd; end += length) {
     const inside = real.filter(b => b.at >= end - length && b.at < end), whole = new Set(inside.map(b => b.at)).size === candleMinutes;
     if (!inside.length) { out.push({ start: end - length, end, high: NaN, low: NaN, close: null }); continue; }
@@ -135,7 +140,7 @@ const height = (cs: readonly Candle[]) => Math.max(...cs.map(c => c.high)) - Mat
 /** Volatility shrinks: the mean candle range of the box's second half against the mean range of the candles just before
  *  it. Not evaluable (not fired) without enough candles before the box. */
 export function contraction(box: readonly Candle[], before: readonly Candle[], config: BoxConfig): RuleDecision<"contraction"> {
-  if (before.length < config.contractionLookbackCandles || box.length < 2 || [...box, ...before].some(c => !Number.isFinite(c.high - c.low)))
+  if (before.length < config.contractionLookbackCandles || box.length < 2 || [...box, ...before].some(c => c.close === null || !Number.isFinite(c.high - c.low)))
     return { fired: false, reason: "contraction", evidence: { evaluable: false, candlesBefore: before.length, needed: config.contractionLookbackCandles } };
   const second = box.slice(box.length - Math.floor(box.length / 2)), secondMean = mean(second.map(c => c.high - c.low)), beforeMean = mean(before.map(c => c.high - c.low));
   const r = secondMean / beforeMean;
@@ -157,8 +162,9 @@ export interface Entry { price: number; shares: number; riskPerShare: number; no
 
 /** Entry price, stop and the shares that risk the set dollars: floor(risk / (entry - stop)); zero when it does not fit. */
 export function sizedEntry(price: number, stop: number, config: BoxConfig): Entry {
-  const perShare = price - stop, shares = perShare > 0 ? Math.floor(config.riskCents / 100 / perShare) : 0;
-  return { price: shown(price), shares, riskPerShare: shown(perShare), notional: shown(shares * price) };
+  // In 1/10,000 of a dollar, so 100.42 - 100.32 is exactly 10 cents (not 10.000000000000853) and an entry priced at a half cent keeps it.
+  const perShare = Math.round(price * 1e4) - Math.round(stop * 1e4), shares = perShare > 0 ? Math.floor(config.riskCents * 100 / perShare) : 0;
+  return { price: shown(price), shares, riskPerShare: perShare / 1e4, notional: shown(shares * price) };
 }
 
 export interface DayScan {
@@ -211,14 +217,21 @@ export function scanBoxes(candles: readonly Candle[], supportsAt: (asOf: number)
           entries: up ? { A: sizedEntry(live.low + config.entryAFractionOfBox * boxHeight, stop, config), B: sizedEntry(c.close, stop, config), stop: shown(stop) } : null });
         live = null; floor = i + 1; pending = null; continue;
       }
+      // Each side extends on its own while the box stays within the limit; a side that would break it is a wick, counted only.
       const high = Math.max(live.high, c.high), low = Math.min(live.low, c.low);
-      if (high - low <= limit) { live.high = high; live.low = low; } else live.wicks++;
+      let wick = false;
+      if (high > live.high) { if (high - live.low <= limit) live.high = high; else wick = true; }
+      if (low < live.low) { if (live.high - low <= limit) live.low = low; else wick = true; }
+      if (wick) live.wicks++;
       live.to = i; continue;
     }
     if (c.close === null) { floor = i + 1; pending = null; continue; }
     if (pending !== null && height(candles.slice(pending, i + 1)) > limit) pending = null;
     if (pending === null && i - minCandles + 1 >= floor && height(candles.slice(i - minCandles + 1, i + 1)) <= limit) pending = i - minCandles + 1;
     if (pending === null || i - pending + 1 < minCandles) continue;
+    // A candle that closes beyond the run before it is that run's breakout, not part of its formation.
+    const run = candles.slice(pending, i);
+    if (run.length && (c.close! > Math.max(...run.map(x => x.high)) || c.close! < Math.min(...run.map(x => x.low)))) { pending = null; floor = i + 1; continue; }
     const inside = candles.slice(pending, i + 1), low = Math.min(...inside.map(x => x.low)), high = Math.max(...inside.map(x => x.high));
     const squeeze = contraction(inside, candles.slice(Math.max(0, pending - config.contractionLookbackCandles), pending), config);
     const at = supportUnderBox(low, supportsAt(c.end), atr, config);

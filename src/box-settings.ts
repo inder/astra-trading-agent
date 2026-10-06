@@ -39,12 +39,13 @@ export type BoxConfig = { date: string; symbols: string[] } & { [K in BoxSetting
 const inRange = (v: unknown, r: SettingSpec) => typeof v === "number" && (r.integer ? Number.isSafeInteger(v) : Number.isFinite(v)) && v >= r.min && v <= r.max;
 /** The pinned config: the run's identity plus one value per row, every one range-checked. */
 export function parseBoxConfig(raw: unknown): BoxConfig {
+  if (typeof raw !== "object" || raw === null) throw new Error("Invalid support-box configuration");
   const c = raw as BoxConfig, keys: string[] = ["date", "symbols", ...BOX_SETTING_KEYS];
   if (!c || Object.keys(c).some(k => !keys.includes(k)) || !isTradingDay(c.date) || !Array.isArray(c.symbols) || c.symbols.length < 1 || c.symbols.length > 20 ||
     new Set(c.symbols).size !== c.symbols.length || c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) ||
     BOX_SETTING_KEYS.some(k => !inRange(c[k], BOX_SETTINGS[k])) || c.shortAveragePeriod >= c.longAveragePeriod ||
-    // A box must hold at least two candles, or it has no second half to compare.
-    c.minBoxMinutes < 2 * c.candleMinutes) throw new Error("Invalid support-box configuration");
+    // A box must hold at least two candles (it has no second half otherwise), and a whole number of them.
+    c.minBoxMinutes < 2 * c.candleMinutes || c.minBoxMinutes % c.candleMinutes !== 0) throw new Error("Invalid support-box configuration");
   return structuredClone(c);
 }
 /** A config with every row at its default, for the given day and symbols (and any overrides, which are validated). */

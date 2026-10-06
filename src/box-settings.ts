@@ -20,7 +20,7 @@ export const BOX_SETTINGS = {
   vwapIncludesToday: setting(1, 0, 1, true, "vwapIncludesToday", "whole", "1 = an anchored VWAP also counts today's minute bars up to the candle just finished (never later); 0 = through the prior close only. Default {default}."),
   // The box.
   atrPeriod: setting(14, 2, 100, true, "atrPeriod", "whole", "Sessions in the average true range every box number is measured against; default {default}."),
-  candleMinutes: setting(2, 1, 30, true, "candleMinutes", "whole", "Candle length in minutes, on the grid that starts at 9:32 ET as in the opening-range strategy; default {default}."),
+  candleMinutes: SETTINGS.candleMinutes,   // one row, shared with the opening-range strategy: the same grid from 9:32 ET
   maxBoxHeightAtr: setting(0.25, 0.02, 2, false, "maxBoxHeightAtr", "multiple", "Tallest a box may be (highest high minus lowest low), in ATRs; default {default}."),
   minBoxMinutes: setting(10, 2, 120, true, "minBoxMinutes", "whole", "Shortest a box may last, in minutes; default {default}."),
   supportReachAtr: setting(0.5, 0, 3, false, "supportReachAtr", "multiple", "How far above a support the box low may sit, in ATRs; default {default}."),

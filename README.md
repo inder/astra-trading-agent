@@ -332,8 +332,8 @@ is a recommendation: it reports what the rules found.
 | "Start it" | Starts the saved plan, after you say yes | `start_paper_run` |
 | "What did you buy?" / "How much is committed?" | Positions, budget and paper P&L | `get_paper_run` |
 | "Why didn't it buy HPE?" / "What happened this morning?" | Explains each decision from the journal | `get_paper_events` |
-| "How am I doing today?" | The day's paper P&L | `get_support_setups` | Read a support-box run's boxes for the day, live and decided, with their evidence. Watch-only; read-only |
-| `get_daily_pnl` |
+| "How am I doing today?" | The day's paper P&L | `get_daily_pnl` |
+| "What boxes did the support-box run find?" | Each stock's verdict, supports and boxes, from the journal (watch-only) | `get_support_setups` |
 | "Trim 25% of CRWV" / "Close everything" | Proposes the sale; you approve it in your browser | `propose_position_change` |
 | "Did my trim go through?" | Reports whether you approved and what sold | `get_position_review` |
 | "Stop watching" | Stops monitoring and keeps positions (their exits pause) | `stop_paper_run` |
@@ -458,6 +458,7 @@ the chat client if strategies need to continue after the chat disconnects.
 | `list_paper_runs` | List history and attachment/recovery state |
 | `get_paper_run` | Positions, budget and estimated option P&L |
 | `get_paper_events` | Page through the immutable decision journal |
+| `get_support_setups` | A support-box run's verdicts, supports and boxes (formed, decided, voided, expired), from its journal. Watch-only; read-only |
 | `get_daily_pnl` | Daily simulated P&L, never account-wide P&L |
 | `propose_position_change` | Create a local browser review for a trim/close |
 | `get_position_review` | Read approval status; cannot approve a sale |
@@ -636,7 +637,7 @@ Limits, stated plainly: candle highs and lows come from the trades Astra observe
 the minute bars show ([ADR 0002](docs/decisions/0002-candle-ranges-from-observed-trades.md)); a stopped or halted watch run cannot be
 resumed and the day's run for the strategy is used up; the runaway gate counts incidental levels a fast climb passes; the only evidence so
 far is invented bars (the reference day is shaped like SOXL on 2026-10-05) and a replay that needs private real bars; and nothing
-here is a claim of profitability. The strategy is not offered by the guided setup, which leads with the opening-range strategy.
+here is a claim of profitability. The guided setup leads with the opening-range strategy and offers this one only when the user asks for it.
 
 ### Replay a past session
 

@@ -384,7 +384,7 @@ export class TradingAgentService {
   // Readiness must answer even when run storage can't be read.
   #guideOrNull() { try { return this.guide(); } catch { return null; } }
   /** A support-box run's day, read back from its journal: each stock's verdict and supports, and its boxes (live, decided, voided or
-   *  expired) with their evidence. Read-only; the journal is the only source, so nothing here is newer than what was written. */
+   *  expired) with their evidence (a live box is shown as formed: the journal records its formation, not each later extension; a box left open by a stopped or halted run is `unresolved`). Read-only; the journal is the only source, so nothing here is newer than what was written. */
   supportSetups(runId: string) {
     const run = this.paper.status(runId);
     if (run.strategyId !== "support-box") throw new Error("This is not a support-box run");
@@ -400,7 +400,7 @@ export class TradingAgentService {
           if (e.type === "universe_checked") of(d.symbol).verdict = d;
           else if (e.type === "supports") of(d.symbol).supports = d;
           else if (e.type === "candle_unobserved") of(d.symbol).unobservedCandles++;
-          else if (e.type.startsWith("box_") && d.box) of(d.symbol).boxes.set(d.box.start, { ...(d as object), outcome: e.type === "box_formed" ? "live" : e.type.slice(4) } as unknown as Box);
+          else if (e.type.startsWith("box_") && d.box) of(d.symbol).boxes.set(d.box.start, { ...(d as object), outcome: e.type === "box_formed" ? (run.status === "running" ? "live" : "unresolved") : e.type.slice(4) } as unknown as Box);
         }
         after = page.revision;
       }

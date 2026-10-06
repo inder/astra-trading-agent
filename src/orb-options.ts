@@ -82,7 +82,7 @@ export const SETTINGS = {
     "How far below the opening-range low a candle must close to end a stock's day before entry, in range heights (range high minus low); default {default}. A wick or a single print never ends it."),
   // Both candle rules use one grid, starting when the opening range ends and never rolling.
   candleMinutes: setting(2, 1, 30, true, "candleMinutes", "whole",
-    "Length in minutes of the candles whose closes decide the cancel before entry and the protective stop after it, on a grid starting when the opening range ends (9:32 ET); default {default}."),
+    "Length in minutes of the candles the strategy's rules read, on a grid starting when the opening range ends (9:32 ET): for the opening-range strategy their closes decide the cancel before entry and the protective stop after it; for support-box they make the boxes. Default {default}."),
 } as const satisfies Record<string, SettingSpec>;
 export type SettingKey = keyof typeof SETTINGS;
 export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];

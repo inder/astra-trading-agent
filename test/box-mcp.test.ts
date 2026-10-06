@@ -51,3 +51,19 @@ test("a support-box run is configured with its own settings through MCP, watched
   const notBox = await raw("get_support_setups", { runId: orb.runId });
   assert.equal(notBox.isError, true); assert.match(unpack(notBox).error, /not a support-box run/);
 });
+
+test("a run stopped while a box is open reports that box as unresolved, never as live", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "astra-box-stop-")), { open } = sessionTimes(DAY);
+  let now = open - 60000;
+  const market = new ReplayMarket({ regular: { data: { results: [{ symbol: "SOXL", interval: "minute", bounds: "regular", bars: referenceBars() }] } },
+    clock: () => now, volatility: {}, daily: { SOXL: runawayDailies() } });
+  const service = new TradingAgentService(dir, undefined, undefined, { market, clock: () => now, ready: () => true, auto: false });
+  t.after(async () => { await service.close(); rmSync(dir, { recursive: true, force: true }); });
+  service.paper.configure({ runId: "box-stop", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000 });
+  await service.paper.start("box-stop");
+  // Tick to 10:05, after the box formed (about 9:54) and before the candle that decides it (ends 10:14), then stop.
+  for (now = open - 60000; now < open + 35 * 60000; now += 1000) await service.paper.tick("box-stop");
+  await service.paper.stop("box-stop");
+  const out = service.supportSetups("box-stop"), boxes = out.symbols[0]!.boxes as unknown as { outcome: string }[];
+  assert.deepEqual(boxes.map(b => b.outcome), ["unresolved"]); assert.equal(out.runStatus, "stopped");
+});

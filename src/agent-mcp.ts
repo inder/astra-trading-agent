@@ -102,6 +102,7 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
     multiple: { toChat: v => v, integer: false, show: v => `${v}`, toInternal: v => v },
   };
   // Every strategy's rows, by internal key. A row two strategies share (the market-data timing) is one object, so one chat setting.
+  for (const key of Object.keys(BOX_SETTINGS)) if (key in SETTINGS && (SETTINGS as Record<string, unknown>)[key] !== (BOX_SETTINGS as Record<string, unknown>)[key]) throw new Error(`Setting ${key} is defined differently by two strategies`);
   const ALL: Record<string, SettingSpec> = { ...SETTINGS, ...BOX_SETTINGS }, ALL_KEYS = Object.keys(ALL);
   const names = ALL_KEYS.map(k => ALL[k]!.mcp.name);
   if (new Set(names).size !== names.length) throw new Error("Two settings share a chat name");
@@ -136,7 +137,7 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   server.registerTool("get_paper_events", { description: "Read the immutable PAPER decision journal in revision order. Pass the last returned revision as after for the next page.",
     inputSchema: z.object({ runId, after: z.number().int().min(-1).default(-1), limit: z.number().int().min(1).max(100).default(20) }).strict(), annotations: readOnly },
     a => guarded(() => ({ pages: service.paper.events(a.runId, a.after, a.limit) })));
-  server.registerTool("get_support_setups", { description: "Read a support-box run's boxes for the day: each stock's runaway verdict and supports, and every box found (live, decided up or down, voided, expired) with its evidence and the entry, stop and share count it journaled. Watch-only: the strategy holds no positions and places no orders. Candle highs and lows are the trades Astra observed, so boxes can be tighter than minute bars show.",
+  server.registerTool("get_support_setups", { description: "Read a support-box run's boxes for the day: each stock's runaway verdict and supports, and every box found (live as formed, decided up or down, voided, expired, or unresolved when the run stopped with it open) with its evidence and the entry, stop and share count it journaled. Watch-only: the strategy holds no positions and places no orders. Candle highs and lows are the trades Astra observed, so boxes can be tighter than minute bars show.",
     inputSchema: runSchema, annotations: readOnly }, a => guarded(() => service.supportSetups(a.runId)));
   server.registerTool("get_daily_pnl", { description: "Aggregate this installation's simulated option P&L for a date, not brokerage account performance. Includes feesExcluded and missing-mark indicators.",
     inputSchema: z.object({ date }).strict(), annotations: readOnly }, a => guarded(() => service.paper.daily(a.date)));

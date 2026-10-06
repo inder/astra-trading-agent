@@ -75,6 +75,10 @@ test("real stdio MCP handshake, schema checks, sample and resource without crede
   const readiness = unpack(await client.callTool({ name: "get_readiness", arguments: {} }));
   // The stage depends on today's date (the guided flow is pinned to a fixed clock in its own test above).
   assert.equal(readiness.brokerage, "not_connected"); assert.equal(typeof readiness.guide.stage, "string");
+  // The live chart is a read, and without a Robinhood connection it says what to do rather than opening a dead page.
+  assert.equal(tools.find(t => t.name === "open_chart")!.annotations?.readOnlyHint, true);
+  const chart = await client.callTool({ name: "open_chart", arguments: { symbol: "RDDT" } });
+  assert.equal(chart.isError, true); assert.match(unpack(chart).error, /Connect Robinhood market data first/);
   const bad = await client.callTool({ name: "run_sample", arguments: { requestId: "../x" } });
   assert.equal(bad.isError, true);
   // The report's own contract, at the boundary a model actually reaches it through. Account handles are the only way

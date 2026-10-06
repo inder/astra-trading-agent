@@ -10,13 +10,16 @@ import { BOUNDARY_ERRORS, MAX_CHARTED_HOLDINGS, normalizeAccounts, normalizeTota
   type AccountSummary, type Holding, type OptionHolding, type OptionInstrument, type OptionMark } from "./portfolio.ts";
 import { overview, portfolioReport, type PortfolioOverview, type ReportAccount, type ReportContract, type ReportHolding } from "./report.ts";
 import { addDays, isTradingDay, sessionTimes } from "./daily-history.ts";
-import { aggregateWeekly, levels, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
+import { aggregateWeekly, levels, movingAverageSeries, parseLevelsSettings, type DailyBars, type LatestTrade, type Levels, type LevelsSettings, type Timeframe } from "./levels.ts";
 import { ReportServer } from "./report-server.ts";
 import { RobinhoodPaperMarket, type PaperMarket } from "./paper-market.ts";
 import { PaperController } from "./paper-controller.ts";
 import { PaperReviews } from "./paper-reviews.ts";
 import { entryCapacity, etDate, setupGuide, type GuideRun } from "./setup-guide.ts";
 import { checkSymbols, type SymbolSource } from "./symbol-check.ts";
+import { ChartStore } from "./chart-store.ts";
+import { ChartServer } from "./chart-server.ts";
+import { LiveCharts, type ChartSource } from "./live-chart.ts";
 
 export interface SampleRequest { strategyId: string; symbols: string[]; includePremarket: boolean; requestId: string }
 export interface AgentRun extends SampleResult {
@@ -42,6 +45,10 @@ export class TradingAgentService {
    *  per-call argument puts that choice in reach of whatever is calling, and the answer must not depend on the call. */
   #reportDirectory: string;
   #closing?: Promise<void>;
+  /** The live chart: its store, poll loop and loopback page. Built on first use, so an installation that never charts
+   *  never opens the database or a port. */
+  #charts?: { store: ChartStore; live: LiveCharts; server: ChartServer };
+  #chartSource?: ChartSource; #chartStorePath: string;
   #clock: () => number; #ready: () => boolean; #symbols: SymbolSource;
   #dailyBars = new Map<string, { on: string; bars: DailyBars; dropped: DroppedBars }>();
   #levelsSettings: LevelsSettings = parseLevelsSettings();
@@ -86,9 +93,11 @@ export class TradingAgentService {
   get #historyDays() { return Math.round((this.#levelsSettings.weeklyYears + 1) * 365.25); }
   constructor(dataDirectory: string, strategies: readonly AgentStrategy[] = agentStrategies, broker = new RobinhoodConnection(),
     testing: { market?: PaperMarket; symbols?: SymbolSource; ready?: () => boolean; clock?: () => number; auto?: boolean;
-      reports?: string } = {}) {
+      reports?: string; chartSource?: ChartSource; chartStore?: string } = {}) {
     this.dataDirectory = resolve(dataDirectory); this.strategies = strategies;
     this.#reportDirectory = resolve(testing.reports ?? join(this.dataDirectory, "reports"));
+    this.#chartStorePath = testing.chartStore ?? join(this.dataDirectory, "charts.sqlite");
+    this.#chartSource = testing.chartSource;
     this.broker = broker; this.market = new RobinhoodMarketData(broker);
     if (new Set(strategies.map(s => s.id)).size !== strategies.length) throw new Error("Duplicate strategy ID");
     const live = new RobinhoodPaperMarket(broker);
@@ -365,8 +374,47 @@ export class TradingAgentService {
     }
     return out;
   }
+  #chartParts() {
+    if (this.#charts) return this.#charts;
+    const source: ChartSource = this.#chartSource ?? {
+      quotes: symbols => this.market.quotes(symbols),
+      minuteBars: (symbol, start, end) => {
+        validateSymbols([symbol]);
+        return this.broker.read("get_equity_historicals", { symbols: [symbol], interval: "minute", bounds: "regular",
+          adjustment_type: "split", start_time: new Date(start).toISOString(), end_time: new Date(end).toISOString() });
+      },
+    };
+    const store = new ChartStore(this.#chartStorePath);
+    const live = new LiveCharts(store, source, {}, this.#clock);
+    const server = new ChartServer({
+      daily: symbol => this.chartDaily(symbol),
+      intraday: symbol => live.history(symbol),
+      subscribe: (symbol, listener) => live.subscribe(symbol, listener),
+    });
+    return this.#charts = { store, live, server };
+  }
+  /** A live two-panel chart for one stock, on loopback: daily candles with the levels, and intraday candles that
+   *  update while the market is open. Market data only. */
+  async chart(symbol: string) {
+    validateSymbols([symbol]);
+    if (!this.#ready()) throw new Error("Connect Robinhood market data first");
+    const parts = this.#chartParts();
+    return { url: await parts.server.url(symbol), symbol, settings: parts.live.settings };
+  }
+  /** The daily panel: settled daily candles, moving averages and every timeframe's levels. */
+  async chartDaily(symbol: string) {
+    const [found] = await this.levels([symbol], "5y");
+    const bars = this.#dailyBars.get(symbol)?.bars;
+    if (!found || "unavailable" in found || !bars) return { symbol, unavailable: found && "unavailable" in found ? found.unavailable : "daily price history could not be read" };
+    const { frames, asOf, price, priceSource, priceAt, defaultTimeframe, warnings } = found;
+    return { symbol, asOf, price, priceSource, priceAt, defaultTimeframe, warnings, frames,
+      candles: bars.time.map((time, i) => ({ time, open: bars.open[i]!, high: bars.high[i]!, low: bars.low[i]!, close: bars.close[i]! })),
+      sma: Object.fromEntries(movingAverageSeries(bars, this.#levelsSettings.movingAverages).map(s => [s.period, s.points])) };
+  }
   close() {
     return this.#closing ??= (async () => {
+      const charts = this.#charts; this.#charts = undefined;
+      if (charts) { charts.live.close(); try { await charts.server.close(); } finally { charts.store.close(); } }
       try { await this.reviews.close(); } finally {
         try { await this.reports.close(); } finally {
           try { await this.paper.close(); } finally { await this.broker.close(); }

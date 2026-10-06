@@ -28,7 +28,7 @@ const shownSupport = (s: Support) => ({ kind: s.kind, label: s.label, lo: Math.r
 interface SymbolState {
   phase: Phase; head: DayHead | null; prior: VwapBar[]; anchorsPending: string[]; anchorsMissing: string[];
   scanner: BoxScanner | null; candles: CandleState; slots: Map<number, { high: number; low: number; trades: number }>; lastTradeCounted: number;
-  dailyRetryAt: number; lastUnavailable: { reason: string; evidence: Record<string, unknown> } | null; todayRetryAt: number; todayBackoffMs: number; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
+  dailyRetryAt: number; lastUnavailable: { reason: string; evidence: Record<string, unknown> } | null; todayRetryAt: number; todayBackoffMs: number; closing: boolean; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
   counts: { formed: number; decided: number; voided: number; expired: number; unobserved: number };
 }
 type Arrival = (events: PaperEvent[]) => void;
@@ -43,7 +43,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     this.#config = parseBoxConfig(raw); this.#market = market; this.#clock = clock;
     this.#session = sessionTimes(this.#config.date); this.#grid = this.#session.open + OPENING_RANGE_MINUTES * 60000;
     for (const symbol of this.#config.symbols) this.#symbols.set(symbol, { phase: "loading", head: null, prior: [], anchorsPending: [], anchorsMissing: [],
-      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, lastUnavailable: null, todayRetryAt: 0, todayBackoffMs: this.#config.maxObservationGapMs, queue: [],
+      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, lastUnavailable: null, todayRetryAt: 0, todayBackoffMs: this.#config.maxObservationGapMs, closing: false, queue: [],
       today: null, todayAttempts: 0, degraded: false, counts: { formed: 0, decided: 0, voided: 0, expired: 0, unobserved: 0 } });
   }
   get pollMs() { return this.#config.pollMs; }
@@ -204,7 +204,7 @@ export class BoxPaperRuntime implements PaperRuntime {
   #drain(symbol: string, st: SymbolState, now: number, events: PaperEvent[]): void {
     const c = this.#config, head = st.head!;
     const supportsAt = (asOf: number): Support[] => {
-      if (c.useAnchoredVwaps && c.vwapIncludesToday && !st.degraded && (!st.today || st.today.fetchedAt < asOf)) throw new NeedsData("today's minute bars");
+      if (c.useAnchoredVwaps && c.vwapIncludesToday && !st.degraded && !st.closing && (!st.today || st.today.fetchedAt < asOf)) throw new NeedsData("today's minute bars");
       return [...head.supports, ...anchoredVwaps([...st.prior, ...(st.today?.bars ?? [])], head.daily, c, asOf)];
     };
     while (st.queue.length) {
@@ -212,19 +212,27 @@ export class BoxPaperRuntime implements PaperRuntime {
       try { out = st.scanner!.push(st.queue[0]!, supportsAt); }
       catch (error) {
         if (!(error instanceof NeedsData)) throw error;
-        if (this.#inflight.has(`today:${symbol}`) || now < st.todayRetryAt) return;   // a read is on its way, or the last one failed a moment ago
-        if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) { st.degraded = true; continue; }
-        st.todayAttempts++; this.#fetchToday(symbol, st, now);
+        // The candle waits. Nothing changes here: a read is launched (and counted) only by #fetchToday, and a symbol is degraded only by a read that failed.
+        if (!this.#inflight.has(`today:${symbol}`) && now >= st.todayRetryAt) this.#fetchToday(symbol, st, now);
         return;
       }
       const candle = st.queue.shift()!;
       for (const e of out) events.push(this.#journal(symbol, st, e, candle, supportsAt));
     }
   }
-  /** Read today's minute bars in the background. A success makes them current and clears any degradation; a failure backs off. */
-  #fetchToday(symbol: string, st: SymbolState, now: number): void {
-    // Today's bars share the prefetch's cap on reads in flight, so twenty stocks cannot ask at once; a symbol that is refused waits for its next turn.
-    if ([...this.#inflight].filter(k => k.startsWith("today:")).length >= MAX_IN_FLIGHT) return;
+  // The state of today's minute bars, and the one event allowed to change each piece (every row has a test):
+  //   inflight `today:S`   a read launched (added) / a read arrived (removed)
+  //   todayAttempts        +1 when a read is actually LAUNCHED (never when the cap turns it away); 0 when a read succeeds
+  //   todayRetryAt         a launched read failed: now + one poll before degrading, now + the backoff once degraded
+  //   todayBackoffMs       doubled when a read fails while degraded (cap 60 s); reset when a read succeeds
+  //   degraded             true: a launched read failed and todayAttempts reached the cap; false: a read succeeded
+  //   today (bars, fetchedAt)   a read succeeded
+  //   closing              the session close (the last candles use what there is)
+  /** Read today's minute bars in the background; true when a read was launched. A success makes them current and clears any degradation. */
+  #fetchToday(symbol: string, st: SymbolState, now: number): boolean {
+    // Today's bars share the prefetch's cap on reads in flight, so twenty stocks cannot ask at once; a symbol that is refused waits for its next turn, and nothing is counted.
+    if ([...this.#inflight].filter(k => k.startsWith("today:")).length >= MAX_IN_FLIGHT) return false;
+    st.todayAttempts++;
     this.#launch(`today:${symbol}`, TODAY_READ_DEADLINE_MS, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
       const result = r.ok ? ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute") : undefined;
       if (r.ok && Array.isArray(result?.bars)) {
@@ -232,12 +240,14 @@ export class BoxPaperRuntime implements PaperRuntime {
         st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; st.todayBackoffMs = this.#config.maxObservationGapMs;
       } else {
         this.#reads.failed("bars", this.#clock(), ev, r.ok ? new Error("No minute bars for the day") : r.error);
+        if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) st.degraded = true;
         // A short pause between the first tries (the candle is waiting); once degraded, a doubling backoff.
         st.todayRetryAt = this.#clock() + (st.degraded ? st.todayBackoffMs : this.#config.pollMs);
         if (st.degraded) st.todayBackoffMs = Math.min(st.todayBackoffMs * 2, MAX_TODAY_BACKOFF_MS);
       }
       this.#drain(symbol, st, this.#clock(), ev);
     });
+    return true;
   }
   /** A symbol whose VWAP fell back to the prior sessions keeps asking for today's bars, on a doubling backoff, until they come. */
   #recover(symbol: string, st: SymbolState, now: number): void {
@@ -247,14 +257,14 @@ export class BoxPaperRuntime implements PaperRuntime {
     st.counts[e.type === "formed" ? "formed" : e.type === "decided" ? "decided" : "voided"]++;
     // The last minute the VWAP could see: bars lag, so this may be earlier than the candle's end.
     const through = st.today ? Math.max(0, ...st.today.bars.filter(b => b.at + 60000 <= candle.end).map(b => b.at + 60000)) : 0;
-    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded, ...e.record } };
+    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded || st.closing, ...e.record } };
   }
 
   // ---- The close.
   #finish(events: PaperEvent[]): void {
     for (const [symbol, st] of this.#symbols) {
       if (st.phase !== "ready") continue;
-      st.degraded = true; this.#drain(symbol, st, this.#clock(), events);
+      st.closing = true; this.#drain(symbol, st, this.#clock(), events);
       const live = st.scanner!.live();
       if (live) { st.counts.expired++; events.push({ type: "box_expired", data: { symbol, rangesFrom: "observed_trades", ...(live as BoxRecord) } }); }
     }

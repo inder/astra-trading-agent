@@ -43,13 +43,14 @@ const brokenAbove = (frame: Frame | null): Zone[] =>
 /** Whether a stock is a runaway: the last close stands above its rising short and long averages, within a set distance of
  *  its high of the last few months, and a daily close went through a prior resistance zone recently. Each check is
  *  journaled with its numbers, so a review sees which one failed. */
-export function runawayGate(daily: DailyBars, config: BoxConfig, frame: Frame | null = levelsFrame(daily)): RuleDecision<"runaway"> {
+export type GateDecision = RuleDecision<"runaway"> | { fired: false; reason: "unavailable"; unavailable: "stale_daily_history" | "not_enough_daily_history"; evidence: Record<string, unknown> };
+export function runawayGate(daily: DailyBars, config: BoxConfig, frame: Frame | null = levelsFrame(daily)): GateDecision {
   const n = daily.close.length, price = daily.close[n - 1] ?? null;
   const checks: { name: string; pass: boolean; [k: string]: unknown }[] = [];
   const need = Math.max(config.longAveragePeriod + config.risingLookbackSessions, config.highLookbackSessions);
   const previous = previousSession(config.date);
-  if (n && daily.time[n - 1] !== previous) return { fired: false, reason: "runaway", evidence: { sessions: n, unavailable: "daily history does not end at the previous session", lastSession: daily.time[n - 1] ?? null, expected: previous } };
-  if (n < need || price === null) return { fired: false, reason: "runaway", evidence: { sessions: n, needSessions: need, unavailable: "not enough daily history" } };
+  if (n && daily.time[n - 1] !== previous) return { fired: false, reason: "unavailable", unavailable: "stale_daily_history", evidence: { sessions: n, lastSession: daily.time[n - 1] ?? null, expected: previous } };
+  if (n < need || price === null) return { fired: false, reason: "unavailable", unavailable: "not_enough_daily_history", evidence: { sessions: n, needSessions: need } };
   for (const [name, period] of [["short", config.shortAveragePeriod], ["long", config.longAveragePeriod]] as const) {
     const now = sma(daily.close, period)!, before = sma(daily.close, period, n - config.risingLookbackSessions)!;
     checks.push({ name: `${name}Average`, pass: price > now && now > before, period, average: shown(now), averageEarlier: shown(before), price });
@@ -187,7 +188,9 @@ export function prepareDay(dailyAll: DailyBars, config: BoxConfig): DayHead {
   if (gate === "on") {
     const need = Math.max(config.longAveragePeriod + config.risingLookbackSessions, config.highLookbackSessions);
     if (n < need) return { ...head, unavailable: { reason: "not_enough_daily_history", evidence: { sessions: n, needSessions: need, for: "runaway gate" } } };
-    head.runaway = runawayGate(daily, config, frame);
+    const gated = runawayGate(daily, config, frame);
+    if (gated.reason === "unavailable") return { ...head, unavailable: { reason: gated.unavailable, evidence: gated.evidence } };
+    head.runaway = gated;
     if (!head.runaway.fired) return { ...head, unavailable: null };
   }
   const atr = atrOf(daily, config.atrPeriod);

@@ -9,7 +9,8 @@ import { boxConfig } from "../src/box-settings.ts";
 import { sessionTimes } from "../src/daily-history.ts";
 import { ReplayMarket, type BarsFile, type MinuteBar } from "../src/replay-market.ts";
 import { checkBoxes, runReplay, timeline, type ReplayResult } from "../src/replay.ts";
-import { DAY, laggardDailies, referenceBars, runawayDailies } from "./box-fixture.ts";
+import { DAY, SECOND_BOX, laggardDailies, referenceBars, runawayDailies } from "./box-fixture.ts";
+import { scanDay } from "../src/box-rules.ts";
 
 // Invented prices only (test/box-fixture.ts): the real replay data is private and never enters this repository.
 const { open } = sessionTimes(DAY), grid = open + 120000;
@@ -89,14 +90,14 @@ test("a support-box run cannot be resumed and its runtime refuses a checkpoint o
 });
 
 // ---- Detached reads that fail, stall or arrive late (the happy path above answers instantly).
-async function flaky(tweak: (market: ReplayMarket) => void, gated = true, extra: Record<string, unknown> = {}) {
+async function flaky(tweak: (market: ReplayMarket, clock: () => number) => void, gated = true, extra: Record<string, unknown> = {}, shape: { symbols: string[]; bars: ReturnType<typeof referenceBars> } = { symbols: ["SOXL"], bars: referenceBars() }) {
   const dir = mkdtempSync(join(root, `fl${n++}-`)), { close } = sessionTimes(DAY);
   let now = open - 120000;
-  const market = new ReplayMarket({ regular: file({ SOXL: referenceBars() }), clock: () => now, volatility: {}, daily: { SOXL: runawayDailies() } });
-  tweak(market);
+  const market = new ReplayMarket({ regular: file(Object.fromEntries(shape.symbols.map(sy => [sy, shape.bars]))), clock: () => now, volatility: {}, daily: Object.fromEntries(shape.symbols.map(sy => [sy, runawayDailies()])) });
+  tweak(market, () => now);
   const service = new TradingAgentService(dir, undefined, undefined, { market, clock: () => now, ready: () => true, auto: false });
   try {
-    service.paper.configure({ runId: "flaky", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000, ...(gated ? { useRunawayGate: 1 } : {}), ...extra } as never);
+    service.paper.configure({ runId: "flaky", strategyId: "support-box", date: DAY, symbols: shape.symbols, includePremarket: false, heartbeatMs: 600000, ...(gated ? { useRunawayGate: 1 } : {}), ...extra } as never);
     await service.paper.start("flaky");
     for (let guard = 0; guard < 30000; guard++) { const s = await service.paper.tick("flaky"); if (s.status === "completed") break; now += 1000; if (now > close + 3600000) break; }
     const events: Journal[] = [];
@@ -170,4 +171,77 @@ test("today's minute bars failing three times degrade the VWAP, and a later succ
   assert.equal(decided.vwapTodayDegraded, false, "by the decision the bars were back");
   assert.ok(of(events, "data_restored").some(e => e.data.source === "bars"));
   assert.equal(decided.decision.close, 160.71);
+});
+
+// ---- Today's minute bars: each piece of state changes only on its own event (see the table above #fetchToday in box-paper-runtime.ts).
+const FIVE = ["AAA", "BBB", "CCC", "DDD", "EEE"];
+type Call = { symbol: string; at: number; end: number };
+/** Wraps today's-bars reads (start = the open): `fail(call, n)` decides whether this call fails; every call is recorded, with how many were in flight. */
+function todayReads(m: ReplayMarket, clock: () => number, fail: (call: Call, n: number) => boolean, slowMs = 0) {
+  const calls: Call[] = [], real = m.bars.bind(m), waiting: { until: number; release: () => void }[] = []; let inFlight = 0, peak = 0;
+  // A slow read stays in flight for `slowMs` of simulated time: it is released by the quote polls, which tick with the clock.
+  const quotes = m.quotes.bind(m);
+  m.quotes = async s => { for (const w of waiting.splice(0)) if (w.until <= clock()) w.release(); else waiting.push(w); return quotes(s); };
+  m.bars = async (symbols, a, b, x) => {
+    if (a !== open) return real(symbols, a, b, x);
+    const call = { symbol: symbols[0]!, at: clock(), end: b }; calls.push(call); inFlight++; peak = Math.max(peak, inFlight);
+    try {
+      if (slowMs) await new Promise<void>(release => waiting.push({ until: call.at + slowMs, release }));
+      if (fail(call, calls.length)) throw new Error("timeout");
+      return await real(symbols, a, b, x);
+    } finally { inFlight--; }
+  };
+  return { calls, peak: () => peak };
+}
+test("many symbols asking for today's bars at once: reads the cap turns away are not counted, and no symbol is degraded without a failed read", async () => {
+  let reads!: ReturnType<typeof todayReads>;
+  const events = await flaky((m, c) => { reads = todayReads(m, c, () => false, 4000); }, true, {}, { symbols: FIVE, bars: referenceBars() });   // each read takes 4 s: the two turned away wait several polls
+  const formed = of(events, "box_formed");
+  assert.deepEqual(formed.map(e => e.data.symbol).sort(), FIVE, "every symbol's box formed");
+  assert.ok(formed.every(e => e.data.vwapTodayDegraded === false && e.data.vwapThrough), "none degraded: every read succeeded");
+  for (const symbol of FIVE) {
+    const first = reads.calls.find(c => c.symbol === symbol), box = formed.find(e => e.data.symbol === symbol)!;
+    assert.ok(first, `${symbol} read today's bars`); assert.ok(first.at <= box.at, `${symbol}'s first read (${first.at}) went out before its box formed (${box.at})`);
+  }
+  assert.ok(reads.peak() <= 3, `at most three reads in flight, saw ${reads.peak()}`);
+  assert.ok(of(events, "data_gap").length === 0 && !of(events, "box_decided").some(e => e.data.vwapTodayDegraded));
+});
+test("failures degrade a symbol only after three launched reads, space the retries (one poll, then a doubling backoff), and a success resets everything", async () => {
+  let reads!: ReturnType<typeof todayReads>;
+  // The first six reads fail (three to degrade, then recovery attempts at 5 s and 10 s), the seventh succeeds.
+  const events = await flaky((m, c) => { reads = todayReads(m, c, (_c, n) => n <= 6); });
+  const gaps = reads.calls.slice(0, 7).map((c, i, all) => i === 0 ? 0 : (c.at - all[i - 1]!.at) / 1000);
+  assert.ok(gaps[1]! >= 1 && gaps[2]! >= 1, `the first retries wait at least one poll: ${gaps}`);
+  assert.ok(gaps[3]! >= 5 && gaps[4]! >= 10, `once degraded the backoff starts at 5 s and doubles: ${gaps}`);
+  const formed = of(events, "box_formed")[0]!.data, decided = of(events, "box_decided")[0]!.data;
+  assert.deepEqual([formed.vwapTodayDegraded, formed.vwapThrough], [true, null], "degraded with no today's bars: nothing was read, so no vwapThrough");
+  assert.equal(decided.vwapTodayDegraded, false, "a success clears the degradation");
+  assert.ok(reads.calls.length >= 7);
+});
+test("two failures then a success never degrade; the backoff does not grow past a minute", async () => {
+  let reads!: ReturnType<typeof todayReads>;
+  const two = await flaky((m, c) => { reads = todayReads(m, c, (_c, n) => n <= 2); });
+  assert.equal(of(two, "box_formed")[0]!.data.vwapTodayDegraded, false);
+  const many = await flaky((m, c) => { reads = todayReads(m, c, () => true); });   // never reads: degraded from the third failure on
+  const late = reads.calls.filter(c => c.at > open + 40 * 60000).map((c, i, all) => i === 0 ? 0 : (c.at - all[i - 1]!.at) / 1000).slice(1);
+  assert.ok(late.length > 3 && late.every(g => g >= 59 && g <= 65), `settled at the 60 s cap: ${late.slice(0, 5)}`);
+  assert.equal(of(many, "box_formed")[0]!.data.vwapTodayDegraded, true);
+});
+test("after the outage recovers, a box that forms matches the offline scan: the same support, and the VWAP read through the candle's end (five symbols, so the cap is exercised)", async () => {
+  const bars = referenceBars({ extra: SECOND_BOX }), outageEnds = open + 52 * 60000;   // reads fail until 10:22 ET
+  let reads!: ReturnType<typeof todayReads>;
+  const events = await flaky((m, c) => { reads = todayReads(m, c, call => call.end < outageEnds); }, false, {}, { symbols: FIVE, bars });
+  const reference = scanDay(bars, runawayDailies(), boxConfig(DAY, FIVE)).boxes;
+  assert.equal(reference.length, 2, "the offline scan finds both boxes");
+  for (const symbol of FIVE) {
+    const formed = of(events, "box_formed").filter(e => e.data.symbol === symbol);
+    assert.equal(formed.length, 2, `${symbol} formed both boxes`);
+    assert.equal(formed[0]!.data.vwapTodayDegraded, true, "the first box formed during the outage");
+    const second = formed[1]!.data, want = reference[1]!;
+    assert.equal(second.vwapTodayDegraded, false, "the second formed after recovery");
+    assert.deepEqual([second.support, second.box.start, second.formedAt], [want.support, want.box.start, want.formedAt]);
+    assert.equal(second.vwapThrough, want.formedAt, "the VWAP was read through the end of the candle the box formed on");
+    assert.equal(of(events, "box_decided").filter(e => e.data.symbol === symbol).length, 2);
+  }
+  assert.ok(reads.peak() <= 3);
 });

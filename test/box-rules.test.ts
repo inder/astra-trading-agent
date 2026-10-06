@@ -67,9 +67,9 @@ test("near misses: a close more than the allowed distance under the high fails; 
   assert.ok(!old.fired); assert.ok(!(old.evidence.checks as any[]).find(c => c.name === "brokeResistance").pass);
   const last = (k: number) => ({ time: d.time.slice(-k), open: d.open.slice(-k), high: d.high.slice(-k), low: d.low.slice(-k), close: d.close.slice(-k) });
   const short = runawayGate(last(40), config);   // a stock with 40 sessions has not shown a three-month high
-  assert.ok(!short.fired); assert.equal(short.evidence.unavailable, "not enough daily history");
+  assert.deepEqual([short.fired, short.reason], [false, "unavailable"]); assert.equal((short as { unavailable: string }).unavailable, "not_enough_daily_history");
   const stale = runawayGate({ ...d, time: d.time.map((t, i) => i === n - 1 ? "2026-10-01" : t) }, config);   // the feed lags a session
-  assert.ok(!stale.fired); assert.match(String(stale.evidence.unavailable), /previous session/);
+  assert.deepEqual([stale.fired, stale.reason], [false, "unavailable"]); assert.equal((stale as { unavailable: string }).unavailable, "stale_daily_history");
 });
 
 test("supports: the broken zone and its breakout-session high, and the averages; each type can be switched off", () => {
@@ -177,13 +177,11 @@ test("near miss: a box whose only support sits above it is rejected: a level abo
 });
 test("near miss: a box 0.3 ATR above its nearest support is rejected, and one 0.1 ATR above it is accepted (the founder's supports were 0.05 and 0.12 ATR below)", () => {
   const s = scan(), atr = s.atr!, box = s.boxes[0]!, low = box.box.low;
-  const only = (gap: number) => scan({ priorTypical: [150, 153.5, 162] }, boxConfig(DAY, ["X"], { useBrokenResistance: 0, useAverages: 0, vwapMaxSessionsBack: 3 }));
   // Put the Oct 1 VWAP exactly `gap` ATRs under the box low by shifting the prior sessions' typical price.
   const vwapFor = (gap: number) => { const want = low - gap * atr, base = scanDay(referenceBars(), runawayDailies(), config).supports.find(x => x.label.includes("10-01"))!.lo; return want - base; };
   const run = (gap: number) => { const shift = vwapFor(gap); return scan({ priorTypical: [150, 153.5 + shift, 162 + shift] }, boxConfig(DAY, ["X"], { useBrokenResistance: 0, useAverages: 0, vwapMaxSessionsBack: 2 })); };
   assert.equal(run(0.3).boxes.filter(b => b.box.height === 2.14).length, 0);
   assert.equal(run(0.1).boxes.filter(b => b.box.height === 2.14).length, 1);
-  void only;
 });
 test("near miss: a box too short (under 10 minutes) is not a box", () => {
   assert.equal(scan({}, boxConfig(DAY, ["X"], { minBoxMinutes: 120 })).boxes.filter(b => b.status === "decided").length, 0);

@@ -65,14 +65,23 @@ export const BOX_SECOND_HALF: Spec[] = [
 export const INSIDE_AFTER: Spec[] = [];
 export const BREAKOUT: Spec[] = [[159.6, 160.9, 159.5, 160.71]];           // 10:14..10:16, first close above the box; it ends (closes) at 10:16
 export const RUN_AFTER: Spec[] = [[160.7, 162.6, 160.6, 162.4], [162.4, 164.38, 162.2, 164.0], [164.0, 164.2, 162.0, 162.8], [162.8, 164.3, 162.5, 164.27]];
-export interface DayOptions { pre?: Spec[]; first?: Spec[]; second?: Spec[]; inside?: Spec[]; breakout?: Spec[]; after?: Spec[]; priorTypical?: [number, number, number]; drop?: number[] }
+export interface DayOptions { pre?: Spec[]; first?: Spec[]; second?: Spec[]; inside?: Spec[]; breakout?: Spec[]; after?: Spec[]; extra?: Spec[]; priorTypical?: [number, number, number]; drop?: number[] }
 /** The reference day's minute bars plus the three sessions before it. `drop` removes the minute bars at those candle
  *  indexes' first minute (a candle missing a minute has no known close). */
 export function referenceBars(o: DayOptions = {}): BoxBar[] {
   const { open } = sessionTimes(DAY), grid = open + 120000, specs = [...(o.pre ?? PRE_BOX), ...(o.first ?? BOX_FIRST_HALF), ...(o.second ?? BOX_SECOND_HALF),
-    ...(o.inside ?? INSIDE_AFTER), ...(o.breakout ?? BREAKOUT), ...(o.after ?? RUN_AFTER)];
+    ...(o.inside ?? INSIDE_AFTER), ...(o.breakout ?? BREAKOUT), ...(o.after ?? RUN_AFTER), ...(o.extra ?? [])];
   const today = [BAR(open, 162, 162.4, 161.8, 162.2), BAR(open + 60000, 162.2, 162.2, 161.8, 161.9),
     ...specs.flatMap((s, i) => candleBars(grid + i * 120000, s).filter((_, m) => !(o.drop?.includes(i) && m === 0)))];
   const [a, b, c] = o.priorTypical ?? [150, 153.5, 162];
   return [...flatSession("2026-09-30", a), ...flatSession("2026-10-01", b), ...flatSession("2026-10-02", c), ...today];
 }
+
+/** A second consolidation later in the day, on the VWAP anchored at the Oct 2 open (about 162): a flush, a 12-candle box at 162.3-163.4 that calms down,
+ *  and a close above it. Used to test boxes that form after a data outage has recovered. */
+export const SECOND_BOX: Spec[] = [
+  [164.2, 164.3, 160.3, 162.5],
+  [162.5, 163.3, 162.3, 162.9], [162.9, 163.4, 162.4, 163.0], [163.0, 163.35, 162.35, 162.8], [162.8, 163.3, 162.3, 163.1],
+  [163.1, 163.4, 162.4, 162.7], [162.7, 163.3, 162.3, 163.0], [163.0, 163.3, 162.6, 162.9], [162.9, 163.25, 162.6, 163.1],
+  [163.1, 163.3, 162.6, 162.8], [162.8, 163.2, 162.55, 163.0], [163.0, 163.3, 162.65, 162.9], [162.9, 163.2, 162.6, 163.0],
+  [163.0, 163.9, 162.9, 163.8], [163.8, 164.0, 163.6, 163.9]];   // the last candle lets the one before it finish: a live run finishes a candle only on a later trade

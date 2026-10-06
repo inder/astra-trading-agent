@@ -6,7 +6,7 @@ import { TradingAgentService } from "./agent-service.ts";
 import { sessionTimes } from "./daily-history.ts";
 import { openingRangeConfig, type StrategySettings } from "./orb-config.ts";
 import { ReplayMarket, pathPrice, type BarsFile } from "./replay-market.ts";
-import { breakoutAbove, openingLowBroken } from "./orb-rules.ts";
+import { barCandleCloses, breakoutAbove, setupCancelled } from "./orb-rules.ts";
 
 // Replays one session through Astra's own paper service: REAL minute bars (read from a private fixtures folder, never
 // this repository) drive the stock side, and option prices are MODELED. `--check` states which claims each result
@@ -18,7 +18,7 @@ export interface ReplayInput {
 }
 export interface ReplayEvent { at: number; type: string; data: any }
 export interface ReplayResult {
-  events: ReplayEvent[]; breakevenAt: Record<string, number>; halted: string | null; complete: boolean;
+  events: ReplayEvent[]; halted: string | null; complete: boolean;
   ordersSubmitted: number; pollMs: number; firstTick: number;
 }
 /** Runs the session tick by tick on a simulated clock, from a minute before the open (catalog prefetch) to the close. */
@@ -29,14 +29,13 @@ export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
   let now = firstTick; const clock = () => now;
   const market = new ReplayMarket({ regular: input.regular, clock, volatility: input.volatility, barLagMs: input.barLagMs });
   const service = new TradingAgentService(input.dataDir, undefined, undefined, { market, clock, ready: () => true, auto: false });
-  const runId = "replay", breakevenAt: Record<string, number> = {}; let halted: string | null = null;
+  const runId = "replay"; let halted: string | null = null;
   try {
     service.paper.configure({ runId, strategyId: "opening-range-options", date: input.date, symbols: input.symbols, includePremarket: false, ...input.settings });
     await service.paper.start(runId);
     for (;;) {
       let status;
       try { status = await service.paper.tick(runId); } catch (error) { halted = String((error as Error).message); break; }
-      for (const p of status.view.positions) if (p.stage === "breakeven" && breakevenAt[p.symbol] === undefined) breakevenAt[p.symbol] = now;
       if (status.status === "completed") break;
       // A run that is still going an hour after the close is a failure to report, not a loop to keep spinning.
       if (now > close + 3600000) { halted = "the run did not complete by the close"; break; }
@@ -49,29 +48,31 @@ export async function runReplay(input: ReplayInput): Promise<ReplayResult> {
       for (const page of pages) { for (const e of page.events) events.push({ at: Date.parse(page.at), type: e.type, data: e.data }); after = page.revision; }
     }
     const final = service.paper.status(runId), stoppedBy = events.findLast(e => e.type === "run_halted")?.data?.detail;
-    return { events, breakevenAt, halted: halted && stoppedBy ? `${halted}: ${stoppedBy}` : halted, complete: final.status === "completed",
+    return { events, halted: halted && stoppedBy ? `${halted}: ${stoppedBy}` : halted, complete: final.status === "completed",
       ordersSubmitted: final.ordersSubmitted, pollMs, firstTick };
   } finally { await service.close(); }
 }
 
-/** What the fixtures themselves imply for each stock: its opening range and the first second of the modeled path above
- *  the high or below the low (the same path the replay trades on). */
-export function openingOutcomes(regular: BarsFile, date: string) {
+/** What the fixtures themselves imply for each stock, by the same rules on the bars: its opening range, the first
+ *  second of the modeled path above the high (the path the replay trades on), and the end of the first candle that
+ *  closes beneath the cancel level. */
+export function openingOutcomes(regular: BarsFile, date: string, settings: StrategySettings = {}) {
   const symbols = regular.data.results.map(r => r.symbol);
-  const rangeEnd = sessionTimes(date).open + openingRangeConfig({ date, symbols, includePremarketLeadMinutes: 0 }).openingRangeMinutes * 60000;
+  const c = openingRangeConfig({ date, symbols, includePremarketLeadMinutes: 0, ...settings });
+  const rangeEnd = sessionTimes(date).open + c.openingRangeMinutes * 60000;
   return Object.fromEntries(regular.data.results.map(r => {
     const bars = [...r.bars].sort((a, b) => Date.parse(a.begins_at) - Date.parse(b.begins_at));
-    const first = bars.filter(b => Date.parse(b.begins_at) < rangeEnd);
+    const first = bars.filter(b => Date.parse(b.begins_at) < rangeEnd), after = bars.filter(b => Date.parse(b.begins_at) >= rangeEnd);
     const range = { high: Math.max(...first.map(b => +b.high_price)), low: Math.min(...first.map(b => +b.low_price)) };
-    let firstAbove: number | null = null, firstBelow: number | null = null;
-    for (const bar of bars.filter(b => Date.parse(b.begins_at) >= rangeEnd)) {
-      for (let s = 0; s < 60 && (firstAbove === null || firstBelow === null); s++) {
-        const price = pathPrice(bar, s), at = Date.parse(bar.begins_at) + s * 1000;
-        if (firstBelow === null && openingLowBroken(price, range).fired) firstBelow = at;
-        if (firstAbove === null && breakoutAbove(price, range).fired) firstAbove = at;
-      }
+    let firstAbove: number | null = null;
+    for (const bar of after) {
+      for (let s = 0; s < 60 && firstAbove === null; s++)
+        if (breakoutAbove(pathPrice(bar, s), range).fired) firstAbove = Date.parse(bar.begins_at) + s * 1000;
+      if (firstAbove !== null) break;
     }
-    return [r.symbol, { range, firstAbove, firstBelow }];
+    const candles = barCandleCloses(after.map(b => ({ at: Date.parse(b.begins_at), close: +b.close_price })), rangeEnd, c.candleMinutes);
+    const firstCancel = candles.find(k => setupCancelled(k, range, c.openingLowToleranceRanges).fired)?.end ?? null;
+    return [r.symbol, { range, firstAbove, firstCancel, candles }];
   }));
 }
 
@@ -79,32 +80,32 @@ export interface Claim { id: string; claim: string; modeled: boolean; pass: bool
 /** DONE-ORACLE 1's claims for the article's day, checked structurally: which stock must enter, which must lose its
  *  opening low first, and what the exits must look like. Claims decided by modeled option prices say so. */
 export function checkOracle(result: ReplayResult, regular: BarsFile, date: string, settings: StrategySettings,
-  expected: { enters: string[]; lowFails: string[] }): Claim[] {
-  const { open, close } = sessionTimes(date), c = openingRangeConfig({ date, symbols: [...expected.enters, ...expected.lowFails], includePremarketLeadMinutes: 0, ...settings });
-  const outcomes = openingOutcomes(regular, date), claims: Claim[] = [], rangeEnd = open + c.openingRangeMinutes * 60000;
-  const missing = [...expected.enters, ...expected.lowFails].filter(s => !outcomes[s]);
+  expected: { enters: string[]; cancels: string[] }): Claim[] {
+  const { open, close } = sessionTimes(date), c = openingRangeConfig({ date, symbols: [...expected.enters, ...expected.cancels], includePremarketLeadMinutes: 0, ...settings });
+  const outcomes = openingOutcomes(regular, date, settings), claims: Claim[] = [], rangeEnd = open + c.openingRangeMinutes * 60000;
+  const missing = [...expected.enters, ...expected.cancels].filter(s => !outcomes[s]);
   if (missing.length) throw new Error(`The fixtures have no bars for ${missing.join(", ")}`);
   const of = (type: string, symbol?: string) => result.events.filter(e => e.type === type && (!symbol || e.data?.symbol === symbol));
   const add = (id: string, claim: string, modeled: boolean, pass: boolean, detail: string) => claims.push({ id, claim, modeled, pass, detail });
   // Nothing may pass by default: a write-off, a deferred sale, a data gap or a halt would also leave nothing held at the close.
-  const unclean = [...of("written_off"), ...of("sale_deferred"), ...of("data_gap"),
+  const unclean = [...of("written_off"), ...of("sale_deferred"), ...of("data_gap"), ...of("candle_unobserved"),
     ...of("setup_disqualified").filter(e => ["observation_gap", "range_unavailable", "late_first_quote"].includes(e.data.reason))];
-  add("clean", "the session ran to the close with no write-off, deferred sale, data gap, halt or data-driven disqualification", false,
+  add("clean", "the session ran to the close with no write-off, deferred sale, data gap, unobserved candle, halt or data-driven disqualification", false,
     !result.halted && result.complete && result.ordersSubmitted === 0 && !unclean.length,
     result.halted ? `halted: ${result.halted}` : unclean.map(e => e.type + (e.data.reason ? `:${e.data.reason}` : "")).join(", ") || "clean");
-  for (const symbol of expected.lowFails) {
+  for (const symbol of expected.cancels) {
     const o = outcomes[symbol]!, d = of("setup_disqualified", symbol).find(e => e.data.reason === "opening_low_failed");
-    add(`${symbol}-low`, `${symbol} trades below its opening low first and is out for the day within the first minute after the range`, false,
-      !!d && o.firstBelow !== null && (o.firstAbove === null || o.firstBelow < o.firstAbove) && d.at >= o.firstBelow && d.at < rangeEnd + 60000 &&
+    add(`${symbol}-cancel`, `${symbol} closes a candle beneath its cancel level before any breakout and is out for the day within a minute of that close`, false,
+      !!d && o.firstCancel !== null && (o.firstAbove === null || o.firstCancel <= o.firstAbove) && d.at >= o.firstCancel && d.at < o.firstCancel + 60000 &&
         !of("paper_entry", symbol).length,
-      d ? `opening_low_failed at ${et(d.at)}${o.firstAbove !== null ? `; its high breaks only at ${et(o.firstAbove)}` : ""}` : "not disqualified for its opening low");
+      d ? `cancelled at ${et(d.at)} (candle ending ${o.firstCancel === null ? "never" : et(o.firstCancel)} closed at ${d.data.observedClose} under ${d.data.cancelLevel})` : "not cancelled");
   }
   for (const symbol of expected.enters) {
     const o = outcomes[symbol]!, entries = of("paper_entry", symbol), selection = of("option_selection", symbol)[0];
     const breakTick = o.firstAbove === null ? null : result.firstTick + Math.ceil((o.firstAbove - result.firstTick) / result.pollMs) * result.pollMs;
     const enteredAt = selection ? Date.parse(selection.data.stock.tradeAt) : null;
-    add(`${symbol}-entry`, `${symbol} holds its opening low and buys at the first observed trade above its opening high, before 10:00 ET`, false,
-      entries.length === 1 && breakTick !== null && (o.firstBelow === null || o.firstAbove! < o.firstBelow) && enteredAt === breakTick && breakTick < open + 30 * 60000,
+    add(`${symbol}-entry`, `${symbol} is not cancelled first and buys at the first observed trade above its opening high, before 10:00 ET`, false,
+      entries.length === 1 && breakTick !== null && (o.firstCancel === null || o.firstAbove! < o.firstCancel) && enteredAt === breakTick && breakTick < open + 30 * 60000,
       entries.length ? `entered at ${et(enteredAt!)} (first trade above the high at ${o.firstAbove === null ? "never" : et(o.firstAbove)})` : "no entry");
     const entry = entries[0]?.data, n = entry?.quantity ?? 0;
     add(`${symbol}-size`, `${symbol} buys at least ${c.minimumContracts} calls near the money within the per-trade cap`, true,
@@ -114,12 +115,22 @@ export function checkOracle(result: ReplayResult, regular: BarsFile, date: strin
     add(`${symbol}-first-target`, `${symbol} sells half its calls (rounded up) at ${c.firstTargetMultiple}x`, true,
       !!firstTarget && firstTarget.data.targets?.[0] === c.firstTargetMultiple && firstTarget.data.quantity === Math.ceil(n / 2),
       firstTarget ? `${firstTarget.data.quantity} sold at ${et(firstTarget.at)} for ${firstTarget.data.targets.join("x, ")}x` : "no target reached");
-    add(`${symbol}-breakeven`, `${symbol}'s stop moves to breakeven after the first target`, true,
-      !!firstTarget && result.breakevenAt[symbol] !== undefined && result.breakevenAt[symbol]! >= firstTarget.at,
-      result.breakevenAt[symbol] !== undefined ? `breakeven from ${et(result.breakevenAt[symbol]!)}` : "never at breakeven");
+    // Every protective stop fires on a candle the bars agree closed beneath the stop level: engine and bars, one rule.
+    const stops = of("exit_triggered", symbol).filter(e => e.data.exit === "protective_stop");
+    add(`${symbol}-stop`, `${symbol}'s protective stop, if it fired, fired on a candle whose bar close is beneath its stop level`, false,
+      stops.every(e => { const k = o.candles.find(k => k.end === Date.parse(e.data.candleEnd)); return !!k && k.close! < e.data.stopLevel; }),
+      stops.length ? stops.map(e => `candle ending ${e.data.candleEnd} closed ${e.data.observedClose} under ${e.data.stopLevel}`).join("; ") : "never fired");
+    // And the reverse: the first candle after the entry that the bars close under the stop level, while contracts are still
+    // held, must be the one the stop fired on. Without this a disabled stop would pass every other claim.
+    const entryAt = entries[0]?.at, soldOutAt = (() => { let left = n; for (const s of sales) { left -= s.data.quantity; if (left <= 0) return s.at; } return Infinity; })();
+    const due = entry && entryAt !== undefined ? o.candles.find(k => k.end > entryAt && k.close! < entry.stopLevel) : undefined;
+    const owed = due && due.end <= soldOutAt ? due : undefined;
+    add(`${symbol}-stop-due`, `${symbol}'s protective stop fires on the first candle the bars close under its stop level while it is held`, false,
+      !owed || stops.some(e => Date.parse(e.data.candleEnd) === owed.end),
+      owed ? `bars close ${owed.close} under ${entry.stopLevel} at ${et(owed.end)}; stop ${stops.length ? `fired on ${stops.map(e => e.data.candleEnd).join(", ")}` : "never fired"}` : "no candle owed a stop");
     const sold = sales.reduce((sum, s) => sum + s.data.quantity, 0), last = sales.at(-1);
-    add(`${symbol}-closed`, `${symbol} is fully sold by 3:59 ET by a target, its breakeven stop or the close-out`, true,
-      n > 0 && sold === n && !!last && last.at <= close - c.flattenLeadMinutes * 60000 && ["profit_target", "breakeven_stop", "session_close"].includes(last.data.reason),
+    add(`${symbol}-closed`, `${symbol} is fully sold by 3:59 ET by a target, its protective stop or the close-out`, true,
+      n > 0 && sold === n && !!last && last.at <= close - c.flattenLeadMinutes * 60000 && ["profit_target", "protective_stop", "session_close"].includes(last.data.reason),
       last ? `${sold} of ${n} sold; last: ${last.data.reason} at ${et(last.at)}` : "nothing sold");
   }
   return claims;
@@ -133,12 +144,14 @@ export function timeline(result: ReplayResult): string[] {
   const lines: string[] = [];
   for (const e of result.events) {
     const d = e.data, at = et(e.at);
-    if (e.type === "opening_range") lines.push(`${at}  ${d.symbol}  opening range ${d.range.low}-${d.range.high}`);
-    else if (e.type === "setup_disqualified") lines.push(`${at}  ${d.symbol}  out for the day: ${d.reason}${d.price ? ` (traded ${d.price})` : d.lowSeen ? ` (low ${d.lowSeen} seen while the range was pending)` : ""}`);
+    if (e.type === "opening_range") lines.push(`${at}  ${d.symbol}  opening range ${d.range.low}-${d.range.high}${d.rangeToAtr != null ? ` (${Math.round(d.rangeToAtr * 100)}% of ATR ${d.atr14})` : ""}`);
+    else if (e.type === "setup_disqualified") lines.push(`${at}  ${d.symbol}  out for the day: ${d.reason}${d.observedClose !== undefined
+      ? ` (candle ${et(Date.parse(d.candleStart))}-${et(Date.parse(d.candleEnd))} closed ${d.observedClose} under ${d.cancelLevel})` : d.price ? ` (traded ${d.price})` : ""}`);
+    else if (e.type === "candle_unobserved") lines.push(`${at}  ${d.symbol}  candle ${et(Date.parse(d.candleStart))}-${et(Date.parse(d.candleEnd))} close not observed; no rule acted`);
     else if (e.type === "entry_skipped") lines.push(`${at}  ${d.symbol}  entry skipped: ${d.reason}`);
     else if (e.type === "entry_aborted") lines.push(`${at}  ${d.symbol}  entry attempt ${d.attempt} of ${d.maxEntryAttempts} stopped: ${d.reason} (quote ${d.price}); watching again`);
     else if (e.type === "paper_entry") lines.push(`${at}  ${d.symbol}  BUY ${d.quantity} x ${d.strike} call exp ${d.expiration} at ${d.assumedFill} MODELED; stock ${d.stockPrice}; committed ${dollars(d.committedCents)}`);
-    else if (e.type === "exit_triggered") lines.push(`${at}  ${d.symbol}  ${d.exit} triggered at stock ${d.stockPrice}`);
+    else if (e.type === "exit_triggered") lines.push(`${at}  ${d.symbol}  ${d.exit} triggered at stock ${d.stockPrice}${d.stopLevel !== undefined ? ` (candle close under ${d.stopLevel})` : ""}`);
     else if (e.type === "paper_sale") lines.push(`${at}  ${d.symbol}  SELL ${d.quantity} (${d.reason}${d.targets ? ` ${d.targets.join("x, ")}x` : ""}) at ${d.assumedFill} MODELED; stock ${d.stockPrice}; P&L ${dollars(d.realizedPnlCents)}`);
     else if (e.type === "written_off") lines.push(`${at}  ${d.symbol}  WRITTEN OFF ${d.quantity}: ${dollars(d.realizedPnlCents)}`);
     else if (e.type === "run_halted") lines.push(`${at}  halted: ${d.detail}`);
@@ -164,7 +177,10 @@ export function loadFixtures(dir: string, date: string): { regular: BarsFile; sy
 }
 
 const USAGE = "usage: npm run replay -- <YYYY-MM-DD> [--fixtures DIR] [--iv SYMBOL=0.9,...] [--lag SECONDS] [--check] [--out DIR]";
-const ORACLE_1 = { date: "2026-09-08", enters: ["CRWV"], lowFails: ["SOXL", "MU"] };
+// Strategy 0.10.0 on the article's day, read off the bars by the same rules: CRWV breaks out first and enters; SOXL
+// closes a candle a range height under its low at 9:44 and is out; MU never breaks out (its 14:50 cancel lands after
+// the 11:00 entry window, so the window, not the cancel, ends its day by default).
+const ORACLE_1 = { date: "2026-09-08", enters: ["CRWV"], cancels: ["SOXL"] };
 async function main(argv: string[]): Promise<number> {
   const flag = (name: string) => {
     const i = argv.indexOf(name); if (i < 0) return undefined;
@@ -205,8 +221,9 @@ async function main(argv: string[]): Promise<number> {
   let ok = report("DONE-ORACLE 1", checkOracle(base, regular, date, {}, ORACLE_1));
   ok = report(`Bars published 45 s late (the range-retry path)`, checkOracle(await run("lag45", { barLagMs: 45000 }), regular, date, {}, ORACLE_1)) && ok;
   const wide = await run("window390", { settings: { entryWindowMinutes: 390 } });
-  ok = report("Entries allowed all day: the opening-low rule, not the entry window, keeps SOXL and MU out",
-    checkOracle(wide, regular, date, { entryWindowMinutes: 390 }, ORACLE_1).filter(k => ORACLE_1.lowFails.some(s => k.id.startsWith(s)))) && ok;
+  const allDay = { enters: ORACLE_1.enters, cancels: ["SOXL", "MU"] };
+  ok = report("Entries allowed all day: the cancel rule, not the entry window, keeps SOXL and MU out",
+    checkOracle(wide, regular, date, { entryWindowMinutes: 390 }, allDay).filter(k => allDay.cancels.some(s => k.id.startsWith(s)))) && ok;
   for (const iv of [0.5, 0.7, 1.2]) {
     const sweep = checkOracle(await run(`iv${iv}`, { volatility: Object.fromEntries(symbols.map(s => [s, iv])) }), regular, date, {}, ORACLE_1);
     report(`Sensitivity (informational): every stock at IV ${iv}`, sweep.filter(k => k.modeled || k.id === "clean"));

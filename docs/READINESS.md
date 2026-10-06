@@ -29,7 +29,7 @@ simulated entry, marking, trim and exit tests also use invented data.
 
 Checks cover the opening-range setup, optional premarket history, whole-contract
 sizing, fee reserves and two-name/session limits, duplicate ownership, no budget
-recycling, stale/future/foreign data, the 2×/3×/5× option targets, breakeven, the
+recycling, stale/future/foreign data, the 2×/3×/5× option targets, the candle-close cancel and stop, the
 simulated 50% backstop, deferred exits surviving rebounds/restarts, provider
 failure, revisions, recovery, session/early-close handling, and write-off of
 contracts that cannot be sold before the close. A timer test verifies progress without a chat

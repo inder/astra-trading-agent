@@ -1,5 +1,6 @@
 import { addDays, isTradingDay, isWeekEnder, sessionTimes, tradingSessionsBetween } from "./daily-history.ts";
-import { breakevenStopHit, breakoutAbove, openingLowBroken, protectiveStopHit, protectiveStopLevel } from "./orb-rules.ts";
+import { barCandleCloses, breakoutAbove, newCandleState, observeCandles, protectiveStopHit, protectiveStopLevel, setupCancelled, stopAnchor,
+  type CandleClose, type CandleState } from "./orb-rules.ts";
 import { timestamp } from "./validation.ts";
 export interface CallQuote { id: string; bid: number; ask: number; askSize: number; updatedAt: string; retrievedAt: string }
 
@@ -45,8 +46,10 @@ export const SETTINGS = {
   finalTargetMultiple: setting(5, 1.1, 100, false, "finalTargetMultiple", "multiple", "Multiple for the last contract; default {default}x."),
   backstopFraction: setting(0.5, 0.05, 0.95, false, "backstopPercent", "percent",
     "Robinhood safety stop as a percent of the entry premium; default {default}."),
-  stopBufferFraction: setting(0.001, 0, 0.05, false, "stopBufferPercent", "percent",
-    "How far below the opening-range low the stock stop sits, in percent; default {default}."),
+  // The protective stop (founder, 2026-10-04): from entry until the position is closed, a candle closing beneath the
+  // lowest price seen from the open through the entry, less this buffer, sells everything. There is no breakeven stop.
+  stopBufferFraction: setting(0, 0, 0.05, false, "stopBufferPercent", "percent",
+    "How far below the stop's anchor (the lowest price from the open through the entry) a candle must close to sell everything, in percent; default {default}."),
   // Minutes before the close when everything still held sells and new entries stop (founder default 1 = 3:59 pm ET).
   flattenLeadMinutes: setting(1, 1, 60, true, "flattenLeadMinutes", "whole",
     "Minutes before the close when everything still held sells and new entries stop; default {default} (3:59 pm ET)."),
@@ -73,6 +76,13 @@ export const SETTINGS = {
   // How long market-data reads may keep failing before the run halts.
   readFailureHaltMs: setting(60_000, 5000, 900_000, true, "readFailureHaltSeconds", "seconds",
     "How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default {default}."),
+  // What ends a stock's setup before entry (founder, 2026-10-04): a candle closing this many range heights beneath the
+  // opening-range low. Wicks and single prints never do. 0 = any close beneath the low.
+  openingLowToleranceRanges: setting(1, 0, 3, false, "openingLowToleranceRanges", "multiple",
+    "How far below the opening-range low a candle must close to end a stock's day before entry, in range heights (range high minus low); default {default}. A wick or a single print never ends it."),
+  // Both candle rules use one grid, starting when the opening range ends and never rolling.
+  candleMinutes: setting(2, 1, 30, true, "candleMinutes", "whole",
+    "Length in minutes of the candles whose closes decide the cancel before entry and the protective stop after it, on a grid starting when the opening range ends (9:32 ET); default {default}."),
 } as const satisfies Record<string, SettingSpec>;
 export type SettingKey = keyof typeof SETTINGS;
 export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];
@@ -128,22 +138,31 @@ export function parseOpeningRange(raw: unknown, symbol: string, startMs: number,
   if (![...highs, ...lows].every(v => Number.isFinite(v) && v > 0) || highs.some((h, i) => h < lows[i]!)) throw new Error("Invalid opening-range prices");
   return { high: Math.max(...highs), low: Math.min(...lows), startMs: first, endMs: startMs + minutes * 60000 };
 }
-export interface ReplayResult { symbol: string; range: OpeningRange; outcome: "qualified" | "disqualified" | "ambiguous" | "no_event"; eventAt: string | null; eventPrice: number | null }
-export function replayOpeningRange(raw: unknown, symbol: string, startMs: number, leadMinutes = 0): ReplayResult {
+/** Lowest minute-bar low from `start` (inclusive) to `end` (exclusive): the stop anchor's view of prices between polls.
+ *  null when the bars are missing or unusable; the anchor then rests on the range low and observed trades. */
+export function minuteBarLow(raw: unknown, symbol: string, start: number, end: number): number | null {
+  const rows = ((raw as any)?.data?.results as any[] | undefined)?.filter(r => r?.symbol === symbol);
+  if (!rows || rows.length !== 1 || !Array.isArray(rows[0]?.bars)) return null;
+  const lows = (rows[0].bars as any[]).filter(b => { const at = timestamp(b?.begins_at); return at >= start && at < end && b?.interpolated !== true; })
+    .map(b => Number(b.low_price)).filter(v => Number.isFinite(v) && v > 0);
+  return lows.length ? Math.min(...lows) : null;
+}
+export interface ReplayResult { symbol: string; range: OpeningRange; outcome: "qualified" | "disqualified" | "no_event"; eventAt: string | null; eventPrice: number | null }
+/** The rules applied to minute bars: the breakout is the first bar trading above the high; the cancel is the first
+ *  candle (on the grid from the range end) closing beneath the cancel level. Whichever happens first decides. */
+export function replayOpeningRange(raw: unknown, symbol: string, startMs: number, leadMinutes = 0,
+  tolerance: number = SETTINGS.openingLowToleranceRanges.default, minutes: number = SETTINGS.candleMinutes.default): ReplayResult {
   const range = parseOpeningRange(raw, symbol, startMs, 2, leadMinutes);
-  const rows = ((raw as any).data.results as any[]).find(r => r?.symbol === symbol).bars as any[];
-  for (const b of rows) {
-    const at = timestamp(b?.begins_at); if (at < range.endMs || b?.interpolated === true) continue;
-    const high = Number(b.high_price), low = Number(b.low_price);
-    if (!(high > 0 && low > 0 && high >= low)) throw new Error("Invalid replay bar");
-    const up = breakoutAbove(high, range).fired, down = openingLowBroken(low, range).fired;
-    if (up && down) return { symbol, range, outcome: "ambiguous", eventAt: b.begins_at, eventPrice: null };
-    if (down) return { symbol, range, outcome: "disqualified", eventAt: b.begins_at, eventPrice: low };
-    if (up) {
-      const open = Number(b.open_price);
-      return { symbol, range, outcome: "qualified", eventAt: b.begins_at, eventPrice: Number.isFinite(open) && open > 0 ? Math.max(range.high, open) : range.high };
-    }
-  }
+  const rows = (((raw as any).data.results as any[]).find(r => r?.symbol === symbol).bars as any[])
+    .filter(b => timestamp(b?.begins_at) >= range.endMs && b?.interpolated !== true)
+    .map(b => ({ at: timestamp(b.begins_at), begins_at: b.begins_at as string, high: Number(b.high_price), low: Number(b.low_price), open: Number(b.open_price), close: Number(b.close_price) }))
+    .sort((x, y) => x.at - y.at);
+  if (rows.some(b => !(b.high > 0 && b.low > 0 && b.high >= b.low && b.close > 0))) throw new Error("Invalid replay bar");
+  const up = rows.find(b => breakoutAbove(b.high, range).fired);
+  const down = barCandleCloses(rows, range.endMs, minutes).find(c => setupCancelled(c, range, tolerance).fired);
+  if (up && (!down || up.at < down.end))
+    return { symbol, range, outcome: "qualified", eventAt: up.begins_at, eventPrice: Number.isFinite(up.open) && up.open > 0 ? Math.max(range.high, up.open) : range.high };
+  if (down) return { symbol, range, outcome: "disqualified", eventAt: new Date(down.end).toISOString(), eventPrice: down.close };
   return { symbol, range, outcome: "no_event", eventAt: null, eventPrice: null };
 }
 
@@ -246,16 +265,26 @@ type Status = "forming" | "watching" | "disqualified" | "entry_pending" | "open"
 /** Why a symbol stopped watching without entering; surfaced in views and the journal. */
 export type EndReason = "opening_low_failed" | "range_unavailable" | "late_first_quote" | "observation_gap" | "entry_window_closed" | "resumed_management_only";
 const END_REASONS: readonly EndReason[] = ["opening_low_failed", "range_unavailable", "late_first_quote", "observation_gap", "entry_window_closed", "resumed_management_only"];
-export type SaleReason = "protective_stop" | "breakeven_stop" | "broker_backstop" | "profit_target" | "user_trim" | "user_close" | "session_close";
+export type SaleReason = "protective_stop" | "broker_backstop" | "profit_target" | "user_trim" | "user_close" | "session_close";
 interface Position {
   contractId: string; originalQuantity: number; remainingQuantity: number; entryStockPrice: number;
-  entryPremium: number; backstopPrice: number; targetsSold: number; userSold: number; stage: "initial" | "breakeven";
+  entryPremium: number; backstopPrice: number; targetsSold: number; userSold: number;
+  /** The protective stop, fixed at entry: the anchor (lowest price from the open through the entry) and the level a
+   *  candle must close beneath (the anchor less the buffer). It holds until the position is closed. */
+  stopAnchor: number; stopLevel: number;
 }
 interface SymbolState {
   status: Status; range: SetupRange | null; openingRange: OpeningRange | null; endReason: EndReason | null;
+  /** The observation behind endReason (for a cancel: the candle, its close and the level), journaled with it. */
+  endEvidence: Record<string, unknown> | null;
   lastTradeMs: number | null; lastObservationMs: number | null; lastPrice: number | null;
-  /** While the range's bars are pending: the lowest trade observed at or after the range's end, judged by setRange. */
-  lowAfterRangeEnd: number | null;
+  /** This stock's candles on the grid from the range's end (orb-rules.ts observeCandles). */
+  candles: CandleState;
+  /** The lowest known candle close from the range's end until entry. The cancel rule reads it whenever the stock is
+   *  watching, so a candle that closed while the range bars were pending, or during an entry attempt, still counts. */
+  lowestClose: CandleClose | null;
+  /** The lowest trade observed from the range's end through the entry: one input of the stop anchor. */
+  lowestTrade: number | null;
   /** Entries started today; an aborted attempt may return the stock to watching until maxEntryAttempts are used. */
   entryAttempts: number;
   position: Position | null; pendingSale: number; pendingReason: SaleReason | null;
@@ -263,8 +292,16 @@ interface SymbolState {
 export type OrbIntent =
   | { kind: "enter_calls"; setup: OrbSetup; symbol: string; stockPrice: number; at: number; observedAt: number; range: SetupRange }
   | { kind: "sell_to_close"; reason: SaleReason; symbol: string; contractId: string; quantity: number; stockPrice: number | null; at: number;
-      optionBid?: number; targets?: number[] };
+      optionBid?: number; targets?: number[]; evidence?: Record<string, unknown> }
+  /** A candle ended while Astra was not watching closely enough to know its close; no rule acted on it. */
+  | { kind: "candle_unobserved"; symbol: string; start: number; end: number };
 export interface OrbSnapshot { symbols: Record<string, SymbolState>; reservedPositions: number }
+/** A saved candle builder: on this run's grid, with consistent fields. */
+function validCandles(c: CandleState | undefined, gridStart: number, minutes: number): boolean {
+  const n = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v));
+  return !!c && Number.isSafeInteger(c.nextEnd) && c.nextEnd > gridStart && (c.nextEnd - gridStart) % (minutes * 60000) === 0 &&
+    n(c.lastPrice) && n(c.lastTradeMs) && n(c.lastObservedMs) && n(c.unvouchedTradeMs) && (c.lastPrice === null) === (c.lastTradeMs === null);
+}
 export class OrbOptionsEngine {
   readonly config: OrbOptionsConfig; #state: Map<string, SymbolState>; #reserved = 0;
   /** When the opening range ends is a calendar fact; its high and low come from bars that may arrive later. */
@@ -274,28 +311,35 @@ export class OrbOptionsEngine {
   constructor(config: OrbOptionsConfig) {
     this.config = parseOrbOptionsConfig(config);
     this.#rangeEndMs = sessionTimes(this.config.date).open + this.config.openingRangeMinutes * 60000;
-    this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null,
-      lastTradeMs: null, lastObservationMs: null, lastPrice: null, lowAfterRangeEnd: null, entryAttempts: 0, position: null, pendingSale: 0, pendingReason: null }]));
+    this.#state = new Map(this.config.symbols.map(s => [s, { status: "forming", range: null, openingRange: null, endReason: null, endEvidence: null,
+      lastTradeMs: null, lastObservationMs: null, lastPrice: null, candles: newCandleState(this.#rangeEndMs, this.config.candleMinutes),
+      lowestClose: null, lowestTrade: null, entryAttempts: 0, position: null, pendingSale: 0, pendingReason: null }]));
   }
   setRange(symbol: string, range: OpeningRange): void {
     const s = this.#need(symbol);
     const duration = (this.config.openingRangeMinutes + this.config.includePremarketLeadMinutes) * 60000;
     if (s.status !== "forming" || range.endMs - range.startMs !== duration || !(range.high >= range.low && range.low > 0)) throw new Error("Invalid/finalized opening range");
     s.openingRange = structuredClone(range); s.range = { ...structuredClone(range), setup: "opening_range" }; s.status = "watching";
-    // Trades observed while the bars were pending count: one beneath the low already ended the day. None of them can
-    // enter (the entry rule is a level, so a stock still above the high enters on the next live observation).
-    if (s.lowAfterRangeEnd !== null && openingLowBroken(s.lowAfterRangeEnd, range).fired) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
-    s.lowAfterRangeEnd = null;
+    // Candles that closed while the bars were pending count: one beneath the cancel level already ended the day. None
+    // of the trades seen meanwhile can enter (the entry rule is a level, so a stock still above the high enters on the
+    // next live observation).
+    this.#judgeCancel(s);
+  }
+  /** The cancel rule on the lowest close so far, whenever the stock is watching. */
+  #judgeCancel(s: SymbolState): void {
+    if (s.status !== "watching" || !s.openingRange || !s.lowestClose) return;
+    const d = setupCancelled(s.lowestClose, s.openingRange, this.config.openingLowToleranceRanges);
+    if (d.fired) { s.status = "disqualified"; s.endReason = d.reason; s.endEvidence = d.evidence; }
   }
   /** No usable opening range: the symbol has no route to an entry today. */
   failRange(symbol: string, reason: "range_unavailable" | "late_first_quote" = "range_unavailable"): void {
     const s = this.#need(symbol); if (s.status !== "forming") throw new Error("Opening range already finalized");
-    s.status = "disqualified"; s.endReason = reason;
+    s.status = "disqualified"; s.endReason = reason; s.endEvidence = null;
   }
   /** End watching, or waiting for a range, for the day (never affects an entry or position already in progress). */
   disqualify(symbol: string, reason: EndReason): void {
     const s = this.#need(symbol);
-    if (s.status === "watching" || s.status === "forming") { s.status = "disqualified"; s.endReason = reason; }
+    if (s.status === "watching" || s.status === "forming") { s.status = "disqualified"; s.endReason = reason; s.endEvidence = null; }
   }
   /** New entries stop entryWindowMinutes after the open; open positions keep being managed. */
   entryDeadline(): number | null {
@@ -310,27 +354,50 @@ export class OrbOptionsEngine {
   }
   observe(symbol: string, stockPrice: number, at: number, observedAt = at): OrbIntent[] {
     const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
+    // Candles this observation finishes describe the past, so their rules (cancel, stop) are judged before this trade.
+    const intents = this.#candles(symbol, s, stockPrice, at, observedAt);
     if (s.lastObservationMs !== null && observedAt - s.lastObservationMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
-    if (s.lastObservationMs !== null && observedAt < s.lastObservationMs) return [];
+    if (s.lastObservationMs !== null && observedAt < s.lastObservationMs) return intents;
     s.lastObservationMs = observedAt;
     if (s.lastTradeMs !== null && at - s.lastTradeMs > this.config.maxObservationGapMs) this.disqualify(symbol, "observation_gap");
-    if (s.lastTradeMs !== null && at <= s.lastTradeMs) return [];
+    if (s.lastTradeMs !== null && at <= s.lastTradeMs) return intents;
     s.lastTradeMs = at; s.lastPrice = stockPrice;
-    if (s.status === "forming" && at >= this.#rangeEndMs) s.lowAfterRangeEnd = Math.min(s.lowAfterRangeEnd ?? stockPrice, stockPrice);
     if (s.status === "watching" && s.openingRange && at >= s.openingRange.endMs) {
-      // The founder's rule: a trade beneath the opening-range low ends the day for this symbol, even if it later rallies.
-      // Checked at the polled-trade resolution; a dip that reverses between polls can be missed (documented limitation).
       if (at >= this.entryDeadline()!) this.disqualify(symbol, "entry_window_closed");
-      else if (openingLowBroken(stockPrice, s.openingRange).fired) this.disqualify(symbol, "opening_low_failed");
-      else if (breakoutAbove(stockPrice, s.openingRange).fired) return this.#reserve(symbol, stockPrice, at, observedAt, { ...structuredClone(s.openingRange), setup: "opening_range" });
+      else if (breakoutAbove(stockPrice, s.openingRange).fired)
+        return [...intents, ...this.#reserve(symbol, stockPrice, at, observedAt, { ...structuredClone(s.openingRange), setup: "opening_range" })];
     }
-    if (s.status !== "open" || !s.position || !s.range || s.pendingSale) return [];
-    const p = s.position;
-    // Before the first target: the opening-range stop. After it (founder ruling): the stock back to its entry price.
-    const stop = p.stage === "breakeven" ? breakevenStopHit(stockPrice, p.entryStockPrice)
-      : protectiveStopHit(stockPrice, protectiveStopLevel(s.range, this.config.stopBufferFraction));
-    if (stop.fired) return this.#sellAll(symbol, stop.reason, stockPrice, at);
-    return [];
+    return intents;
+  }
+  /** A quote too old to act on can still say a candle has ended (its close then comes from the last fresh trade, if one
+   *  was seen near the end), but never supplies a price. It feeds only the candles (and the stop anchor's low): never an
+   *  entry, and never the observation-gap rules. */
+  observeCandlesOnly(symbol: string, stockPrice: number, at: number, observedAt: number): OrbIntent[] {
+    const s = this.#need(symbol); if (!(stockPrice > 0) || !Number.isFinite(at) || !Number.isFinite(observedAt) || at > observedAt) throw new Error("Invalid trade");
+    return this.#candles(symbol, s, stockPrice, at, observedAt, false);
+  }
+  /** One observed trade through the candle builder: the cancel rule before entry, the protective stop after it. */
+  #candles(symbol: string, s: SymbolState, price: number, at: number, observedAt: number, fresh = true): OrbIntent[] {
+    const beforeEntry = ["forming", "watching", "entry_pending"].includes(s.status);
+    if (beforeEntry && at >= this.#rangeEndMs) s.lowestTrade = Math.min(s.lowestTrade ?? price, price);
+    const out: OrbIntent[] = [];
+    for (const c of observeCandles(s.candles, price, at, observedAt, this.config.candleMinutes, this.config.maxQuoteAgeMs, this.config.maxObservationGapMs, fresh)) {
+      if (c.close === null) {
+        // One note per stretch of unknown candles (a long gap would otherwise write one per candle).
+        const last = out.at(-1);
+        if (last?.kind === "candle_unobserved" && last.end === c.start) last.end = c.end;
+        else if (beforeEntry || s.status === "open") out.push({ kind: "candle_unobserved", symbol, start: c.start, end: c.end });
+        continue;
+      }
+      if (["forming", "watching", "entry_pending"].includes(s.status)) {
+        if (!s.lowestClose || c.close < s.lowestClose.close!) s.lowestClose = c;
+        this.#judgeCancel(s);
+      } else if (s.status === "open" && s.position && !s.pendingSale) {
+        const p = s.position, d = protectiveStopHit(c, p.stopLevel, p.stopAnchor);
+        if (d.fired) out.push(...this.#sellAll(symbol, d.reason, c.close, c.end, undefined, d.evidence));
+      }
+    }
+    return out;
   }
   /** Option-price exits from a fresh bid: the simulated Robinhood backstop, then every newly reached target in one sale. */
   observeOption(symbol: string, bid: number, at: number): OrbIntent[] {
@@ -350,33 +417,35 @@ export class OrbOptionsEngine {
     s.pendingSale = quantity; s.pendingReason = "profit_target";
     return [{ kind: "sell_to_close", reason: "profit_target", symbol, contractId: p.contractId, quantity, stockPrice: s.lastPrice, at, optionBid: bid, targets }];
   }
-  confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number, entryPremium: number, backstop: number): void {
+  /** barLow: the lowest minute-bar low from the range's end through the entry, when the runtime could read it. */
+  confirmEntry(symbol: string, contractId: string, quantity: number, entryStockPrice: number, entryPremium: number, backstop: number,
+    barLow: number | null = null): void {
     const s = this.#need(symbol);
     if (s.status !== "entry_pending" || !/^[a-f0-9-]{36}$/.test(contractId) || !Number.isInteger(quantity) || quantity < this.config.minimumContracts ||
       (this.config.maximumContractsPerTrade !== null && quantity > this.config.maximumContractsPerTrade) || !(entryStockPrice > 0) ||
       !(entryPremium > 0 && Number.isFinite(entryPremium)) || !(backstop > 0 && backstop <= entryPremium)) throw new Error("Invalid entry confirmation");
+    const anchor = stopAnchor(s.range!.low, s.lowestTrade, barLow);
     s.position = { contractId, originalQuantity: quantity, remainingQuantity: quantity, entryStockPrice, entryPremium, backstopPrice: backstop,
-      targetsSold: 0, userSold: 0, stage: "initial" };
+      targetsSold: 0, userSold: 0, stopAnchor: anchor, stopLevel: protectiveStopLevel(anchor, this.config.stopBufferFraction) };
     s.status = "open";
   }
   /** An entry that did not happen. retry (the entry's own quote did not confirm the breakout) returns the stock to
-   *  watching while attempts remain, so a later breakout can enter. retry.newerPrice is that quote when it is a later
-   *  trade: beneath the low, it ends the day as any observed trade there does. Every other failure ends the day. */
-  failEntry(symbol: string, retry?: { newerPrice: number | null }): "watching" | "skipped" | "disqualified" {
+   *  watching while attempts remain, so a later breakout can enter. retry.quote is that quote when it is a later trade:
+   *  it is an observation like any other, so it can finish a candle. A candle that closed beneath the cancel level,
+   *  during the attempt or now, ends the day. Every other failure ends the day too. */
+  failEntry(symbol: string, retry?: { quote: { price: number; at: number; observedAt: number } | null }): "watching" | "skipped" | "disqualified" {
     const s = this.#need(symbol); if (s.status !== "entry_pending") throw new Error("No pending entry");
     this.#reserved--;
-    if (retry?.newerPrice != null && s.openingRange && openingLowBroken(retry.newerPrice, s.openingRange).fired) { s.status = "disqualified"; s.endReason = "opening_low_failed"; }
-    else s.status = retry && s.entryAttempts < this.config.maxEntryAttempts ? "watching" : "skipped";
+    s.status = retry && s.entryAttempts < this.config.maxEntryAttempts ? "watching" : "skipped";
+    if (retry?.quote) this.#candles(symbol, s, retry.quote.price, retry.quote.at, retry.quote.observedAt);
+    this.#judgeCancel(s);
     return s.status;
   }
   confirmSale(symbol: string, quantity: number): void {
     const s = this.#need(symbol), p = s.position;
     if (s.status !== "open" || !p || quantity !== s.pendingSale || quantity > p.remainingQuantity) throw new Error("Invalid sale confirmation");
-    if (s.pendingReason === "profit_target") {
-      // Any engine target fill means the option reached at least the first target, so the stop moves to breakeven;
-      // a user trim does not (the user may trim a loser).
-      p.stage = "breakeven"; p.targetsSold += quantity;
-    } else if (s.pendingReason === "user_trim") p.userSold += quantity;
+    if (s.pendingReason === "profit_target") p.targetsSold += quantity;
+    else if (s.pendingReason === "user_trim") p.userSold += quantity;
     p.remainingQuantity -= quantity; s.pendingSale = 0; s.pendingReason = null;
     if (!p.remainingQuantity) s.status = "closed";
   }
@@ -397,9 +466,10 @@ export class OrbOptionsEngine {
     s.pendingSale = quantity; s.pendingReason = reason;
     return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity, stockPrice: stockPrice ?? s.lastPrice, at }];
   }
-  #sellAll(symbol: string, reason: SaleReason, stockPrice: number | null, at: number, optionBid?: number): OrbIntent[] {
+  #sellAll(symbol: string, reason: SaleReason, stockPrice: number | null, at: number, optionBid?: number, evidence?: Record<string, unknown>): OrbIntent[] {
     const s = this.#need(symbol), p = s.position!; s.pendingSale = p.remainingQuantity; s.pendingReason = reason;
-    return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity: p.remainingQuantity, stockPrice, at, ...(optionBid ? { optionBid } : {}) }];
+    return [{ kind: "sell_to_close", reason, symbol, contractId: p.contractId, quantity: p.remainingQuantity, stockPrice, at,
+      ...(optionBid ? { optionBid } : {}), ...(evidence ? { evidence } : {}) }];
   }
   snapshot(): OrbSnapshot { return { symbols: Object.fromEntries([...this.#state].map(([k, v]) => [k, structuredClone(v)])), reservedPositions: this.#reserved }; }
   restore(raw: OrbSnapshot): void {
@@ -417,7 +487,10 @@ export class OrbOptionsEngine {
         throw new Error("Invalid saved entry attempts");
       if (!(s.endReason === null || END_REASONS.includes(s.endReason)) || (s.status === "disqualified") !== (s.endReason !== null) ||
         (s.status === "watching" && !s.openingRange) || !(s.lastPrice === null || (Number.isFinite(s.lastPrice) && s.lastPrice > 0)) ||
-        !(s.lowAfterRangeEnd === null || ((s.status === "forming" || s.status === "disqualified") && Number.isFinite(s.lowAfterRangeEnd) && s.lowAfterRangeEnd > 0)))
+        !(s.endEvidence === null || (typeof s.endEvidence === "object" && !Array.isArray(s.endEvidence))) || !validCandles(s.candles, this.#rangeEndMs, this.config.candleMinutes) ||
+        !(s.lowestTrade === null || (Number.isFinite(s.lowestTrade) && s.lowestTrade > 0)) ||
+        !(s.lowestClose === null || (Number.isFinite(s.lowestClose.close) && s.lowestClose.close! > 0 && Number.isSafeInteger(s.lowestClose.start) &&
+          s.lowestClose.end > s.lowestClose.start && Number.isSafeInteger(s.lowestClose.end))))
         throw new Error("Invalid saved symbol state");
       if (["open", "closed"].includes(s.status)) {
         const p = s.position; reserved++;
@@ -426,9 +499,10 @@ export class OrbOptionsEngine {
           (this.config.maximumContractsPerTrade !== null && p.originalQuantity > this.config.maximumContractsPerTrade) ||
           !Number.isInteger(p.remainingQuantity) || p.remainingQuantity < 0 || p.remainingQuantity > p.originalQuantity ||
           (s.status === "closed") !== (p.remainingQuantity === 0) || !(p.entryStockPrice > 0) ||
-          !(p.entryPremium > 0) || !(p.backstopPrice > 0 && p.backstopPrice <= p.entryPremium) || !["initial", "breakeven"].includes(p.stage) ||
+          !(p.entryPremium > 0) || !(p.backstopPrice > 0 && p.backstopPrice <= p.entryPremium) ||
+          !(Number.isFinite(p.stopAnchor) && p.stopAnchor > 0 && p.stopAnchor <= s.range.low) ||
+          Math.abs(p.stopLevel - protectiveStopLevel(p.stopAnchor, this.config.stopBufferFraction)) > 1e-9 ||
           !Number.isSafeInteger(p.targetsSold) || p.targetsSold < 0 || !Number.isSafeInteger(p.userSold) || p.userSold < 0 ||
-          (p.stage === "breakeven") !== (p.targetsSold > 0) ||
           (s.status === "open" && p.originalQuantity - p.remainingQuantity !== p.targetsSold + p.userSold)) throw new Error("Invalid saved position");
       } else if (s.position) throw new Error("Unexpected saved position");
     }

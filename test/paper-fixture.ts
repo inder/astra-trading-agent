@@ -14,7 +14,7 @@ export const id = (i: number) => `00000000-0000-0000-0000-${String(i).padStart(1
 export const setup = { runId: "paper-one", strategyId: "opening-range-options", date, symbols: ["DEMOA", "DEMOB", "DEMOC"], includePremarket: false };
 export function fixture(t: TestContext, symbols = setup.symbols) {
   const directory = mkdtempSync(join(tmpdir(), "astra-paper-test-"));
-  let now = open - 1000, bid = 3.9, stockAge = 0, optionAge = 0, catalogLatencyMs = 0;
+  let now = open - 1000, bid = 3.9, stockAge = 0, optionAge = 0, catalogLatencyMs = 0, laterBarLow = 100;
   const unpublished = new Set<string>();   // symbols whose last opening-range bar has not published yet
   type Read = "quotes" | "bars" | "catalog" | "options";
   const reads = { contracts: 0, optionQuotes: 0 };   // provider calls made, for latency and call-count checks
@@ -31,7 +31,8 @@ export function fixture(t: TestContext, symbols = setup.symbols) {
       // Until "published", the window's last minute bar is missing, as when the provider lags the clock.
       return { data: { results: requested.map(symbol => ({ symbol, interval: "minute", bounds: extended ? "extended" : "regular",
         bars: Array.from({ length: (end - start) / 60000 - (unpublished.has(symbol) ? 1 : 0) }, (_, i) => ({ begins_at: new Date(start + i * 60000).toISOString(),
-          open_price: "102", close_price: "104", high_price: "105", low_price: "100", volume: "1000", session: start + i * 60000 < open ? "pre" : "reg" })) })) } };
+          open_price: "102", close_price: "104", high_price: "105", low_price: String(start + i * 60000 >= open + 120000 ? laterBarLow : 100), volume: "1000",
+          session: start + i * 60000 < open ? "pre" : "reg" })) })) } };
     },
     async contracts(symbol) {
       fail("catalog"); reads.contracts++; now += catalogLatencyMs;   // a slow catalog read holds up the whole tick
@@ -43,11 +44,13 @@ export function fixture(t: TestContext, symbols = setup.symbols) {
   const options = { market, clock: () => now, ready: () => true, auto: false };
   const service = new TradingAgentService(directory, undefined, undefined, options);
   t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { directory, service, market, options, prices, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
+  return { directory, service, market, options, prices, now: () => now, setTime: (v: number) => { now = v; }, advance: (v = 1000) => { now += v; },
     setBid: (v: number) => { bid = v; }, staleStock: (v: number) => { stockAge = v; }, staleOption: (v: number) => { optionAge = v; },
     /** Make reads fail (all four when none are named) until restore(). */
     outage: (...only: Read[]) => { for (const read of only.length ? only : ["quotes", "bars", "catalog", "options"] as const) down.add(read); },
     restore: () => { down.clear(); }, slowCatalog: (ms: number) => { catalogLatencyMs = ms; }, reads,
+    /** The low of every minute bar after the opening range (a dip between polls), 100 until set. */
+    setLaterBarLow: (v: number) => { laterBarLow = v; },
     /** Publish (or hold back) the last opening-range bar for the named symbols, or for all of them. */
     setBarsReady: (ready: boolean, ...only: string[]) => { for (const s of only.length ? only : symbols) ready ? unpublished.delete(s) : unpublished.add(s); } };
 }
@@ -56,4 +59,10 @@ export async function entered(f: ReturnType<typeof fixture>, symbols = setup.sym
   f.setTime(open + 120000); await f.service.paper.tick(setup.runId);
   f.advance(); f.prices[symbols[0]!] = 106; await f.service.paper.tick(setup.runId);
   assert.equal(f.service.paper.status(setup.runId).view.positions[0]?.quantity, 4);
+}
+/** Finish the two-minute candle in progress (on the grid from 9:32) at the stock prices already set: a poll a second
+ *  before its end, then one at it. Candle rules (the cancel before entry, the protective stop after) act on its close. */
+export async function finishCandle(f: ReturnType<typeof fixture>, tick: () => Promise<unknown> = () => f.service.paper.tick(setup.runId)) {
+  const end = open + 120000 + (Math.floor((f.now() - open - 120000) / 120000) + 1) * 120000;
+  f.setTime(end - 1000); await tick(); f.setTime(end); await tick();
 }

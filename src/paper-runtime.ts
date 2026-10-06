@@ -2,8 +2,9 @@ import type { PaperMarket } from "./paper-market.ts";
 
 export interface PaperEvent { type: string; data: unknown }
 export interface PaperPosition { symbol: string; contractId: string; strike: number; expiration: string; quantity: number;
-  entryPrice: number; entryStockPrice: number; markBid: number | null; markAt: string | null; stop: number;
-  stage: "initial" | "breakeven"; backstop: number; }
+  entryPrice: number; entryStockPrice: number; markBid: number | null; markAt: string | null;
+  /** The protective stop's level (a candle closing beneath it sells everything) and its anchor, both fixed at entry. */
+  stop: number; stopAnchor: number; backstop: number; }
 export interface PaperControl { symbol: string; quantity: number; expectedQuantity: number; action: "trim" | "close" }
 /** A step that failed part-way, carrying the events it produced first so the halt record can keep them. */
 export class StepError extends Error {

@@ -17,8 +17,8 @@ export interface AgentStrategy {
 // Transport-independent plug-in contract: no chat, filesystem, credentials or broker.
 
 export const openingRangeStrategy: AgentStrategy = {
-  id: "opening-range-options", version: "0.9.0", name: "Opening-range call options",
-  description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a trade below its low first ends the day for that stock.",
+  id: "opening-range-options", version: "0.10.0", name: "Opening-range call options",
+  description: "Deterministic opening-range breakout call-option strategy: a trade above the first two-minute high buys; a candle (by default two minutes) closing more than the set tolerance (by default one range height) below its low first ends the day for that stock; after entry, a candle closing below the day's low so far sells.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
   paperFactory: (config, market, clock, checkpoint) => new OrbPaperRuntime(config, market, clock, checkpoint),
   preview: input => openingRangeConfig(input),
@@ -54,7 +54,7 @@ export const openingRangeStrategy: AgentStrategy = {
         engine.confirmEntry(intent.symbol, id, selection.quantity, intent.stockPrice, selection.limitPrice,
           backstopPrice(selection.limitPrice, contract, config.backstopFraction));
         emit("simulated_entry", { symbol: intent.symbol, ...selection, synthetic: true });
-      } else {
+      } else if (intent.kind === "sell_to_close") {
         engine.confirmSale(intent.symbol, intent.quantity);
         emit("simulated_sale", { ...intent, synthetic: true, fillPrice: intent.optionBid ?? null });
       }
@@ -68,7 +68,8 @@ export const openingRangeStrategy: AgentStrategy = {
       for (const intent of engine.observe(symbol, 101.1, breakout)) handle(intent);
       if (before !== "skipped" && engine.snapshot().symbols[symbol]!.status === "skipped") emit("entry_skipped", { symbol, reason: "maximum_positions" });
     }
-    // The first name's option reaches the founder's 2x, 3x and 5x targets; the second name falls through its stop.
+    // The first name's option reaches the founder's 2x, 3x and 5x targets; the second name's first candle after entry
+    // closes beneath its stop (the day's low so far, the range low here), and the next trade finishes that candle.
     const [winner, loser] = config.symbols;
     for (const [step, multiple] of [config.firstTargetMultiple, config.middleTargetMultiple, config.finalTargetMultiple].entries()) {
       const at = breakout + (step + 1) * 1000;
@@ -78,16 +79,20 @@ export const openingRangeStrategy: AgentStrategy = {
         emit("synthetic_option_bid", { symbol: winner, bid, at });
         for (const intent of engine.observeOption(winner, bid, at)) handle(intent);
       }
-      if (step === 0 && loser && premiums.has(loser)) {
-        emit("synthetic_quote", { symbol: loser, price: 99.8, at });
-        for (const intent of engine.observe(loser, 99.8, at)) handle(intent);
+    }
+    if (loser && premiums.has(loser)) {
+      // A trade a second before the first candle's end, then one at its end: the candle closes at 99.8, under the stop.
+      const end = breakout + config.candleMinutes * 60000;
+      for (const [price, at] of [[99.8, end - 1000], [99.7, end]] as const) {
+        emit("synthetic_quote", { symbol: loser, price, at });
+        for (const intent of engine.observe(loser, price, at)) handle(intent);
       }
     }
     const summary = { mode: "synthetic_sample", dataset: "synthetic-orb-v1", ordersSubmitted: 0,
       committedCents, pnl: null, pnlExplanation: "The stop has no simulated option bid, so P&L is intentionally unavailable.",
       snapshot: engine.snapshot(), limitations: ["Invented prices and assumed fills; not real market data.",
         "Exercises the opening-range breakout, sizing, position cap, the option-gain targets and the stop; not broker validation.",
-        "The opening-low rule is checked at polled-trade resolution: a dip below the low that reverses between polls can be missed."] };
+        "Candle closes are the last trade Astra observed before each candle's end (it polls), not the exchange's official close."] };
     emit("sample_completed", summary);
     return { events, summary };
   },

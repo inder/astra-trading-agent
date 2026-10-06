@@ -30,7 +30,7 @@ test("sample uses actual engine sizing, position cap, the 2x/3x/5x option target
   assert.equal(run.events.filter(e => e.type === "simulated_entry").length, 2);
   const sales = run.events.filter(e => e.type === "simulated_sale").map(e => e.data as any);
   assert.deepEqual(sales.map(e => [e.symbol, e.reason, e.quantity, e.fillPrice]),
-    [["DEMOA", "profit_target", 2, 8], ["DEMOB", "protective_stop", 4, null], ["DEMOA", "profit_target", 1, 12], ["DEMOA", "profit_target", 1, 20]]);
+    [["DEMOA", "profit_target", 2, 8], ["DEMOA", "profit_target", 1, 12], ["DEMOA", "profit_target", 1, 20], ["DEMOB", "protective_stop", 4, null]]);
   assert.ok(run.events.some(e => e.type === "entry_skipped" && (e.data as any).symbol === "DEMOC"));
   assert.deepEqual(run.events.map(e => e.sequence), run.events.map((_, i) => i + 1));
 });

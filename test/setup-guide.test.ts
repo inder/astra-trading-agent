@@ -57,18 +57,19 @@ test("once connected it explains the strategy with the setting defaults, then as
   const line = (prefix: string) => g.explain.find(l => l.startsWith(prefix)) ?? "";
   const expect: [string, string[]][] = [
     ["Here is", ["on paper only", "no real orders"]],
-    ["If a stock", ["before 11:00 AM ET", "done for the day"]],
+    ["If a stock", ["before 11:00 AM ET", "done for the day", `${SETTINGS.candleMinutes.default}-minute candle closes a full range height (the high minus the low) below the low`]],
     ["Limits:", [`at most ${SETTINGS.maximumPositions.default} stocks entered per day`, `${dollars(SETTINGS.budgetCentsPerPosition.default)} of option premium per trade`,
       `${dollars(SETTINGS.budgetCentsPerDay.default)} per day`]],
     ["Which option:", [`at least ${SETTINGS.minimumContracts.default} contracts`, "expiring Friday, September 18"]],
     ["Exits:", [`reaches ${SETTINGS.firstTargetMultiple.default}x`, `at ${SETTINGS.finalTargetMultiple.default}x`, `at ${SETTINGS.middleTargetMultiple.default}x`]],
-    ["Stops:", [`${SETTINGS.stopBufferFraction.default * 100}% below the opening low`, `${SETTINGS.backstopFraction.default * 100}% of its entry price`, "at 3:59 PM ET"]],
+    ["Stops:", ["candle closing below the lowest price from the opening range to the purchase", "until everything is sold", `${SETTINGS.backstopFraction.default * 100}% of its entry price`, "at 3:59 PM ET"]],
     ["Premium", ["money you can lose in full", "a setting you can change"]],
   ];
   for (const [prefix, parts] of expect) for (const part of parts) assert.ok(line(prefix).includes(part), `${prefix} ${part}`);
   assert.equal(ENTRY_WINDOW_MINUTES.default, 90);   // 11:00 AM ET above is the 90-minute default after the open
   assert.deepEqual(g.defaults, { maxPremiumPerTradeDollars: 2000, maxPremiumPerDayDollars: 4000, maximumPositions: 2, minimumContracts: 4,
-    entryWindowMinutes: 90, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopPercent: 50, stopBufferPercent: 0.1, flattenLeadMinutes: 1 });
+    entryWindowMinutes: 90, firstTargetMultiple: 2, middleTargetMultiple: 3, finalTargetMultiple: 5, backstopPercent: 50, stopBufferPercent: 0, flattenLeadMinutes: 1,
+    openingLowToleranceRanges: 1, candleMinutes: 2 });
   assert.match(g.ask!, /Pick 3 to 5 .*at most 2 stocks a day/);
   assert.ok(!/\b(?!AM\b|PM\b|ET\b)[A-Z]{2,5}\b/.test(g.ask!), "names no tickers");
   assert.equal(g.runId, "orb-2026-09-14");

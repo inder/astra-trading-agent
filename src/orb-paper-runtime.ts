@@ -1,7 +1,7 @@
-import { EntrySkip, OrbOptionsEngine, backstopPrice, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
+import { EntrySkip, OrbOptionsEngine, backstopPrice, minuteBarLow, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type OrbCallSelection, type SaleReason } from "./orb-options.ts";
 import { CalendarCoverageError, sessionTimes } from "./daily-history.ts";
-import { breakoutAbove, protectiveStopLevel } from "./orb-rules.ts";
+import { breakoutAbove, rangeVsAtr, trailingAtr } from "./orb-rules.ts";
 import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperEvent, type PaperPosition, type PaperControl } from "./paper-runtime.ts";
 
@@ -11,7 +11,7 @@ export interface OrbPaperCheckpoint { engine: OrbSnapshot; holdings: Record<stri
   nextHeartbeat: number; committedCents: number; realizedPnlCents: number; complete: boolean; lastQuoteAt: string | null; resumed: boolean;
   protectiveExits: Record<string, PersistentExit> }
 /** Sell-everything exits that keep retrying on later ticks (through rebounds and restarts) until a fresh bid fills them. */
-const PERSISTENT_EXITS = ["protective_stop", "breakeven_stop", "broker_backstop", "session_close"] as const satisfies readonly SaleReason[];
+const PERSISTENT_EXITS = ["protective_stop", "broker_backstop", "session_close"] as const satisfies readonly SaleReason[];
 type PersistentExit = typeof PERSISTENT_EXITS[number];
 const isPersistentExit = (reason: unknown): reason is PersistentExit => (PERSISTENT_EXITS as readonly unknown[]).includes(reason);
 type Source = "quotes" | "bars" | "options" | "catalog";
@@ -28,6 +28,8 @@ export class OrbPaperRuntime implements PaperRuntime {
   #failures: Partial<Record<Source, number>> = {};
   /** Session catalogs, prefetched before 9:32. Memory only: a restarted run manages positions and never enters. */
   #catalogs = new Map<string, Catalog>(); #slowestCatalogMs = 0; #prefetches = 0; #prefetchOver = false;
+  /** Each stock's ATR(14) before today, for the journal's opening-range context; null when unavailable. Memory only. */
+  #atr = new Map<string, number | null>();
   /** Journaled once per outage or per trigger, keyed "symbol:exit": the "no fresh bid" deferral of a sell-everything exit,
    *  and a stop firing while a different exit is already pending. Each re-fires every tick until the position sells. */
   #deferred = new Set<string>(); #triggered = new Set<string>();
@@ -66,12 +68,16 @@ export class OrbPaperRuntime implements PaperRuntime {
     if (!q || !(q.bid > 0 && q.ask >= q.bid && Number.isFinite(q.ask))) return false;
     return [q.updatedAt, q.retrievedAt].every(t => { const age = this.#clock() - Date.parse(t); return Number.isFinite(age) && age >= 0 && age <= this.#config.maxQuoteAgeMs; });
   }
-  /** An active regular-session trade no older than maxQuoteAgeMs when it was fetched, and never after its own fetch
-   *  (clock skew between the venue and this machine must not become an impossible observation). */
-  #fresh(q: Awaited<ReturnType<PaperMarket["quotes"]>>[number] | undefined): boolean {
+  /** An active regular-session trade, never after its own fetch (clock skew between the venue and this machine must not
+   *  become an impossible observation), of any age. */
+  #validTrade(q: Awaited<ReturnType<PaperMarket["quotes"]>>[number] | undefined): boolean {
     if (!q || !q.regularSession || q.state !== "active" || !(Number.isFinite(q.price) && q.price! > 0) || !q.tradeAt) return false;
     const retrieved = Date.parse(q.retrievedAt), age = retrieved - Date.parse(q.tradeAt);
-    return Number.isFinite(age) && age >= 0 && age <= this.#config.maxQuoteAgeMs && retrieved <= this.#clock();
+    return Number.isFinite(age) && age >= 0 && retrieved <= this.#clock();
+  }
+  /** A valid trade no older than maxQuoteAgeMs when it was fetched: the only kind any decision but a candle close uses. */
+  #fresh(q: Awaited<ReturnType<PaperMarket["quotes"]>>[number] | undefined): boolean {
+    return this.#validTrade(q) && Date.parse(q!.retrievedAt) - Date.parse(q!.tradeAt!) <= this.#config.maxQuoteAgeMs;
   }
   /** A stock's catalog, or the rule decision that it has nothing to trade (no qualifying expiry, calendar not covered). */
   async #loadCatalog(symbol: string): Promise<Catalog> {
@@ -83,6 +89,9 @@ export class OrbPaperRuntime implements PaperRuntime {
     }
   }
   async #handle(intent: OrbIntent, fetched?: CallQuote): Promise<PaperEvent[]> {
+    // A candle whose close Astra could not know (a monitoring gap): said once, and no rule acted on it.
+    if (intent.kind === "candle_unobserved")
+      return [{ type: "candle_unobserved", data: { symbol: intent.symbol, candleStart: iso(intent.start), candleEnd: iso(intent.end) } }];
     if (intent.kind === "enter_calls") {
       const c = this.#config; let quotes: CallQuote[] = [], batches = 0;
       let stock: Awaited<ReturnType<PaperMarket["quotes"]>>[number] | undefined;
@@ -115,28 +124,39 @@ export class OrbPaperRuntime implements PaperRuntime {
           throw new EntrySkip(plan.length > c.maxEntryQuoteBatches ? "no_qualifying_call_within_quote_batches" : "no_affordable_eligible_call",
             { quotedContracts: quotes.length, batches });
         const backstop = backstopPrice(selected.limitPrice, selected.contract, c.backstopFraction);
-        this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!, selected.limitPrice, backstop);
+        // The stop's anchor is the lowest price from the open through the entry. Polls see trades once a second, so the
+        // minute bars since the range's end fill in lows between polls; without them the anchor rests on what was seen.
+        const barLow = await this.#counted("bars", () => this.#market.bars([intent.symbol], this.#engine.rangeEndMs, this.#clock(), false))
+          .then(raw => minuteBarLow(raw, intent.symbol, this.#engine.rangeEndMs, this.#clock()), () => null);
+        this.#engine.confirmEntry(intent.symbol, selected.contract.id, selected.quantity, stock!.price!, selected.limitPrice, backstop, barLow);
+        const position = this.#engine.snapshot().symbols[intent.symbol]!.position!;
         this.#saved.holdings[intent.symbol] = { contract: selected.contract, entryPrice: selected.limitPrice, mark: null };
         this.#saved.committedCents += selected.committedCents;
         const quoted = new Set(quotes.map(q => q.id));
         return [{ type: "option_selection", data: { symbol: intent.symbol, batches, contracts: catalog.contracts.filter(k => quoted.has(k.id)), quotes, selected, stock } },
           { type: "paper_entry", data: { symbol: intent.symbol, setup: intent.setup, stockPrice: stock!.price,
           strike: selected.contract.strike, expiration: selected.contract.expiration, quantity: selected.quantity,
-          assumedFill: selected.limitPrice, committedCents: selected.committedCents, backstopPrice: backstop, fillGuaranteed: false } }];
+          assumedFill: selected.limitPrice, committedCents: selected.committedCents, backstopPrice: backstop, fillGuaranteed: false,
+          stopAnchor: position.stopAnchor, stopLevel: position.stopLevel, anchorBarLow: barLow } }];
       } catch (error) {
         // Rule decisions and calendar gaps are named, so a review can tell a policy skip from a data problem.
         const reason = error instanceof EntrySkip ? error.reason : error instanceof CalendarCoverageError ? "calendar_not_covered" : "data_unavailable";
         const evidence = error instanceof EntrySkip ? error.evidence : reason === "data_unavailable" ? { detail: String((error as Error)?.message ?? error).slice(0, 200) } : {};
         // An entry quote that did not confirm the breakout returns the stock to watching while attempts remain (founder
-        // rule); a later trade beneath the low ends its day. Every other failure keeps ending the day, as before.
-        const retry = reason === "breakout_reversed" ? { newerPrice: stock!.price! } : reason === "entry_quote_not_newer" ? { newerPrice: null } : undefined;
+        // rule); a later quote is an observation like any other. Every other failure keeps ending the day, as before.
+        const retry = reason === "breakout_reversed"
+          ? { quote: { price: stock!.price!, at: Date.parse(stock!.tradeAt!), observedAt: Date.parse(stock!.retrievedAt) } }
+          : reason === "entry_quote_not_newer" ? { quote: null } : undefined;
         const next = this.#engine.failEntry(intent.symbol, retry);
         // The breakout that started the attempt is journaled beside the entry's own quote, so a review can compare them.
         const attempt = { triggerPrice: intent.stockPrice, triggerTradeAt: iso(intent.at), triggerRetrievedAt: iso(intent.observedAt),
           attempt: this.#engine.snapshot().symbols[intent.symbol]!.entryAttempts, maxEntryAttempts: c.maxEntryAttempts };
         if (next === "watching") return [{ type: "entry_aborted", data: { symbol: intent.symbol, reason, ...evidence, ...attempt } }];
-        // A later trade beneath the low ends the day like any observed trade there, journaled as the low failing.
-        if (next === "disqualified") return [{ type: "setup_disqualified", data: { symbol: intent.symbol, reason: "opening_low_failed", ...evidence, during: reason, ...attempt } }];
+        // A candle that closed beneath the cancel level (during the attempt, or finished by its quote) ends the day.
+        if (next === "disqualified") {
+          const after = this.#engine.snapshot().symbols[intent.symbol]!;
+          return [{ type: "setup_disqualified", data: { symbol: intent.symbol, reason: after.endReason, ...after.endEvidence, during: reason, ...evidence, ...attempt } }];
+        }
         return [{ type: "entry_skipped", data: { symbol: intent.symbol, reason, ...evidence, ...attempt } }];
       }
     }
@@ -145,7 +165,8 @@ export class OrbPaperRuntime implements PaperRuntime {
     // first pending exit is the one executed; a different one firing meanwhile is journaled as such.
     if (!fetched && isPersistentExit(intent.reason)) {
       this.#engine.failSale(intent.symbol);
-      const pending = this.#saved.protectiveExits[intent.symbol], trigger = { symbol: intent.symbol, exit: intent.reason, stockPrice: intent.stockPrice, tradeAt: iso(intent.at) };
+      const pending = this.#saved.protectiveExits[intent.symbol],
+        trigger = { symbol: intent.symbol, exit: intent.reason, stockPrice: intent.stockPrice, tradeAt: iso(intent.at), ...intent.evidence };
       if (pending === intent.reason) return [];
       if (pending) {
         const key = `${intent.symbol}:${intent.reason}`; if (this.#triggered.has(key)) return [];
@@ -225,7 +246,18 @@ export class OrbPaperRuntime implements PaperRuntime {
     for (const q of (quotes ?? []).sort((a, b) => (a.tradeAt ?? "").localeCompare(b.tradeAt ?? "") || a.symbol.localeCompare(b.symbol))) {
       const fresh = this.#fresh(q);
       this.#latest.set(q.symbol, { price: q.price, tradeAt: q.tradeAt, fresh });
-      if (!fresh) continue;
+      if (!fresh) {
+        // Too old to act on: it can mark a candle as ended (the close is still the last fresh trade), never price one.
+        const before = this.#engine.snapshot().symbols[q.symbol]!;
+        if (this.#validTrade(q) && !(this.#saved.resumed && before.status !== "open")) {
+          for (const intent of this.#engine.observeCandlesOnly(q.symbol, q.price!, Date.parse(q.tradeAt!), Date.parse(q.retrievedAt)))
+            events.push(...await this.#handle(intent));
+          const after = this.#engine.snapshot().symbols[q.symbol]!;
+          if ((before.status === "watching" || before.status === "forming") && after.status === "disqualified")
+            events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt, staleQuote: true, ...after.endEvidence } });
+        }
+        continue;
+      }
       this.#saved.lastQuoteAt = q.tradeAt;
       const seen = this.#seen.get(q.symbol);
       this.#seen.set(q.symbol, seen ? { low: Math.min(seen.low, q.price!), high: Math.max(seen.high, q.price!), observations: seen.observations + 1 }
@@ -238,15 +270,15 @@ export class OrbPaperRuntime implements PaperRuntime {
       // still pending are observed too: the engine keeps their lowest trade and any gap for when the range arrives.
       const intents = this.#engine.observe(q.symbol, q.price!, Date.parse(q.tradeAt!), observedAt);
       for (const intent of intents) events.push(...await this.#handle(intent));
-      // Journal the rule that ended watching (opening low, gap, late first quote) with the observation behind it; a gap
+      // Journal the rule that ended watching (the cancel, a gap, a late first quote) with the observation behind it; a gap
       // also names its other end, which the engine no longer holds after this tick. An entry attempt journals its own end.
-      const after = this.#engine.snapshot().symbols[q.symbol]!;
-      if ((state.status === "watching" || state.status === "forming") && after.status === "disqualified" && !intents.length)
-        events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt,
+      const after = this.#engine.snapshot().symbols[q.symbol]!, entered = intents.some(i => i.kind === "enter_calls");
+      if ((state.status === "watching" || state.status === "forming") && after.status === "disqualified" && !entered)
+        events.push({ type: "setup_disqualified", data: { symbol: q.symbol, reason: after.endReason, price: q.price, tradeAt: q.tradeAt, ...after.endEvidence,
           ...(after.endReason === "observation_gap" && state.lastObservationMs !== null && state.lastTradeMs !== null
             ? { previousObservedAt: iso(state.lastObservationMs), previousTradeAt: iso(state.lastTradeMs) } : {}) } });
       // A breakout with every position slot taken is a skip too, and says so.
-      if (state.status === "watching" && after.status === "skipped" && !intents.length)
+      if (state.status === "watching" && after.status === "skipped" && !entered)
         events.push({ type: "entry_skipped", data: { symbol: q.symbol, reason: "maximum_positions_reached", price: q.price, tradeAt: q.tradeAt } });
     }
     // Option-price decisions need only a fresh option bid, one batch per tick: targets, the simulated Robinhood backstop,
@@ -288,13 +320,30 @@ export class OrbPaperRuntime implements PaperRuntime {
    *  loaded by then loads at its entry. */
   async #prefetch(now: number, rangeEnd: number, events: PaperEvent[]): Promise<void> {
     const missing = this.#config.symbols.filter(s => !this.#catalogs.has(s)), budgetMs = rangeEnd - this.#config.pollMs - now;
-    if (!missing.length || budgetMs <= this.#slowestCatalogMs) return;
+    if (!missing.length) return this.#prefetchAtr(budgetMs);
+    if (budgetMs <= this.#slowestCatalogMs) return;
     const symbol = missing[this.#prefetches++ % missing.length]!, started = this.#clock();
     const catalog = await this.#read("catalog", now, events, () => this.#withDeadline(symbol, budgetMs));
     this.#slowestCatalogMs = Math.max(this.#slowestCatalogMs, this.#clock() - started);
     if (!catalog) return;
     this.#catalogs.set(symbol, catalog);
     if ("skip" in catalog) events.push({ type: "no_tradable_calls", data: { symbol, reason: catalog.skip } });
+  }
+  /** Once every catalog is in, one stock's daily bars per tick for the ATR context, under the same rule: it never runs
+   *  into the first observation after 9:32. Context only, so a failure is recorded as unavailable, never as an outage. */
+  async #prefetchAtr(budgetMs: number): Promise<void> {
+    const symbol = this.#config.symbols.find(s => !this.#atr.has(s)), read = this.#market.dailyBars;
+    if (!symbol) return;
+    if (!read || budgetMs <= Math.max(this.#slowestCatalogMs, this.#config.pollMs)) { this.#atr.set(symbol, null); return; }
+    const { open } = this.#session;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("deadline")), budgetMs); timer.unref?.(); });
+    try {
+      const { bars } = await Promise.race([read.call(this.#market, symbol, open - 45 * 86400000, open), deadline]);
+      const before = bars.time.map((t, i) => ({ t, high: bars.high[i]!, low: bars.low[i]!, close: bars.close[i]! })).filter(b => b.t < this.#config.date);
+      this.#atr.set(symbol, trailingAtr(before));
+    } catch { this.#atr.set(symbol, null); }
+    finally { clearTimeout(timer); }
   }
   /** A catalog load raced against a real-time deadline. The provider call cannot be cancelled; if it finishes late its catalog
    *  is still kept for the entry (no event is written outside a step). */
@@ -331,10 +380,10 @@ export class OrbPaperRuntime implements PaperRuntime {
     for (const symbol of forming) {
       let range: OpeningRange;
       try { range = parseOpeningRange(bars, symbol, open, c.openingRangeMinutes, c.includePremarketLeadMinutes); } catch { continue; }   // not published yet: retry
-      const lowSeen = symbols[symbol]!.lowAfterRangeEnd;
-      this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range } });
+      // Context for later study, read by no rule: how big the first two minutes were against a normal day's range.
+      this.#engine.setRange(symbol, range); events.push({ type: "opening_range", data: { symbol, range, ...rangeVsAtr(range, this.#atr.get(symbol) ?? null) } });
       const after = this.#engine.snapshot().symbols[symbol]!;
-      if (after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol, reason: after.endReason, lowSeen } });
+      if (after.status === "disqualified") events.push({ type: "setup_disqualified", data: { symbol, reason: after.endReason, ...after.endEvidence, whileRangePending: true } });
     }
   }
   /** One provider read. A failure never ends the step. One failed read is only counted (in the heartbeat); a second in a
@@ -387,8 +436,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       const h = this.#saved.holdings[symbol]!, p = state.position; const mark = this.#validOption(h.mark ?? undefined) ? h.mark : null;
       positions.push({ symbol, contractId: h.contract.id, strike: h.contract.strike, expiration: h.contract.expiration,
         quantity: p.remainingQuantity, entryPrice: h.entryPrice, entryStockPrice: p.entryStockPrice,
-        markBid: mark?.bid ?? null, markAt: mark?.updatedAt ?? null, stage: p.stage, backstop: p.backstopPrice,
-        stop: p.stage === "breakeven" ? p.entryStockPrice : protectiveStopLevel(state.range!, this.#config.stopBufferFraction) });
+        markBid: mark?.bid ?? null, markAt: mark?.updatedAt ?? null, backstop: p.backstopPrice, stop: p.stopLevel, stopAnchor: p.stopAnchor });
     }
     return { positions, committedCents: this.#saved.committedCents, realizedPnlCents: this.#saved.realizedPnlCents,
       unrealizedPnlCents: positions.some(p => p.markBid === null) ? null : positions.reduce((sum, p) => sum + Math.round((p.markBid! - p.entryPrice) * 10000 * p.quantity), 0),

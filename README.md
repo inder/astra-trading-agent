@@ -79,13 +79,13 @@ marked.
 > - DEMOA and DEMOB then traded at $101.10, above the high, so I bought 4 call contracts on each.
 > - DEMOC broke out too but was skipped: the plan allows 2 stocks a day.
 > - DEMOA's option kept climbing: 2 contracts sold at 2× the entry price, 1 at 3× and the last at 5×.
-> - DEMOB fell back below its $100 opening low, so its stop sold everything.
+> - DEMOB's next two-minute candle closed at $99.80, below its $100 stop (its lowest price before buying), so its stop sold everything.
 >
 > There's no P&L for this practice run: the made-up data has no option price at DEMOB's stop, so I leave it blank rather than guess.
 
 **You:** Which strategies do you have?
 
-> **Astra:** One: **Opening-range call options** (version 0.9.0). The first two minutes after the open set each stock's high and low. A trade above the high buys call options; a trade below the low first ends that stock's day.
+> **Astra:** One: **Opening-range call options** (version 0.10.0). The first two minutes after the open set each stock's high and low. A trade above the high buys call options; a two-minute candle closing a full range height below the low first ends that stock's day. After buying, a two-minute close below the day's low so far sells.
 
 #### Connect Robinhood
 
@@ -222,7 +222,7 @@ is a recommendation: it reports what the rules found.
 
 **You** *(10:15 AM)***:** How am I doing today?
 
-> **Astra:** Up $868 on paper. CRWV's option doubled: 2 of the 4 contracts sold at $4.32 for +$434, which covers the premium you paid. The other 2 are worth $4.32 each, another +$434 on paper. The stop has moved to breakeven, so CRWV back at $91.95 sells the rest. Fees aren't included.
+> **Astra:** Up $868 on paper. CRWV's option doubled: 2 of the 4 contracts sold at $4.32 for +$434, which covers the premium you paid. The other 2 are worth $4.32 each, another +$434 on paper. The stop doesn't move: a two-minute candle closing below $90.20, CRWV's low before you bought, sells the rest. Fees aren't included.
 
 **You:** Trim 25% of my CRWV position.
 
@@ -290,7 +290,8 @@ is a recommendation: it reports what the rules found.
 > - **Contracts:** the fewest per trade, and an optional most per trade.
 > - **Option filter:** the widest bid-ask spread accepted.
 > - **Entries:** how long they stay open after the 9:30 start, and how many tries a stock gets when a breakout slips back under the high before I buy.
-> - **Exits:** the three profit targets (2×, 3×, 5×), the safety stop (50%), how far below the opening low the stop sits (0.1%), and when everything sells before the close (3:59).
+> - **Exits:** the three profit targets (2×, 3×, 5×), the safety stop (50%), how far below the day's low the stop sits (0%), and when everything sells before the close (3:59).
+> - **Cancel:** how far below the opening low a candle must close to end a stock's day (one range height), and the candle length (2 minutes).
 > - **Timing:** how often I check prices and how old a price may be.
 >
 > A few more technical ones are listed in the Advanced section. Changes apply to a new plan; a running plan keeps its settings.
@@ -517,19 +518,34 @@ Stopping monitoring retains positions; request closes first if that is intended.
 
 The first strategy trades the opening-range breakout: the first two-minute
 candle's high and low (optionally including the last two premarket minutes). A
-trade above the high buys; a trade below the low first ends the day for that stock,
-even if it later rallies. Each entry re-reads the stock first. If that quote is a
+trade above the high buys. Before that, a two-minute candle that **closes** more than
+one range height (the high minus the low) below the low ends the day for that stock,
+even if it later rallies; a wick or a single print below the low never does
+(`openingLowToleranceRanges`, default 1; `candleMinutes`, default 2). Candles sit on a
+fixed grid from the range's end (9:32–9:34, 9:34–9:36, …), never a rolling window.
+A candle's close is the last trade Astra observed before the candle ended, not the
+exchange's official close; when Astra was not watching closely enough to know it,
+the journal says so (`candle_unobserved`) and no rule acts on that candle. A close counts
+only when Astra saw a fresh trade (at most `maxQuoteAgeSeconds` old) within
+`maxObservationGapSeconds` of the candle's end, so with the defaults a stock that has
+not traded in roughly the last 10 seconds of a candle gets no close for it: neither
+the cancel nor the protective stop acts on that candle (the option-price safety stop
+still does). A quote too old to act on can mark a candle as ended, but never supplies
+its price. Each entry re-reads the stock first. If that quote is a
 later trade back at or below the high, the attempt stops and the stock is watched
 again, so a later breakout can still buy while the low holds (`maxEntryAttempts`,
 default 3). A quote no newer than the breakout trade stops the attempt the same way
 and uses an attempt, but is not counted as a reversal and its price is not judged.
-A later quote beneath the low ends the day. New entries stop after a configurable window
+That quote counts as an observation like any other: it can finish a candle, but a
+single quote below the low never ends the day. New entries stop after a configurable window
 (`entryWindowMinutes`, default 90 minutes, i.e. 11:00 a.m. New York time); open
 positions are managed all day. Prices are polled about once a second
-(`pollSeconds`), so a dip below the low that reverses between polls can be missed.
-If the first candle's bars publish late, Astra retries them for up to a minute
-(`rangeDeadlineSeconds`) while it keeps watching prices; a trade below the low in
-that wait still ends the day, and nothing enters until the range is known. A
+(`pollSeconds`).
+Each opening range is journaled with the stock's ATR(14) from the sessions before
+the trade date and the range as a share of it (`atr14`, `rangeToAtr`): context for
+studying the strategy, read by no rule. If the first candle's bars publish late, Astra retries them for up to a minute
+(`rangeDeadlineSeconds`) while it keeps watching prices; a candle that closed under
+the cancel level in that wait still ends the day, and nothing enters until the range is known. A
 stock first seen more than `maxObservationGapSeconds` (default 5) after the first
 candle, or unseen for longer than that at any point before an entry, is dropped for
 the day rather than assuming a path it did not see.
@@ -561,12 +577,14 @@ than traded in a later expiry.
 Exits follow the option's bid, measured against the entry premium: half the
 contracts (rounded up) sell at 2×, which recovers the premium; the last contract
 sells at 5×; any in between sell at 3×. A bid that jumps past several targets
-sells them together. Before the first target, a stock trade below the range low
-minus 0.1% sells everything. After it, the stop moves to breakeven: the stock
-back at its entry price sells the rest. A simulated Robinhood safety stop sells
+sells them together. From the purchase until everything is sold, a two-minute candle
+closing below the stop sells everything. The stop sits under the lowest price from
+the open through the purchase: the range low, every trade Astra saw after it, and
+the minute bars' lows read at the purchase (which catch dips between polls). It is
+fixed at the purchase, and neither a profit target nor a trim moves it; there is no
+breakeven stop. `stopBufferPercent` (default 0) puts it further below. A simulated Robinhood safety stop sells
 everything if the bid falls to 50% of the entry premium (rounded up to a valid
-price increment). User trims come out of the nearest unfilled target and never
-move the stop. Everything still held sells at the bid `flattenLeadMinutes`
+price increment). User trims come out of the nearest unfilled target. Everything still held sells at the bid `flattenLeadMinutes`
 before the close (default 1 minute); contracts that cannot be sold then are
 written off as a total loss.
 Settings: `firstTargetMultiple`, `middleTargetMultiple`, `finalTargetMultiple`
@@ -601,8 +619,9 @@ folder `DIR/<date>/` needs a `manifest.json` and `bars-minute-regular.json` with
 every regular-session minute for every listed stock; anything missing or partial
 is refused, never skipped. `--lag SECONDS` delays bar publication (the range-retry
 path). `--check` evaluates the article's day, 2026-09-08: which stock must enter
-at its first trade above the opening high, which must lose their opening low
-first, and how the exits must end, each claim labeled when modeled prices decide
+at its first trade above the opening high, which must close a candle under its
+cancel level first (read off the same bars by the same rules), that every protective
+stop fired on a candle the bars closed under its level, and how the exits must end, each claim labeled when modeled prices decide
 it, plus late-bar, all-day-window and volatility variants. Journals go to
 `DIR/<date>/replay-output` (a new folder per run) unless `--out` says otherwise.
 

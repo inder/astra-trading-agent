@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BOX_SETTINGS, BOX_SETTING_KEYS, boxConfig, parseBoxConfig } from "../src/box-settings.ts";
-import { anchoredVwaps, barCandles, contraction, prepareDay, runawayGate, scanDay, sizedEntry, type Support, staticSupports, supportUnderBox, vwapBars, type Candle } from "../src/box-rules.ts";
+import { anchoredVwaps, barCandles, beforeBox, contraction, prepareDay, supportCluster, runawayGate, scanDay, sizedEntry, type Support, staticSupports, supportUnderBox, vwapBars, type Candle } from "../src/box-rules.ts";
 import { barCandleCloses } from "../src/orb-rules.ts";
 import { sessionTimes } from "../src/daily-history.ts";
 import { BOX_FIRST_HALF, BOX_SECOND_HALF, BREAKOUT, DAY, INSIDE_AFTER, PRE_BOX, laggardDailies, referenceBars, runawayDailies } from "./box-fixture.ts";
@@ -251,4 +251,41 @@ test("a candle that closes beyond the run before it cannot be the candle on whic
   const b = scan({ second }, local).boxes.find(x => et(x.box.start) === "09:46")!;
   assert.ok(b, "the window survived");
   assert.ok(Date.parse(b.formedAt) > formedEnd, `formed at ${b.formedAt}, not on the breakout candle ending ${plain.formedAt}`);
+});
+
+// ---- The daily-average supports, the session baseline and the cluster, without private bars (INTC 2026-10-06 shaped them).
+const linear = (n: number) => { const time = Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10)), close = time.map((_, i) => i + 1);
+  return { time, open: close, high: close.map(c => c + 0.5), low: close.map(c => c - 0.5), close }; };
+const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, ...o }), null)
+  .filter(x => x.kind === "average").map(x => [x.label, Math.round(x.lo * 1e6) / 1e6]));
+test("daily averages: the 20/21 SMA and EMA from the closes before the day, exact on a straight line", () => {
+  // Closes 1..60: a 20-day SMA is 50.5 and, on a straight line, a converged 20-day EMA lags by (20 - 1) / 2 too; the 21s give 50.
+  assert.deepEqual(averages(60), { "20-day SMA": 50.5, "20-day EMA": 50.5, "21-day SMA": 50, "21-day EMA": 50 });
+  assert.deepEqual(Object.keys(averages(41)), ["20-day SMA", "20-day EMA", "21-day SMA"], "an EMA needs twice its period of history: 41 sessions seed the 20 but not the 21");
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 0 })), ["20-day SMA", "21-day SMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 1 })), ["20-day EMA", "21-day EMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportLongPeriod: 20 })), ["20-day SMA", "20-day EMA"], "equal periods are not doubled");
+  assert.deepEqual(averages(60, { useAverages: 0 }), {});
+});
+test("the session baseline is every observed candle since 9:32 before the box; the local one is the few just before it", () => {
+  const c = (i: number, range: number, known = true): Candle => ({ start: i, end: i + 1, high: 100 + range, low: 100, close: known ? 100 : null });
+  const cs = [c(0, 2), c(1, 2, false), c(2, 2), c(3, 1), c(4, 1), c(5, 1), c(6, 1), c(7, 1), c(8, 0.2)];
+  assert.deepEqual(beforeBox(cs, 8, boxConfig(DAY, ["X"])).map(x => x.start), [0, 2, 3, 4, 5, 6, 7], "an unobserved candle earlier in the day is left out, never blocks");
+  assert.deepEqual(beforeBox(cs, 8, boxConfig(DAY, ["X"], { contractionBaseline: 0 })).map(x => x.start), [3, 4, 5, 6, 7]);
+});
+test("the cluster lists every level within reach of the box low, flags the ones above it, and measures the averages' spread", () => {
+  const cfg = boxConfig(DAY, ["X"]), reach = cfg.supportReachAtr * 10;   // ATR 10: reach 0.8
+  const supports: Support[] = [{ kind: "average", label: "20-day SMA", lo: 99.5, hi: 99.5 }, { kind: "average", label: "20-day EMA", lo: 100.05, hi: 100.05 },
+    { kind: "average", label: "21-day SMA", lo: 100 - reach - 0.01, hi: 100 - reach - 0.01 }, { kind: "anchored_vwap", label: "VWAP", lo: 102, hi: 102 }];
+  const k = supportCluster(100, supports, 10, cfg);
+  assert.deepEqual([k.withinReach, k.atOrBelow, k.above], [2, 1, 1]);
+  assert.deepEqual(k.levels.map(l => [l.label, l.fromBoxLowAtr, l.above]), [["20-day SMA", -0.05, false], ["20-day EMA", 0.005, true]]);
+  assert.equal(k.averagesSpreadAtr, 0.086, "the three averages span 99.19..100.05");
+  assert.equal(supportCluster(100, [supports[0]!], 10, cfg).averagesSpreadAtr, null, "one average has no spread");
+  // The box's own support never comes from above: the 3-cent-higher EMA is listed, but the SMA under it is the support.
+  assert.equal(supportUnderBox(100, supports, 10, cfg).support!.label, "20-day SMA");
+});
+test("under the default settings the reference box is rejected when the height limit is a hair lower than it", () => {
+  const s = scan(), ratio = 2.14 / s.atr!;
+  assert.equal(scan({}, boxConfig(DAY, ["X"], { maxBoxHeightAtr: Math.round((ratio - 0.003) * 1e3) / 1e3 })).boxes.filter(b => b.box.height === 2.14).length, 0);
 });

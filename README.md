@@ -625,7 +625,7 @@ and share count it would use. Entry and exit choices, paper shares and live trad
   regular-session open one to three sessions back (typical price times volume over minute bars, including today's finished
   minutes up to the candle just closed).
 - **The box:** 2-minute candles on the grid from 9:32 ET; the first run of at least 10 minutes whose height is at most 0.25 ATR(14),
-  whose low rests on a support **at or below it** (no more than 0.15 ATR under the box low; a level above the box low is resistance, never its
+  whose low rests on a support **at or below it** (no more than 0.08 ATR under the box low; a level above the box low is resistance, never its
   support), and whose second-half mean candle range is at most 0.8 of the session's mean candle range so far (or, as a setting, of
   the five candles just before it). The reach (0.08 ATR) and the session baseline were set against two real days: SOXL 2026-10-05
   (support 0.04 ATR below) and INTC 2026-10-06 (the founder's own trade: support 0.05 ATR below, at the daily 20/21-average
@@ -633,7 +633,9 @@ and share count it would use. Entry and exit choices, paper shares and live trad
   decides it (up: bulls, down: bears). A wick past the height limit is counted, never a bound. A candle that closes at a new high or low still inside the height limit stays in the window but cannot be the candle on which the box forms.
   A candle whose close is not known voids a live box (ADR 0001).
 - **Cluster (context, read by no rule):** each box records every support within reach of its low on either side and how tightly the
-  daily averages sit together, in ATRs. On INTC 2026-10-06 three supports sat within 0.06 ATR and the four averages spanned 0.18 ATR.
+  daily averages sit together, in ATRs; a level above the box low is listed and flagged `above` (it is resistance, not the box's
+  support). On INTC 2026-10-06 three averages sat within 0.06 ATR of the low (two under it, the 20-day EMA 3¢ above) and the four spanned
+  0.18 ATR.
 - **Journaled levels** for an up decision: entry A (a quarter of the box's height above its low), entry B (the decision candle's
   close), the stop (the box low) and shares for each = risk (default $500) divided by entry minus stop. A large share count at entry
   A is a consequence of its tiny risk per share; the journal records the notional too.

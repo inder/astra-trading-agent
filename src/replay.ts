@@ -6,6 +6,7 @@ import { TradingAgentService } from "./agent-service.ts";
 import { sessionTimes } from "./daily-history.ts";
 import { openingRangeConfig, type StrategySettings } from "./orb-config.ts";
 import { ReplayMarket, pathPrice, type BarsFile } from "./replay-market.ts";
+import { breakoutAbove, openingLowBroken } from "./orb-rules.ts";
 
 // Replays one session through Astra's own paper service: REAL minute bars (read from a private fixtures folder, never
 // this repository) drive the stock side, and option prices are MODELED. `--check` states which claims each result
@@ -66,8 +67,8 @@ export function openingOutcomes(regular: BarsFile, date: string) {
     for (const bar of bars.filter(b => Date.parse(b.begins_at) >= rangeEnd)) {
       for (let s = 0; s < 60 && (firstAbove === null || firstBelow === null); s++) {
         const price = pathPrice(bar, s), at = Date.parse(bar.begins_at) + s * 1000;
-        if (firstBelow === null && price < range.low) firstBelow = at;
-        if (firstAbove === null && price > range.high) firstAbove = at;
+        if (firstBelow === null && openingLowBroken(price, range).fired) firstBelow = at;
+        if (firstAbove === null && breakoutAbove(price, range).fired) firstAbove = at;
       }
     }
     return [r.symbol, { range, firstAbove, firstBelow }];

@@ -1,6 +1,7 @@
 import { EntrySkip, OrbOptionsEngine, backstopPrice, parseOrbOptionsConfig, parseOpeningRange, selectOrbCall, strikeBatches, type OpeningRange,
   type OrbOptionsConfig, type OrbSnapshot, type OrbIntent, type CallQuote, type OrbCallContract, type OrbCallSelection, type SaleReason } from "./orb-options.ts";
 import { CalendarCoverageError, sessionTimes } from "./daily-history.ts";
+import { breakoutAbove, protectiveStopLevel } from "./orb-rules.ts";
 import type { OptionCatalog, PaperMarket } from "./paper-market.ts";
 import { StepError, type PaperRuntime, type PaperEvent, type PaperPosition, type PaperControl } from "./paper-runtime.ts";
 
@@ -93,7 +94,7 @@ export class OrbPaperRuntime implements PaperRuntime {
         if ("skip" in catalog) throw new EntrySkip(catalog.skip);
         stock = (await this.#counted("quotes", () => this.#market.quotes([intent.symbol])))[0];
         if (stock?.symbol !== intent.symbol || !this.#fresh(stock)) throw new Error("Stale breakout quote");
-        if (stock!.price! <= intent.range.high) {
+        if (!breakoutAbove(stock!.price!, intent.range).fired) {
           // Only a later trade shows a reversal. A quote no newer than the trade that triggered the attempt says nothing
           // new (the engine ignores such trades too), so the attempt stops without calling it a reversal.
           const seen = { price: stock!.price, tradeAt: stock!.tradeAt, retrievedAt: stock!.retrievedAt };
@@ -387,7 +388,7 @@ export class OrbPaperRuntime implements PaperRuntime {
       positions.push({ symbol, contractId: h.contract.id, strike: h.contract.strike, expiration: h.contract.expiration,
         quantity: p.remainingQuantity, entryPrice: h.entryPrice, entryStockPrice: p.entryStockPrice,
         markBid: mark?.bid ?? null, markAt: mark?.updatedAt ?? null, stage: p.stage, backstop: p.backstopPrice,
-        stop: p.stage === "breakeven" ? p.entryStockPrice : state.range!.low * (1 - this.#config.stopBufferFraction) });
+        stop: p.stage === "breakeven" ? p.entryStockPrice : protectiveStopLevel(state.range!, this.#config.stopBufferFraction) });
     }
     return { positions, committedCents: this.#saved.committedCents, realizedPnlCents: this.#saved.realizedPnlCents,
       unrealizedPnlCents: positions.some(p => p.markBid === null) ? null : positions.reduce((sum, p) => sum + Math.round((p.markBid! - p.entryPrice) * 10000 * p.quantity), 0),

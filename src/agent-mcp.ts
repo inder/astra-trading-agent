@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { TradingAgentService } from "./agent-service.ts";
 import { SUPPORTED_YEARS } from "./daily-history.ts";
-import { ENTRY_WINDOW_MINUTES, SETTINGS } from "./orb-options.ts";
+import { SETTINGS, SETTING_KEYS, type SettingSpec, type SettingUnit } from "./orb-options.ts";
 import { SERVER_INSTRUCTIONS } from "./setup-guide.ts";
 import { SYMBOL_PROBLEMS } from "./symbol-check.ts";
 import { VERSION } from "./version.ts";
@@ -90,50 +90,34 @@ export function createAgentMcpServer(service: TradingAgentService): McpServer {
   const years = `${SUPPORTED_YEARS[0]}–${SUPPORTED_YEARS.at(-1)}`;
   const date = z.string().regex(new RegExp(`^(${SUPPORTED_YEARS.join("|")})-\\d{2}-\\d{2}$`));
   const paperWrite = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
-  // Human units at the chat edge (whole dollars, whole numbers); parseOrbOptionsConfig re-validates in internal units.
-  const dollars = (r: { min: number; max: number }) => z.number().int().min(r.min / 100).max(r.max / 100).optional();
-  const whole = (r: { min: number; max: number }) => z.number().int().min(r.min).max(r.max).optional();
-  const multiple = (r: { min: number; max: number }) => z.number().min(r.min).max(r.max).optional();
-  const percent = (r: { min: number; max: number }) => z.number().min(r.min * 100).max(r.max * 100).optional();
-  // Percent to fraction without float noise in the pinned config (0.7% -> 0.007, not 0.006999999999999999).
-  const fraction = (p: number | undefined) => p === undefined ? undefined : Math.round(p * 1e6) / 1e8;
-  const seconds = (r: { min: number; max: number }) => z.number().min(r.min / 1000).max(r.max / 1000).optional();
-  const ms = (s: number | undefined) => s === undefined ? undefined : Math.round(s * 1000);
+  // Human units at the chat edge (whole dollars, percents, seconds); parseOrbOptionsConfig re-validates in internal units.
+  // Every SETTINGS row is exposed here under its chat name, so a new setting needs no edit in this file.
+  const chat: Record<SettingUnit, { toChat: (v: number) => number; integer: boolean; show: (v: number) => string; toInternal: (v: number) => number }> = {
+    dollars: { toChat: v => v / 100, integer: true, show: v => `$${v / 100}`, toInternal: v => v * 100 },
+    // Percent to fraction without float noise in the pinned config (0.7% -> 0.007, not 0.006999999999999999).
+    percent: { toChat: v => v * 100, integer: false, show: v => `${v * 100}`, toInternal: v => Math.round(v * 1e6) / 1e8 },
+    seconds: { toChat: v => v / 1000, integer: false, show: v => `${v / 1000}`, toInternal: v => Math.round(v * 1000) },
+    whole: { toChat: v => v, integer: true, show: v => `${v}`, toInternal: v => v },
+    multiple: { toChat: v => v, integer: false, show: v => `${v}`, toInternal: v => v },
+  };
+  const settingSchema = Object.fromEntries(SETTING_KEYS.map(key => {
+    const r: SettingSpec = SETTINGS[key], u = chat[r.mcp.unit], n = z.number().min(u.toChat(r.min)).max(u.toChat(r.max));
+    return [r.mcp.name, (u.integer ? n.int() : n).optional()
+      .describe(r.mcp.description.replace("{default}", r.default === null ? "none" : u.show(r.default)))];
+  }));
+  /** Chat-edge arguments back to internal units; arguments that are not settings pass through unchanged. */
+  const toConfig = (args: Record<string, unknown>) => {
+    const out: Record<string, unknown> = { ...args };
+    for (const key of SETTING_KEYS) {
+      const { name, unit } = SETTINGS[key].mcp; if (!(name in out)) continue;
+      const v = out[name] as number | undefined; delete out[name];
+      out[key] = v === undefined ? undefined : chat[unit].toInternal(v);
+    }
+    return out;
+  };
   server.registerTool("configure_paper_strategy", { description: `Save immutable settings for a continuous PAPER strategy. Does not start it or need brokerage credentials. A new configuration needs a new runId. Calendar supports ${years}.`,
-    inputSchema: z.object({ ...configSchema, runId, date,
-      entryWindowMinutes: z.number().int().min(ENTRY_WINDOW_MINUTES.min).max(ENTRY_WINDOW_MINUTES.max).optional()
-        .describe(`Minutes after the 9:30 ET open during which new entries may start; default ${ENTRY_WINDOW_MINUTES.default} (11:00 ET). Open positions are managed all day.`),
-      maxPremiumPerTradeDollars: dollars(SETTINGS.budgetCentsPerPosition).describe(`Most premium one trade may commit, treated as money that can be lost entirely; default $${SETTINGS.budgetCentsPerPosition.default / 100}.`),
-      maxPremiumPerDayDollars: dollars(SETTINGS.budgetCentsPerDay).describe(`Most premium committed per day across trades (sales never refund it); default $${SETTINGS.budgetCentsPerDay.default / 100}.`),
-      minimumContracts: whole(SETTINGS.minimumContracts).describe(`Fewest contracts per entry; the strike nearest the money that fits this many is chosen, then filled to the cap. Default ${SETTINGS.minimumContracts.default}.`),
-      maximumContractsPerTrade: whole(SETTINGS.maximumContractsPerTrade).describe("Optional ceiling on contracts per entry; by default only the displayed ask size limits the fill."),
-      maximumPositions: whole(SETTINGS.maximumPositions).describe(`Most stocks entered per day; default ${SETTINGS.maximumPositions.default}.`),
-      maxOptionSpreadPercent: z.number().min(SETTINGS.maxOptionSpreadFraction.min * 100).max(SETTINGS.maxOptionSpreadFraction.max * 100).optional()
-        .describe(`Widest bid-ask spread accepted, as a percent of the midpoint; default ${SETTINGS.maxOptionSpreadFraction.default * 100}.`),
-      feeReserveCentsPerContract: whole(SETTINGS.feeReserveCentsPerContract).describe(`Cents reserved per contract for fees inside the cap; default ${SETTINGS.feeReserveCentsPerContract.default}.`),
-      firstTargetMultiple: multiple(SETTINGS.firstTargetMultiple).describe(`Option bid as a multiple of entry at which half the contracts (rounded up) sell; default ${SETTINGS.firstTargetMultiple.default}x.`),
-      middleTargetMultiple: multiple(SETTINGS.middleTargetMultiple).describe(`Multiple for contracts between the first half and the last one; default ${SETTINGS.middleTargetMultiple.default}x.`),
-      finalTargetMultiple: multiple(SETTINGS.finalTargetMultiple).describe(`Multiple for the last contract; default ${SETTINGS.finalTargetMultiple.default}x.`),
-      backstopPercent: percent(SETTINGS.backstopFraction).describe(`Robinhood safety stop as a percent of the entry premium; default ${SETTINGS.backstopFraction.default * 100}.`),
-      stopBufferPercent: percent(SETTINGS.stopBufferFraction).describe(`How far below the opening-range low the stock stop sits, in percent; default ${SETTINGS.stopBufferFraction.default * 100}.`),
-      flattenLeadMinutes: whole(SETTINGS.flattenLeadMinutes).describe(`Minutes before the close when everything still held sells and new entries stop; default ${SETTINGS.flattenLeadMinutes.default} (3:59 pm ET).`),
-      pollSeconds: seconds(SETTINGS.pollMs).describe(`Seconds between market-data polls; default ${SETTINGS.pollMs.default / 1000}.`),
-      maxQuoteAgeSeconds: seconds(SETTINGS.maxQuoteAgeMs).describe(`Oldest a stock or option quote may be when fetched and still be acted on; default ${SETTINGS.maxQuoteAgeMs.default / 1000}; at least one poll.`),
-      maxObservationGapSeconds: seconds(SETTINGS.maxObservationGapMs).describe(`Longest gap between observations before a watched stock is dropped for the day, so an unseen price path is never assumed; default ${SETTINGS.maxObservationGapMs.default / 1000}; at least two polls.`),
-      rangeDeadlineSeconds: seconds(SETTINGS.rangeDeadlineMs).describe(`How long after 9:32 ET to keep retrying the opening-range bars before skipping a stock; default ${SETTINGS.rangeDeadlineMs.default / 1000}.`),
-      maxEntryQuoteBatches: whole(SETTINGS.maxEntryQuoteBatches).describe(`Most batches of 20 nearest strikes quoted at an entry before skipping it; default ${SETTINGS.maxEntryQuoteBatches.default}.`),
-      maxEntryAttempts: whole(SETTINGS.maxEntryAttempts).describe(`Entry attempts per stock per day. An attempt whose own quote is back at or below the opening high (or is no newer than the breakout trade) uses one attempt and returns the stock to watching for a later breakout while the low holds; default ${SETTINGS.maxEntryAttempts.default}, 1 = the first attempt only.`),
-      heartbeatSeconds: seconds(SETTINGS.heartbeatMs).describe(`Seconds between journal heartbeats (latest prices, price range seen, marks, read failures); default ${SETTINGS.heartbeatMs.default / 1000}.`),
-      readFailureHaltSeconds: seconds(SETTINGS.readFailureHaltMs).describe(`How long market-data reads may keep failing before the run halts; with positions open only if option prices fail too; default ${SETTINGS.readFailureHaltMs.default / 1000}.`),
-    }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
-    ({ maxPremiumPerTradeDollars, maxPremiumPerDayDollars, maxOptionSpreadPercent, backstopPercent, stopBufferPercent,
-      pollSeconds, maxQuoteAgeSeconds, maxObservationGapSeconds, rangeDeadlineSeconds, readFailureHaltSeconds, heartbeatSeconds, ...a }) => guarded(() => service.paper.configure({ ...a,
-      heartbeatMs: ms(heartbeatSeconds),
-      pollMs: ms(pollSeconds), maxQuoteAgeMs: ms(maxQuoteAgeSeconds), maxObservationGapMs: ms(maxObservationGapSeconds),
-      rangeDeadlineMs: ms(rangeDeadlineSeconds), readFailureHaltMs: ms(readFailureHaltSeconds),
-      budgetCentsPerPosition: maxPremiumPerTradeDollars === undefined ? undefined : maxPremiumPerTradeDollars * 100,
-      budgetCentsPerDay: maxPremiumPerDayDollars === undefined ? undefined : maxPremiumPerDayDollars * 100,
-      maxOptionSpreadFraction: fraction(maxOptionSpreadPercent), backstopFraction: fraction(backstopPercent), stopBufferFraction: fraction(stopBufferPercent) }), "always"));
+    inputSchema: z.object({ ...configSchema, runId, date, ...settingSchema }).strict(), annotations: { ...paperWrite, idempotentHint: true } },
+    a => guarded(() => service.paper.configure(toConfig(a) as unknown as Parameters<typeof service.paper.configure>[0]), "always"));
   server.registerTool("start_paper_run", { description: "Explicitly start the configured PAPER strategy with authorized market data, only after the user says yes to the plan. Start before the opening two-minute candle completes. No real orders; one run per strategy per session prevents budget recycling.",
     inputSchema: runSchema, annotations: paperWrite }, a => asyncGuarded(() => service.paper.start(a.runId), "always"));
   server.registerTool("resume_paper_run", { description: "Explicitly recover EXISTING paper positions after stopping or restarting, only after the user says yes. No new entries after a monitoring gap. Requires reauthorization after server restart. After the session has closed it instead settles a run still holding contracts: they are written off as a total loss (no market data needed). Does not place real orders.",

@@ -14,7 +14,7 @@ const scan = (o = {}, c = config, daily = runawayDailies()) => scanDay(reference
 
 test("settings: every number is a row with the founder's placeholder default, and out-of-range or unknown values are refused", () => {
   const d = Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, BOX_SETTINGS[k].default]));
-  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportFastPeriod, d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportKind], [10, 20, 21, 2]); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
+  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportFastPeriod, d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportKind], [0, 20, 21, 2], "no 10-day box support by default: the 10-day setup is a retest and bounce, not a box"); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
   assert.equal(d.contractionLookbackCandles, 5); assert.equal(d.riskCents, 50_000); assert.equal(d.breakoutLookbackSessions, 10); assert.equal(d.maxBelowHighFraction, 0.1);
   assert.equal(parseBoxConfig(config).symbols[0], "SOXL");
   assert.throws(() => boxConfig(DAY, ["SOXL"], { maxBoxHeightAtr: 5 }), /Invalid/);
@@ -256,9 +256,9 @@ test("a candle that closes beyond the run before it cannot be the candle on whic
 // ---- The daily-average supports, the session baseline and the cluster, without private bars (INTC 2026-10-06 shaped them).
 const linear = (n: number) => { const time = Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10)), close = time.map((_, i) => i + 1);
   return { time, open: close, high: close.map(c => c + 0.5), low: close.map(c => c - 0.5), close }; };
-const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, ...o }), null)
+const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, averageSupportFastPeriod: 10, ...o }), null)
   .filter(x => x.kind === "average").map(x => [x.label, Math.round(x.lo * 1e6) / 1e6]));
-test("daily averages: the 10/20/21 SMA and EMA from the closes before the day, exact on a straight line", () => {
+test("daily averages: the 10/20/21 SMA and EMA from the closes before the day, exact on a straight line (10 asked for explicitly)", () => {
   // Closes 1..60: an n-day SMA is 60 - (n - 1) / 2 and, on a straight line, a converged n-day EMA lags by the same (n - 1) / 2.
   assert.deepEqual(averages(60), { "10-day SMA": 55.5, "10-day EMA": 55.5, "20-day SMA": 50.5, "20-day EMA": 50.5, "21-day SMA": 50, "21-day EMA": 50 });
   assert.deepEqual(Object.keys(averages(41)), ["10-day SMA", "10-day EMA", "20-day SMA", "20-day EMA", "21-day SMA"], "an EMA needs twice its period of history: 41 sessions seed the 20 but not the 21");

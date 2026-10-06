@@ -14,7 +14,7 @@ const scan = (o = {}, c = config, daily = runawayDailies()) => scanDay(reference
 
 test("settings: every number is a row with the founder's placeholder default, and out-of-range or unknown values are refused", () => {
   const d = Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, BOX_SETTINGS[k].default]));
-  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportKind], [20, 21, 2]); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
+  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportFastPeriod, d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportSlowPeriod, d.averageSupportKind], [0, 20, 21, 0, 2], "no 10-day box support by default: the 10-day setup is a retest and bounce, not a box"); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
   assert.equal(d.contractionLookbackCandles, 5); assert.equal(d.riskCents, 50_000); assert.equal(d.breakoutLookbackSessions, 10); assert.equal(d.maxBelowHighFraction, 0.1);
   assert.equal(parseBoxConfig(config).symbols[0], "SOXL");
   assert.throws(() => boxConfig(DAY, ["SOXL"], { maxBoxHeightAtr: 5 }), /Invalid/);
@@ -256,15 +256,20 @@ test("a candle that closes beyond the run before it cannot be the candle on whic
 // ---- The daily-average supports, the session baseline and the cluster, without private bars (INTC 2026-10-06 shaped them).
 const linear = (n: number) => { const time = Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10)), close = time.map((_, i) => i + 1);
   return { time, open: close, high: close.map(c => c + 0.5), low: close.map(c => c - 0.5), close }; };
-const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, ...o }), null)
+const averages = (n: number, o: Record<string, number> = {}) => Object.fromEntries(staticSupports(linear(n), boxConfig(DAY, ["X"], { useBrokenResistance: 0, averageSupportFastPeriod: 10, ...o }), null)
   .filter(x => x.kind === "average").map(x => [x.label, Math.round(x.lo * 1e6) / 1e6]));
-test("daily averages: the 20/21 SMA and EMA from the closes before the day, exact on a straight line", () => {
-  // Closes 1..60: a 20-day SMA is 50.5 and, on a straight line, a converged 20-day EMA lags by (20 - 1) / 2 too; the 21s give 50.
-  assert.deepEqual(averages(60), { "20-day SMA": 50.5, "20-day EMA": 50.5, "21-day SMA": 50, "21-day EMA": 50 });
-  assert.deepEqual(Object.keys(averages(41)), ["20-day SMA", "20-day EMA", "21-day SMA"], "an EMA needs twice its period of history: 41 sessions seed the 20 but not the 21");
-  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 0 })), ["20-day SMA", "21-day SMA"]);
-  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 1 })), ["20-day EMA", "21-day EMA"]);
-  assert.deepEqual(Object.keys(averages(60, { averageSupportLongPeriod: 20 })), ["20-day SMA", "20-day EMA"], "equal periods are not doubled");
+test("daily averages: the 10/20/21 SMA and EMA from the closes before the day, exact on a straight line (10 asked for explicitly)", () => {
+  // Closes 1..60: an n-day SMA is 60 - (n - 1) / 2 and, on a straight line, a converged n-day EMA lags by the same (n - 1) / 2.
+  assert.deepEqual(averages(60), { "10-day SMA": 55.5, "10-day EMA": 55.5, "20-day SMA": 50.5, "20-day EMA": 50.5, "21-day SMA": 50, "21-day EMA": 50 });
+  assert.deepEqual(Object.keys(averages(41)), ["10-day SMA", "10-day EMA", "20-day SMA", "20-day EMA", "21-day SMA"], "an EMA needs twice its period of history: 41 sessions seed the 20 but not the 21");
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 0 })), ["10-day SMA", "20-day SMA", "21-day SMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 1 })), ["10-day EMA", "20-day EMA", "21-day EMA"]);
+  assert.deepEqual(Object.keys(averages(60, { averageSupportLongPeriod: 20 })), ["10-day SMA", "10-day EMA", "20-day SMA", "20-day EMA"], "equal periods are not doubled");
+  assert.deepEqual(Object.keys(averages(60, { averageSupportFastPeriod: 0 })), ["20-day SMA", "20-day EMA", "21-day SMA", "21-day EMA"], "0 turns the fast average off");
+  // A 50-day, asked for: closes 1..120 give 95.5 for both (the EMA needs 100 sessions of history, so 99 seed only the SMA).
+  const slow = averages(120, { averageSupportSlowPeriod: 50 });
+  assert.deepEqual([slow["50-day SMA"], slow["50-day EMA"]], [95.5, 95.5]);
+  assert.deepEqual(Object.keys(averages(99, { averageSupportSlowPeriod: 50 })).filter(k => k.startsWith("50")), ["50-day SMA"]);
   assert.deepEqual(averages(60, { useAverages: 0 }), {});
 });
 test("the session baseline is every observed candle since 9:32 before the box; the local one is the few just before it", () => {
@@ -280,7 +285,9 @@ test("the cluster lists every level within reach of the box low, flags the ones 
   const k = supportCluster(100, supports, 10, cfg);
   assert.deepEqual([k.withinReach, k.atOrBelow, k.above], [2, 1, 1]);
   assert.deepEqual(k.levels.map(l => [l.label, l.fromBoxLowAtr, l.above]), [["20-day SMA", -0.05, false], ["20-day EMA", 0.005, true]]);
-  assert.equal(k.averagesSpreadAtr, 0.086, "the three averages span 99.19..100.05");
+  assert.equal(k.averagesSpreadAtr, 0.055, "the two averages in the cluster span 99.5..100.05; the 21-day just out of reach is not counted");
+  const far: Support = { kind: "average", label: "10-day SMA", lo: 120, hi: 120 };
+  assert.equal(supportCluster(100, [...supports, far], 10, cfg).averagesSpreadAtr, 0.055, "a 10-day far above the cluster does not widen it")
   assert.equal(supportCluster(100, [supports[0]!], 10, cfg).averagesSpreadAtr, null, "one average has no spread");
   const zone = supportCluster(100, [{ kind: "broken_resistance", label: "zone", lo: 99.5, hi: 101 }], 10, cfg).levels[0]!;
   assert.deepEqual([zone.above, zone.fromBoxLowAtr], [false, 0], "a zone spanning the box low: not above it, and no distance (its edge is at the low)");

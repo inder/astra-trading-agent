@@ -80,9 +80,11 @@ export function staticSupports(daily: DailyBars, config: BoxConfig, frame: Frame
     const i = daily.time.indexOf(z.broke!.on);
     if (i >= 0) out.push({ kind: "breakout_high", label: `high of ${z.broke!.on}`, lo: daily.high[i]!, hi: daily.high[i]! });
   }
-  // The daily averages a stock may bounce off (founder, 2026-10-06: "some stocks do it at 20/21 ema/sma"), recomputed each morning
+  // The daily averages a stock may bounce off (founder, 2026-10-06: "some stocks do it at 20/21 ema/sma"; "the same rules apply to
+  // stocks which find buyers at 10ema/sma"), recomputed each morning
   // from the history before the day. Separate from the runaway gate's averages, which ask a different question.
-  if (config.useAverages) for (const period of [...new Set([config.averageSupportShortPeriod, config.averageSupportLongPeriod])]) {
+  const periods = [...new Set([config.averageSupportFastPeriod, config.averageSupportShortPeriod, config.averageSupportLongPeriod, config.averageSupportSlowPeriod])].filter(p => p > 0).sort((a, b) => a - b);
+  if (config.useAverages) for (const period of periods) {
     if (config.averageSupportKind !== 1) { const v = sma(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day SMA`, lo: v, hi: v }); }
     if (config.averageSupportKind !== 0) { const v = ema(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day EMA`, lo: v, hi: v }); }
   }
@@ -127,11 +129,12 @@ export function supportUnderBox(boxLow: number, supports: readonly Support[], at
       cluster: supportCluster(boxLow, supports, atr, config) } };
 }
 /** Context, read by no rule: every support within reach of the box low on EITHER side (a level a few cents above it is still part of the
- *  picture), and how tightly the daily averages sit together, in ATRs. Several supports in one place marked the founder's low-risk entries. */
+ *  picture), and how tightly the daily averages within that reach sit together, in ATRs. Several supports in one place marked the founder's low-risk entries. */
 export function supportCluster(boxLow: number, supports: readonly Support[], atr: number, config: BoxConfig) {
   const reach = config.supportReachAtr * atr;
   const near = supports.filter(s => boxLow >= s.lo - reach && boxLow <= s.hi + reach);
-  const averages = supports.filter(s => s.kind === "average").map(s => s.lo);
+  // Spread over the averages IN the cluster (within reach), not every average: a 10-day far above a 20/21 cluster says nothing about it.
+  const averages = near.filter(s => s.kind === "average").map(s => s.lo);
   // A level above the box low is in the picture but is not the box's support (it is resistance until the price closes over it): it is
   // flagged `above`, and counted apart from the levels at or below the low.
   // Distance from the box low to the NEAREST edge of the level (0 for a zone that spans the low), so its sign always agrees with `above`.

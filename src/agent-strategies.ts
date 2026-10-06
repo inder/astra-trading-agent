@@ -107,7 +107,7 @@ export const openingRangeStrategy: AgentStrategy = {
 /** Watch-only: finds and journals tight, contracting boxes at support on runaway stocks. It never holds a position. */
 export const supportBoxStrategy: AgentStrategy = {
   id: "support-box", version: "0.1.0", name: "Support box (watch-only)",
-  description: "Watch-only detector for runaway stocks: a tight, contracting 2-minute box resting on support (a broken breakout level, a moving average or an anchored VWAP), then the first candle close above or below it. It journals each setup with the entry, stop and share count it would use, and opens no position, simulated fill or order.",
+  description: "Watch-only detector for the stocks you list (take them to be runaway stocks already; an optional runaway gate is off by default): a tight, contracting 2-minute box resting on support (a broken breakout level, a moving average or an anchored VWAP), then the first candle close above or below it. It journals each setup with the entry, stop and share count it would use, and opens no position, simulated fill or order.",
   capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"], settingKeys: BOX_SETTING_KEYS,
   paperFactory: (config, market, clock, checkpoint) => new BoxPaperRuntime(config, market, clock, checkpoint),
   preview: input => boxConfigFromInput(input as unknown as Record<string, unknown>),

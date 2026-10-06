@@ -5,7 +5,8 @@ import { SETTINGS, setting, type SettingSpec } from "./orb-options.ts";
 import { isTradingDay } from "./daily-history.ts";
 
 export const BOX_SETTINGS = {
-  // Runaway gate (daily bars before the day).
+  // Runaway gate (daily bars before the day). OFF by default: the watchlist the founder gives Astra is already the runaway list.
+  useRunawayGate: setting(0, 0, 1, true, "useRunawayGate", "whole", "1 = only stocks that pass the runaway gate below are scanned; 0 = every listed stock is scanned and the gate is not evaluated (the list is taken to be runaways already). Default {default}."),
   shortAveragePeriod: setting(10, 2, 100, true, "shortAveragePeriod", "whole", "Sessions in the short moving average the price must stand above and that must be rising; default {default}."),
   longAveragePeriod: setting(21, 3, 200, true, "longAveragePeriod", "whole", "Sessions in the long moving average the price must stand above and that must be rising; default {default}."),
   risingLookbackSessions: setting(5, 1, 60, true, "risingLookbackSessions", "whole", "An average is rising when it is above its own value this many sessions earlier; default {default}."),
@@ -23,11 +24,11 @@ export const BOX_SETTINGS = {
   candleMinutes: SETTINGS.candleMinutes,   // one row, shared with the opening-range strategy: the same grid from 9:32 ET
   maxBoxHeightAtr: setting(0.25, 0.02, 2, false, "maxBoxHeightAtr", "multiple", "Tallest a box may be (highest high minus lowest low), in ATRs; default {default}."),
   minBoxMinutes: setting(10, 2, 120, true, "minBoxMinutes", "whole", "Shortest a box may last, in minutes; default {default}."),
-  supportReachAtr: setting(0.5, 0, 3, false, "supportReachAtr", "multiple", "How far above a support the box low may sit, in ATRs; default {default}."),
-  supportSlackAtr: setting(0.1, 0, 1, false, "supportSlackAtr", "multiple", "How far below a support the box low may poke (a wick through it), in ATRs; default {default}."),
+  supportReachAtr: setting(0.15, 0, 3, false, "supportReachAtr", "multiple", "How far above a support the box low may sit, in ATRs; default {default}. A support must be at or below the box low."),
+  supportSlackAtr: setting(0, 0, 1, false, "supportSlackAtr", "multiple", "How far above the box low a support may still sit and count, in ATRs; default {default}: a level above the box low is resistance, never its support. Raise it only to tolerate a wick that pokes through a support."),
   // Contraction.
   contractionLookbackCandles: setting(5, 2, 30, true, "contractionLookbackCandles", "whole", "Candles before the box whose mean range the box is compared with; default {default}."),
-  contractionMaxRatio: setting(0.7, 0.05, 1, false, "contractionMaxRatio", "multiple", "Largest allowed mean candle range in the box's second half, as a multiple of the mean range before the box; default {default}."),
+  contractionMaxRatio: setting(0.8, 0.05, 1, false, "contractionMaxRatio", "multiple", "Largest allowed mean candle range in the box's second half, as a multiple of the mean range before the box; default {default}."),
   // Journaled levels (no position is ever opened in this version).
   riskCents: setting(50_000, 1000, 10_000_000, true, "riskDollars", "dollars", "Dollars risked per setup when sizing the journaled shares: risk divided by (entry minus stop); default {default}."),
   entryAFractionOfBox: setting(0.25, 0, 1, false, "entryAPercentOfBox", "percent", "Entry A sits this percent of the box's height above its low; default {default}."),
@@ -52,6 +53,8 @@ export function parseBoxConfig(raw: unknown): BoxConfig {
     BOX_SETTING_KEYS.some(k => !inRange(c[k], BOX_SETTINGS[k])) || c.shortAveragePeriod >= c.longAveragePeriod ||
     // A box must hold at least two candles (it has no second half otherwise), and a whole number of them.
     c.minBoxMinutes < 2 * c.candleMinutes || c.minBoxMinutes % c.candleMinutes !== 0 ||
+    // A candle must be able to hold the distinct trades its close needs: one poll sees at most one new trade.
+    c.minCandleTrades * c.pollMs > c.candleMinutes * 60000 ||
     // The same timing relations as the opening-range config: a poll fits in the gap twice, a quote may age one poll.
     c.heartbeatMs < c.pollMs || c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs) throw new Error("Invalid support-box configuration");
   return structuredClone(c);

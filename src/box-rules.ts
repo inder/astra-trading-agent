@@ -104,8 +104,9 @@ export function anchoredVwaps(bars: readonly VwapBar[], daily: DailyBars, config
   }
   return out;
 }
-/** The support a box low rests on: at most `supportSlackAtr` below its bottom and `supportReachAtr` above its top. The nearest
- *  one is returned. A box low further below the support than the slack is not at support. */
+/** The support a box low rests on: a support at or below the box low (`supportSlackAtr`, default 0, is the only tolerance for one above
+ *  it: a level above the box low is resistance), and no further under it than `supportReachAtr`. A zone whose body contains the box low
+ *  counts. The nearest one is returned. */
 export function supportUnderBox(boxLow: number, supports: readonly Support[], atr: number, config: BoxConfig): RuleDecision<"at_support"> & { support: Support | null } {
   const reach = config.supportReachAtr * atr, slack = config.supportSlackAtr * atr;
   const near = supports.filter(s => boxLow >= s.lo - slack && boxLow <= s.hi + reach)
@@ -170,28 +171,44 @@ export function sizedEntry(price: number, stop: number, config: BoxConfig): Entr
   return { price: shown(price), shares, riskPerShare: perShare / 1e4, notional: shown(shares * price) };
 }
 
+/** Why a day cannot be scanned at all: the inputs are missing or stale, which is not the same as a stock failing a rule. */
+export interface Unavailable { reason: "stale_daily_history" | "not_enough_daily_history" | "no_atr"; evidence: Record<string, unknown> }
 /** What every scan of a day starts from, however the candles arrive (offline minute bars or the live run): the daily history
- *  cut to the sessions before the day, the runaway verdict, the ATR and the supports known before the open. */
-export interface DayHead { daily: DailyBars; runaway: RuleDecision<"runaway">; atr: number | null; supports: Support[] }
+ *  cut to the sessions before the day, the runaway verdict (null when the gate is off: the listed stocks are taken to be runaways
+ *  already, and nothing says otherwise), the ATR and the supports known before the open. A history that is stale or too short is
+ *  `unavailable`, never a failed gate. */
+export interface DayHead { daily: DailyBars; gate: "on" | "off"; runaway: RuleDecision<"runaway"> | null; atr: number | null; supports: Support[]; unavailable: Unavailable | null }
 export function prepareDay(dailyAll: DailyBars, config: BoxConfig): DayHead {
-  const daily = sessionsBefore(dailyAll, config.date), frame = levelsFrame(daily), runaway = runawayGate(daily, config, frame);
-  if (!runaway.fired) return { daily, runaway, atr: null, supports: [] };
-  return { daily, runaway, atr: atrOf(daily, config.atrPeriod), supports: staticSupports(daily, config, frame) };
+  const daily = sessionsBefore(dailyAll, config.date), n = daily.time.length, gate = config.useRunawayGate ? "on" as const : "off" as const;
+  const head = { daily, gate, runaway: null as RuleDecision<"runaway"> | null, atr: null as number | null, supports: [] as Support[] };
+  const previous = previousSession(config.date);
+  if (n === 0 || daily.time[n - 1] !== previous) return { ...head, unavailable: { reason: "stale_daily_history", evidence: { sessions: n, lastSession: daily.time[n - 1] ?? null, expected: previous } } };
+  const frame = levelsFrame(daily);
+  if (gate === "on") {
+    const need = Math.max(config.longAveragePeriod + config.risingLookbackSessions, config.highLookbackSessions);
+    if (n < need) return { ...head, unavailable: { reason: "not_enough_daily_history", evidence: { sessions: n, needSessions: need, for: "runaway gate" } } };
+    head.runaway = runawayGate(daily, config, frame);
+    if (!head.runaway.fired) return { ...head, unavailable: null };
+  }
+  const atr = atrOf(daily, config.atrPeriod);
+  if (atr === null) return { ...head, unavailable: { reason: "no_atr", evidence: { sessions: n, needSessions: config.atrPeriod + 1 } } };
+  return { ...head, atr, supports: staticSupports(daily, config, frame), unavailable: null };
 }
 
 export interface DayScan {
-  date: string; status: "scanned" | "not_runaway" | "no_atr" | "no_supports" | "no_candles";
-  runaway: RuleDecision<"runaway">; atr: number | null; supports: Support[]; candles: number; boxes: BoxRecord[];
+  date: string; status: "scanned" | "not_runaway" | "unavailable" | "no_supports" | "no_candles";
+  gate: "on" | "off"; runaway: RuleDecision<"runaway"> | null; unavailable: Unavailable | null; atr: number | null; supports: Support[]; candles: number; boxes: BoxRecord[];
 }
 /** Scans one day for boxes. `bars` are minute bars with volume covering up to the last few sessions through the day (the
  *  sessions before `config.date` anchor the VWAPs; the day's own bars make the candles). `daily` is split-adjusted
  *  history; sessions on or after the day are dropped. A candle sees only what had finished by its end. At most one box is
  *  live at a time; after one is decided or voided the search starts again after it, so a day may hold several. */
 export function scanDay(bars: readonly BoxBar[], dailyAll: DailyBars, config: BoxConfig): DayScan {
-  const { daily, runaway, atr, supports: fixed } = prepareDay(dailyAll, config);
-  const blank = { date: config.date, runaway, atr, supports: [] as Support[], candles: 0, boxes: [] as BoxRecord[] };
-  if (!runaway.fired) return { ...blank, status: "not_runaway" };
-  if (atr === null) return { ...blank, status: "no_atr" };
+  const { daily, gate, runaway, unavailable, atr, supports: fixed } = prepareDay(dailyAll, config);
+  const blank = { date: config.date, gate, runaway, unavailable, atr, supports: [] as Support[], candles: 0, boxes: [] as BoxRecord[] };
+  if (unavailable) return { ...blank, status: "unavailable" };
+  if (runaway && !runaway.fired) return { ...blank, status: "not_runaway" };
+  if (atr === null) return { ...blank, status: "unavailable", unavailable: { reason: "no_atr", evidence: {} } };
   const candles = barCandles(bars, config.date, config.candleMinutes), vbars = vwapBars(bars);
   if (!candles.length) return { ...blank, supports: fixed, status: "no_candles" };
   const supportsAt = (asOf: number) => [...fixed, ...anchoredVwaps(vbars, daily, config, asOf)];
@@ -272,9 +289,11 @@ export class BoxScanner {
     if (this.#pending === null && i - minCandles + 1 >= this.#floor && height(cs.slice(i - minCandles + 1, i + 1)) <= limit) this.#pending = i - minCandles + 1;
     const pending = this.#pending;
     if (pending === null || i - pending + 1 < minCandles) return [];
-    // A candle that closes beyond the run before it is that run's breakout, not part of its formation.
+    // A candle that closes beyond the run before it may be that run's breakout, so it cannot be the candle on which the box FORMS. It stays in
+    // the window (it still fits under the height limit, which is checked above) and the box can form on the next candle; discarding the
+    // window would lose a still-tight consolidation to one mild new high.
     const run = cs.slice(pending, i);
-    if (run.length && (c.close > Math.max(...run.map(x => x.high)) || c.close < Math.min(...run.map(x => x.low)))) { this.#pending = null; this.#floor = i + 1; return []; }
+    if (run.length && (c.close > Math.max(...run.map(x => x.high)) || c.close < Math.min(...run.map(x => x.low)))) return [];
     const inside = cs.slice(pending, i + 1), low = Math.min(...inside.map(x => x.low)), high = Math.max(...inside.map(x => x.high));
     const squeeze = contraction(inside, cs.slice(Math.max(0, pending - config.contractionLookbackCandles), pending), config);
     // Supports are asked for only once the box is tight and contracting (a caller may have to fetch data to answer).

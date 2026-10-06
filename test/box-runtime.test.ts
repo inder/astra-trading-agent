@@ -22,7 +22,8 @@ const replay = (per: Record<string, MinuteBar[]>, daily: Record<string, ReturnTy
     strategyId: "support-box", ...(daily ? { daily } : {}) });
 const types = (r: ReplayResult, type: string, symbol?: string) => r.events.filter(e => e.type === type && (!symbol || e.data.symbol === symbol));
 let shared: Promise<ReplayResult> | undefined;
-const reference = () => shared ??= replay({ SOXL: referenceBars(), LAGG: referenceBars() }, { SOXL: runawayDailies(), LAGG: laggardDailies() });
+const gate = { useRunawayGate: 1 };   // the gate is off by default; these tests exercise it
+const reference = () => shared ??= replay({ SOXL: referenceBars(), LAGG: referenceBars() }, { SOXL: runawayDailies(), LAGG: laggardDailies() }, gate);
 
 test("the watch-only run journals the verdicts and supports before 9:32, then the box formed and decided, and holds nothing", async () => {
   const r = await reference();
@@ -40,7 +41,7 @@ test("the watch-only run journals the verdicts and supports before 9:32, then th
   assert.ok(r.events.every(e => !["paper_entry", "paper_sale", "option_selection"].includes(e.type)), "no position, fill or order event exists");
 });
 test("the run and the offline scan of the same bars agree on every box (a plumbing check, not live fidelity: ADR 0002)", async () => {
-  const r = await reference(), claims = checkBoxes(r, file({ SOXL: referenceBars(), LAGG: referenceBars() }), { SOXL: runawayDailies(), LAGG: laggardDailies() }, DAY, ["SOXL", "LAGG"]);
+  const r = await reference(), claims = checkBoxes(r, file({ SOXL: referenceBars(), LAGG: referenceBars() }), { SOXL: runawayDailies(), LAGG: laggardDailies() }, DAY, ["SOXL", "LAGG"], gate as never);
   assert.ok(claims.every(k => k.pass), claims.filter(k => !k.pass).map(k => `${k.id}: ${k.detail}`).join("; "));
   assert.ok(claims.some(k => k.id === "SOXL-boxes") && claims.some(k => k.id === "LAGG-no-boxes"));
   assert.ok(timeline(r).some(l => /BOX decided up/.test(l)));
@@ -59,13 +60,6 @@ test("a candle with no trades at all is journaled unobserved and voids the live 
   assert.equal(types(r, "box_decided").length, 0);
   const claims = checkBoxes(r, file({ SOXL: bars }), { SOXL: runawayDailies() }, DAY, ["SOXL"]).filter(k => k.id === "SOXL-boxes");
   assert.ok(claims.every(k => k.pass), claims.map(k => k.detail).join());
-});
-test("a candle seen through too few distinct trades has no known close (ADR 0002), however steady the price", async () => {
-  const r = await replay({ SOXL: referenceBars() }, { SOXL: runawayDailies() }, { pollMs: 20000, maxQuoteAgeMs: 20000, maxObservationGapMs: 60000, minCandleTrades: 10 });   // six trades a candle
-  assert.equal(types(r, "box_formed").length, 0);
-  assert.ok(types(r, "candle_unobserved", "SOXL").length > 0 && types(r, "candle_unobserved").every(e => e.data.reason === "sparse" || e.data.reason === "not_observed"));
-  const loose = await replay({ SOXL: referenceBars() }, { SOXL: runawayDailies() }, { pollMs: 20000, maxQuoteAgeMs: 20000, maxObservationGapMs: 60000, minCandleTrades: 1 });
-  assert.ok(types(loose, "box_formed").length >= 1, "the same polling with the count relaxed sees the box");
 });
 test("with a coarse poll the observed ranges differ from the bars', so the replay claim can fail", async () => {
   // 30-second polls see the bar's open and a mid-path price, never its low, high or close; this shows the claim is not vacuous.
@@ -95,14 +89,14 @@ test("a support-box run cannot be resumed and its runtime refuses a checkpoint o
 });
 
 // ---- Detached reads that fail, stall or arrive late (the happy path above answers instantly).
-async function flaky(tweak: (market: ReplayMarket) => void) {
+async function flaky(tweak: (market: ReplayMarket) => void, gated = true, extra: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(root, `fl${n++}-`)), { close } = sessionTimes(DAY);
   let now = open - 120000;
   const market = new ReplayMarket({ regular: file({ SOXL: referenceBars() }), clock: () => now, volatility: {}, daily: { SOXL: runawayDailies() } });
   tweak(market);
   const service = new TradingAgentService(dir, undefined, undefined, { market, clock: () => now, ready: () => true, auto: false });
   try {
-    service.paper.configure({ runId: "flaky", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000 });
+    service.paper.configure({ runId: "flaky", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000, ...(gated ? { useRunawayGate: 1 } : {}), ...extra } as never);
     await service.paper.start("flaky");
     for (let guard = 0; guard < 30000; guard++) { const s = await service.paper.tick("flaky"); if (s.status === "completed") break; now += 1000; if (now > close + 3600000) break; }
     const events: Journal[] = [];
@@ -141,4 +135,38 @@ test("today's minute bars that never come degrade the box's VWAP to the prior se
   const events = await flaky(m => { const real = m.bars.bind(m); m.bars = async (s, a, b, x) => { if (a === open) throw new Error("down"); return real(s, a, b, x); }; });
   assert.equal(of(events, "box_formed")[0]!.data.vwapTodayDegraded, true);
   assert.ok(of(events, "data_gap").some(e => e.data.source === "bars"));
+});
+
+/** A feed that shows a new trade on only one poll in three (the others repeat the last one): about 40 distinct trades in a 2-minute candle. */
+const slowTape = (m: ReplayMarket) => { const real = m.quotes.bind(m); let calls = 0, held: Awaited<ReturnType<typeof real>> = []; m.quotes = async s => (calls++ % 3 === 0 ? (held = await real(s)) : held); };
+test("a candle seen through too few distinct trades has no known close (ADR 0002), however steady the price", async () => {
+  const sparse = await flaky(slowTape, true, { minCandleTrades: 50 });
+  assert.equal(of(sparse, "box_formed").length, 0);
+  const unobserved = of(sparse, "candle_unobserved");
+  assert.ok(unobserved.length > 0 && unobserved.every(e => e.data.reason === "sparse" && e.data.distinctTrades < 50 && e.data.distinctTrades >= 30), JSON.stringify(unobserved[0]?.data));
+  const enough = await flaky(slowTape, true, { minCandleTrades: 30 });
+  assert.equal(of(enough, "candle_unobserved").length, 0); assert.equal(of(enough, "box_decided").length, 1);
+});
+test("with the gate off (the default) a stock is journaled as watched, never as a runaway, and is scanned", async () => {
+  const events = await flaky(() => {}, false);
+  const verdict = of(events, "universe_checked")[0]!.data;
+  assert.deepEqual([verdict.status, verdict.runaway, verdict.runawayGate], ["watched", null, "off"]);
+  assert.ok(!events.some(e => e.type === "universe_checked" && e.data.runaway === true));
+  assert.equal(of(events, "box_decided").length, 1);
+});
+test("daily history that ends before the previous session is unavailable with its reason, after being read again until 9:32, and never a not-runaway verdict", async () => {
+  let reads = 0;
+  const events = await flaky(m => { const real = m.dailyBars!; m.dailyBars = async (...a) => { reads++; const r = await real.apply(m, a), b = r.bars, n = b.time.length - 1; return { ...r, bars: { time: b.time.slice(0, n), open: b.open.slice(0, n), high: b.high.slice(0, n), low: b.low.slice(0, n), close: b.close.slice(0, n) } }; }; });
+  assert.deepEqual(of(events, "universe_checked").map(e => [e.data.status, e.data.reason]), [["unavailable", "stale_daily_history"]]);
+  assert.ok(reads >= 2, "a lagging feed is read again before the gate settles it");
+  assert.equal(of(events, "box_formed").length, 0);
+});
+test("today's minute bars failing three times degrade the VWAP, and a later success restores it", async () => {
+  let failures = 3;
+  const events = await flaky(m => { const real = m.bars.bind(m); m.bars = async (s, a, b, x) => { if (a === open && failures-- > 0) throw new Error("timeout"); return real(s, a, b, x); }; });
+  const formed = of(events, "box_formed")[0]!.data, decided = of(events, "box_decided")[0]!.data;
+  assert.equal(formed.vwapTodayDegraded, true, "the box formed while today's bars could not be read");
+  assert.equal(decided.vwapTodayDegraded, false, "by the decision the bars were back");
+  assert.ok(of(events, "data_restored").some(e => e.data.source === "bars"));
+  assert.equal(decided.decision.close, 160.71);
 });

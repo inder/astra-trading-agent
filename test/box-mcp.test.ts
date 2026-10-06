@@ -44,7 +44,7 @@ test("a support-box run is configured with its own settings through MCP, watched
   const out = await call("get_support_setups", { runId: "box-run" });
   assert.deepEqual([out.watchOnly, out.ordersSubmitted, out.positions, out.runStatus], [true, 0, 0, "completed"]);
   const soxl = out.symbols.find((s: any) => s.symbol === "SOXL");
-  assert.equal(soxl.verdict.status, "runaway"); assert.ok(soxl.supports.supports.length > 0);
+  assert.deepEqual([soxl.verdict.status, soxl.verdict.runaway, soxl.verdict.runawayGate], ["watched", null, "off"], "the gate is off by default: the stock is watched, never called a runaway"); assert.ok(soxl.supports.supports.length > 0);
   assert.deepEqual(soxl.boxes.map((b: any) => [b.outcome, b.decision.direction, b.decision.close]), [["decided", "up", 160.71]]);
   assert.equal(soxl.boxes[0].entries.A.shares, Math.floor(40000 / 100 / 0.535), "the run's own risk setting sizes the journaled shares");
   const orb = await call("configure_paper_strategy", { runId: "orb-run", strategyId: "opening-range-options", date: "2026-09-08", symbols: ["DEMOA"], includePremarket: false });
@@ -61,8 +61,8 @@ test("a run stopped while a box is open reports that box as unresolved, never as
   t.after(async () => { await service.close(); rmSync(dir, { recursive: true, force: true }); });
   service.paper.configure({ runId: "box-stop", strategyId: "support-box", date: DAY, symbols: ["SOXL"], includePremarket: false, heartbeatMs: 600000 });
   await service.paper.start("box-stop");
-  // Tick to 10:05, after the box formed (about 9:54) and before the candle that decides it (ends 10:14), then stop.
-  for (now = open - 60000; now < open + 35 * 60000; now += 1000) await service.paper.tick("box-stop");
+  // Tick to 10:13, after the box formed (10:08) and before the candle that decides it (closes 10:16), then stop.
+  for (now = open - 60000; now < open + 43 * 60000; now += 1000) await service.paper.tick("box-stop");
   await service.paper.stop("box-stop");
   const out = service.supportSetups("box-stop"), boxes = out.symbols[0]!.boxes as unknown as { outcome: string }[];
   assert.deepEqual(boxes.map(b => b.outcome), ["unresolved"]); assert.equal(out.runStatus, "stopped");

@@ -50,19 +50,20 @@ export function flatSession(date: string, typical: number): BoxBar[] {
   const { open, close } = sessionTimes(date);
   return Array.from({ length: (close - open) / 60000 }, (_, i) => BAR(open + i * 60000, typical, typical + 0.1, typical - 0.1, typical));
 }
-/** The 9:32-onward candles of the reference day, by their start time (minutes after 9:30). Invented, shaped like SOXL on
- *  2026-10-05: a pull-back to support, a tight box that contracts (and holds a double bottom), a first close above it. */
+/** The 9:32-onward candles of the reference day. Invented, shaped like SOXL on 2026-10-05 as the founder read it on real bars: a pull-back
+ *  to support, a tight box 9:46 to 10:14 that contracts (and holds a double bottom), a first close above it on the candle that closes at 10:16. */
 export const PRE_BOX: Spec[] = [
-  [162.2, 163.4, 161.8, 161.9], [161.9, 162.9, 161.0, 161.3], [161.3, 162.2, 160.5, 160.7], [160.7, 161.3, 159.9, 160.1], [160.1, 160.6, 159.3, 159.5],
-  [159.5, 160.1, 158.9, 159.2], [159.2, 159.8, 156.9, 158.3]];   // 9:32 .. 9:44; the last is a flush to support
+  [162.2, 163.4, 161.8, 161.9], [161.9, 162.9, 161.0, 161.3], [161.3, 161.8, 160.8, 161.0], [161.0, 161.4, 160.4, 160.6],
+  [160.6, 161.0, 160.0, 160.2], [160.2, 160.5, 159.6, 159.8], [159.0, 159.1, 156.9, 158.3]];   // 9:32 .. 9:44; the last is a flush to support
+/** The box: 14 candles, 9:46 to 10:14. Its second half (the last seven) is calmer than the five candles before it: ratio about 0.75. */
 export const BOX_FIRST_HALF: Spec[] = [
-  [159.0, 159.35, 158.15, 158.9], [158.9, 160.0, 158.9, 159.8], [159.8, 160.22, 159.0, 159.3],
-  [159.3, 159.9, 158.75, 159.5], [159.5, 159.95, 158.85, 159.1], [159.1, 159.9, 158.75, 159.6]];  // 9:44 .. 9:54
+  [159.0, 159.35, 158.15, 158.9], [158.9, 160.0, 158.9, 159.8], [159.8, 160.22, 159.0, 159.3], [159.3, 159.9, 158.75, 159.5],
+  [159.5, 159.95, 158.85, 159.1], [159.1, 159.9, 158.75, 159.6], [159.6, 160.1, 158.9, 159.2]];   // 9:46 .. 9:58
 export const BOX_SECOND_HALF: Spec[] = [
-  [159.6, 159.7, 158.8, 158.9], [158.6, 158.93, 158.08, 158.7], [158.7, 159.5, 158.65, 159.3],
-  [159.3, 159.9, 159.05, 159.4], [159.4, 159.85, 159.0, 159.5], [159.5, 159.9, 159.1, 159.6]];     // 9:56 .. 10:06
-export const INSIDE_AFTER: Spec[] = [[159.6, 159.9, 159.3, 159.5]];       // 10:08, closes inside the box
-export const BREAKOUT: Spec[] = [[159.6, 160.9, 159.5, 160.71]];           // 10:10..10:12, first close above (ends 10:12)
+  [159.2, 159.7, 158.8, 158.9], [158.6, 158.93, 158.08, 158.7], [158.7, 159.5, 158.65, 159.3], [159.3, 159.9, 159.05, 159.4],
+  [159.4, 159.85, 158.95, 159.5], [159.5, 159.9, 159.05, 159.6], [159.6, 159.95, 159.0, 159.5]];  // 10:00 .. 10:12
+export const INSIDE_AFTER: Spec[] = [];
+export const BREAKOUT: Spec[] = [[159.6, 160.9, 159.5, 160.71]];           // 10:14..10:16, first close above the box; it ends (closes) at 10:16
 export const RUN_AFTER: Spec[] = [[160.7, 162.6, 160.6, 162.4], [162.4, 164.38, 162.2, 164.0], [164.0, 164.2, 162.0, 162.8], [162.8, 164.3, 162.5, 164.27]];
 export interface DayOptions { pre?: Spec[]; first?: Spec[]; second?: Spec[]; inside?: Spec[]; breakout?: Spec[]; after?: Spec[]; priorTypical?: [number, number, number]; drop?: number[] }
 /** The reference day's minute bars plus the three sessions before it. `drop` removes the minute bars at those candle
@@ -72,6 +73,6 @@ export function referenceBars(o: DayOptions = {}): BoxBar[] {
     ...(o.inside ?? INSIDE_AFTER), ...(o.breakout ?? BREAKOUT), ...(o.after ?? RUN_AFTER)];
   const today = [BAR(open, 162, 162.4, 161.8, 162.2), BAR(open + 60000, 162.2, 162.2, 161.8, 161.9),
     ...specs.flatMap((s, i) => candleBars(grid + i * 120000, s).filter((_, m) => !(o.drop?.includes(i) && m === 0)))];
-  const [a, b, c] = o.priorTypical ?? [150, 154, 162];
+  const [a, b, c] = o.priorTypical ?? [150, 153.5, 162];
   return [...flatSession("2026-09-30", a), ...flatSession("2026-10-01", b), ...flatSession("2026-10-02", c), ...today];
 }

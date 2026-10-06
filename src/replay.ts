@@ -210,9 +210,10 @@ export function checkBoxes(result: ReplayResult, regular: BarsFile, daily: Recor
   for (const symbol of symbols) {
     const bars = (regular.data.results.find(r => r.symbol === symbol)?.bars ?? []) as BoxBar[], reference = scanDay(bars, daily[symbol]!, config);
     const verdicts = of("universe_checked", symbol);
-    add(`${symbol}-verdict`, `${symbol} gets exactly one verdict, and it is the offline scan's: runaway ${reference.runaway.fired}`, verdicts.length === 1 && (verdicts[0]!.data.status === "runaway") === reference.runaway.fired,
+    const expected = reference.unavailable ? "unavailable" : reference.runaway ? (reference.runaway.fired ? "runaway" : "not_runaway") : "watched";
+    add(`${symbol}-verdict`, `${symbol} gets exactly one verdict, and it is the offline scan's: ${expected}`, verdicts.length === 1 && verdicts[0]!.data.status === expected,
       verdicts.map(v => v.data.status).join(",") || "none");
-    if (!reference.runaway.fired) { add(`${symbol}-no-boxes`, `${symbol} is not a runaway, so no box is searched for`, !result.events.some(e => e.type.startsWith("box_") && e.data?.symbol === symbol), "none expected"); continue; }
+    if (expected === "not_runaway" || expected === "unavailable") { add(`${symbol}-no-boxes`, `${symbol} is ${expected === "unavailable" ? "unavailable" : "not a runaway"}, so no box is searched for`, !result.events.some(e => e.type.startsWith("box_") && e.data?.symbol === symbol), "none expected"); continue; }
     const engine = result.events.filter(e => ["box_decided", "box_voided", "box_expired"].includes(e.type) && e.data?.symbol === symbol).map(e => e.data);
     const key = (b: any) => JSON.stringify([b.box.start, b.box.end, b.box.low, b.box.high, b.status === "live" ? "expired" : b.status, b.decision?.direction ?? null, b.decision?.candleEnd ?? null]);
     const want = reference.boxes.map(key), got = engine.map(b => key({ ...b, status: b.status === "live" ? "expired" : b.status }));

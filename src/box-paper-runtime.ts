@@ -20,13 +20,15 @@ const MAX_IN_FLIGHT = 3;
 const MAX_TODAY_ATTEMPTS = 3;
 /** How long a read of today's minute bars may take. It blocks nothing (the candle waits, the quote polls go on), so it is generous. */
 const TODAY_READ_DEADLINE_MS = 30_000;
+/** Longest pause between attempts to recover today's minute bars once a symbol is degraded. */
+const MAX_TODAY_BACKOFF_MS = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 const shownSupport = (s: Support) => ({ kind: s.kind, label: s.label, lo: Math.round(s.lo * 1e4) / 1e4, hi: Math.round(s.hi * 1e4) / 1e4 });
 
 interface SymbolState {
   phase: Phase; head: DayHead | null; prior: VwapBar[]; anchorsPending: string[]; anchorsMissing: string[];
   scanner: BoxScanner | null; candles: CandleState; slots: Map<number, { high: number; low: number; trades: number }>; lastTradeCounted: number;
-  dailyRetryAt: number; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
+  dailyRetryAt: number; lastUnavailable: { reason: string; evidence: Record<string, unknown> } | null; todayRetryAt: number; todayBackoffMs: number; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
   counts: { formed: number; decided: number; voided: number; expired: number; unobserved: number };
 }
 type Arrival = (events: PaperEvent[]) => void;
@@ -41,7 +43,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     this.#config = parseBoxConfig(raw); this.#market = market; this.#clock = clock;
     this.#session = sessionTimes(this.#config.date); this.#grid = this.#session.open + OPENING_RANGE_MINUTES * 60000;
     for (const symbol of this.#config.symbols) this.#symbols.set(symbol, { phase: "loading", head: null, prior: [], anchorsPending: [], anchorsMissing: [],
-      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, queue: [],
+      scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, lastUnavailable: null, todayRetryAt: 0, todayBackoffMs: this.#config.maxObservationGapMs, queue: [],
       today: null, todayAttempts: 0, degraded: false, counts: { formed: 0, decided: 0, voided: 0, expired: 0, unobserved: 0 } });
   }
   get pollMs() { return this.#config.pollMs; }
@@ -85,7 +87,7 @@ export class BoxPaperRuntime implements PaperRuntime {
       });
       for (const q of (quotes ?? []).sort((a, b) => (a.tradeAt ?? "").localeCompare(b.tradeAt ?? "") || a.symbol.localeCompare(b.symbol))) this.#observe(q, now, events);
     }
-    for (const [symbol, st] of this.#symbols) if (st.phase === "ready") this.#drain(symbol, st, now, events);
+    for (const [symbol, st] of this.#symbols) if (st.phase === "ready") { this.#drain(symbol, st, now, events); this.#recover(symbol, st, now); }
     if (now >= this.#nextHeartbeat) {
       events.push({ type: "heartbeat", data: { latest: Object.fromEntries(this.#latest), readFailures: this.#reads.takeFailures(), dataGapSince: this.#reads.since(),
         queuedCandles: Object.fromEntries([...this.#symbols].filter(([, st]) => st.queue.length).map(([s, st]) => [s, st.queue.length])) } });
@@ -120,11 +122,18 @@ export class BoxPaperRuntime implements PaperRuntime {
     // A failed or slow read is tried again after a pause while there is time before 9:32; the gate settles whatever is still unread.
     if (!r.ok) { this.#reads.failed("daily", this.#clock(), events, r.error); st.dailyRetryAt = this.#clock() + this.#config.maxObservationGapMs; return; }
     this.#reads.succeeded("daily", this.#clock(), events);
-    const head = prepareDay(r.value.bars, this.#config), evidence = { evidence: head.runaway.evidence, atr14: head.atr === null ? null : Math.round(head.atr * 1e4) / 1e4 };
-    if (!head.runaway.fired) { st.head = head; this.#settle(symbol, st, "not_runaway", events, evidence); return; }
-    if (head.atr === null) { this.#settle(symbol, st, "unavailable", events, { reason: "no_atr", ...evidence }); return; }
+    const head = prepareDay(r.value.bars, this.#config), atr14 = head.atr === null ? null : Math.round(head.atr * 1e4) / 1e4;
+    const evidence = { runawayGate: head.gate, atr14, ...(head.runaway ? { evidence: head.runaway.evidence } : {}) };
+    if (head.unavailable) {
+      // Missing or stale history is not a failed rule. A stale feed (yesterday not in yet at 9:25) is read again while there is time; the gate settles it.
+      st.lastUnavailable = head.unavailable;
+      if (head.unavailable.reason === "stale_daily_history") { st.dailyRetryAt = this.#clock() + this.#config.maxObservationGapMs; return; }
+      this.#settle(symbol, st, "unavailable", events, { reason: head.unavailable.reason, runawayGate: head.gate, ...head.unavailable.evidence }); return;
+    }
+    if (head.runaway && !head.runaway.fired) { st.head = head; this.#settle(symbol, st, "not_runaway", events, evidence); return; }
     st.head = head; st.anchorsPending = this.#config.useAnchoredVwaps ? head.daily.time.slice(-this.#config.vwapMaxSessionsBack).reverse() : [];
-    events.push({ type: "universe_checked", data: { symbol, runaway: true, status: "runaway", sessions: head.daily.time.length, ...evidence } });
+    // With the gate off the stock is only watched: "runaway" is never claimed for it.
+    events.push({ type: "universe_checked", data: { symbol, runaway: head.runaway ? true : null, status: head.runaway ? "runaway" : "watched", sessions: head.daily.time.length, ...evidence } });
     if (!st.anchorsPending.length) this.#ready(symbol, st, events);
   }
   #anchorArrived(symbol: string, date: string, r: { ok: true; value: unknown } | { ok: false; error: unknown }, events: PaperEvent[]): void {
@@ -150,7 +159,8 @@ export class BoxPaperRuntime implements PaperRuntime {
     st.phase = "ready"; st.scanner = new BoxScanner(head.atr!, c);
     // As of the open: today's minutes do not exist yet, so only the sessions before the day.
     const vwaps = anchoredVwaps(st.prior, head.daily, { ...c, vwapIncludesToday: 0 }, this.#session.open);
-    events.push({ type: "supports", data: { symbol, asOf: "before_open", supports: [...head.supports, ...vwaps].map(shownSupport), vwapAnchorsMissing: st.anchorsMissing,
+    const all = [...head.supports, ...vwaps];
+    events.push({ type: "supports", data: { symbol, asOf: "before_open", supports: all.map(shownSupport), ...(all.length ? {} : { reason: "no_supports", note: "no box can form without a support" }), vwapAnchorsMissing: st.anchorsMissing,
       vwapIncludesToday: c.vwapIncludesToday === 1 } });
   }
   /** At 9:32 whatever is still unread is settled: no box is searched for a stock whose verdict is not in. */
@@ -158,7 +168,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     this.#gateOpened = true;
     for (const [symbol, st] of this.#symbols) {
       if (st.phase !== "loading") continue;
-      if (st.head === null) { this.#settle(symbol, st, "unavailable", events, { reason: "not_read_before_open" }); continue; }
+      if (st.head === null) { this.#settle(symbol, st, "unavailable", events, st.lastUnavailable ? { reason: st.lastUnavailable.reason, ...st.lastUnavailable.evidence, lastRead: "before_open" } : { reason: "not_read_before_open" }); continue; }
       st.anchorsMissing.push(...st.anchorsPending); st.anchorsPending = [];
       this.#ready(symbol, st, events);
     }
@@ -204,22 +214,30 @@ export class BoxPaperRuntime implements PaperRuntime {
         if (!(error instanceof NeedsData)) throw error;
         if (this.#inflight.has(`today:${symbol}`)) return;   // a read is already on its way
         if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) { st.degraded = true; continue; }
-        {
-          st.todayAttempts++;
-          this.#launch(`today:${symbol}`, TODAY_READ_DEADLINE_MS, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
-            if (r.ok) {
-              const result = ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute");
-              if (Array.isArray(result?.bars)) { this.#reads.succeeded("bars", this.#clock(), ev); st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; }
-              else this.#reads.failed("bars", this.#clock(), ev, new Error("No minute bars for the day"));
-            } else this.#reads.failed("bars", this.#clock(), ev, r.error);
-            this.#drain(symbol, st, this.#clock(), ev);
-          });
-        }
+        st.todayAttempts++; this.#fetchToday(symbol, st, now);
         return;
       }
       const candle = st.queue.shift()!;
       for (const e of out) events.push(this.#journal(symbol, st, e, candle, supportsAt));
     }
+  }
+  /** Read today's minute bars in the background. A success makes them current and clears any degradation; a failure backs off. */
+  #fetchToday(symbol: string, st: SymbolState, now: number): void {
+    this.#launch(`today:${symbol}`, TODAY_READ_DEADLINE_MS, () => this.#market.bars([symbol], this.#session.open, now, false), (r, startedAt, ev) => {
+      const result = r.ok ? ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute") : undefined;
+      if (r.ok && Array.isArray(result?.bars)) {
+        this.#reads.succeeded("bars", this.#clock(), ev);
+        st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; st.todayBackoffMs = this.#config.maxObservationGapMs;
+      } else {
+        this.#reads.failed("bars", this.#clock(), ev, r.ok ? new Error("No minute bars for the day") : r.error);
+        st.todayRetryAt = this.#clock() + st.todayBackoffMs; st.todayBackoffMs = Math.min(st.todayBackoffMs * 2, MAX_TODAY_BACKOFF_MS);
+      }
+      this.#drain(symbol, st, this.#clock(), ev);
+    });
+  }
+  /** A symbol whose VWAP fell back to the prior sessions keeps asking for today's bars, on a doubling backoff, until they come. */
+  #recover(symbol: string, st: SymbolState, now: number): void {
+    if (st.degraded && !this.#inflight.has(`today:${symbol}`) && now >= st.todayRetryAt) this.#fetchToday(symbol, st, now);
   }
   #journal(symbol: string, st: SymbolState, e: BoxEvent, candle: Candle, _supportsAt: unknown): PaperEvent {
     st.counts[e.type === "formed" ? "formed" : e.type === "decided" ? "decided" : "voided"]++;

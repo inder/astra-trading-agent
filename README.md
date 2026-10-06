@@ -620,8 +620,8 @@ and share count it would use. Entry and exit choices, paper shares and live trad
   rising 10- and 21-session averages, within 10% of the three-month high, and a daily close through a prior resistance zone within the last
   10 sessions (by the levels engine's own break rules, which lag the break by its confirming closes). A stale or too-short daily history is
   `unavailable` with its reason, with the gate on or off, and never a failed gate.
-- **Supports:** zones the price closed above and the high of the breakout session, the daily 20- and 21-day simple and exponential (a 10-day can be added; it is off by default, since stocks that
-  bounce off the 10-day retest and bounce rather than compress)
+- **Supports:** zones the price closed above and the high of the breakout session, the daily 20- and 21-day simple and exponential (a 10-day and a 50-day can be added with `averageSupportFastPeriod` and
+  `averageSupportSlowPeriod`; both are off by default, and stocks that bounce off the 10-day tend to retest and bounce rather than compress)
   averages (recomputed each morning; periods and kinds are settings), and VWAPs anchored at the
   regular-session open one to three sessions back (typical price times volume over minute bars, including today's finished
   minutes up to the candle just closed).

@@ -14,7 +14,7 @@ const scan = (o = {}, c = config, daily = runawayDailies()) => scanDay(reference
 
 test("settings: every number is a row with the founder's placeholder default, and out-of-range or unknown values are refused", () => {
   const d = Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, BOX_SETTINGS[k].default]));
-  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportFastPeriod, d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportKind], [0, 20, 21, 2], "no 10-day box support by default: the 10-day setup is a retest and bounce, not a box"); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
+  assert.equal(d.maxBoxHeightAtr, 0.25); assert.equal(d.minBoxMinutes, 10); assert.equal(d.supportReachAtr, 0.08); assert.equal(d.contractionBaseline, 1); assert.deepEqual([d.averageSupportFastPeriod, d.averageSupportShortPeriod, d.averageSupportLongPeriod, d.averageSupportSlowPeriod, d.averageSupportKind], [0, 20, 21, 0, 2], "no 10-day box support by default: the 10-day setup is a retest and bounce, not a box"); assert.equal(d.supportSlackAtr, 0); assert.equal(d.contractionMaxRatio, 0.8); assert.equal(d.useRunawayGate, 0, "the watchlist is the runaway list: the gate is off unless asked for");
   assert.equal(d.contractionLookbackCandles, 5); assert.equal(d.riskCents, 50_000); assert.equal(d.breakoutLookbackSessions, 10); assert.equal(d.maxBelowHighFraction, 0.1);
   assert.equal(parseBoxConfig(config).symbols[0], "SOXL");
   assert.throws(() => boxConfig(DAY, ["SOXL"], { maxBoxHeightAtr: 5 }), /Invalid/);
@@ -266,6 +266,10 @@ test("daily averages: the 10/20/21 SMA and EMA from the closes before the day, e
   assert.deepEqual(Object.keys(averages(60, { averageSupportKind: 1 })), ["10-day EMA", "20-day EMA", "21-day EMA"]);
   assert.deepEqual(Object.keys(averages(60, { averageSupportLongPeriod: 20 })), ["10-day SMA", "10-day EMA", "20-day SMA", "20-day EMA"], "equal periods are not doubled");
   assert.deepEqual(Object.keys(averages(60, { averageSupportFastPeriod: 0 })), ["20-day SMA", "20-day EMA", "21-day SMA", "21-day EMA"], "0 turns the fast average off");
+  // A 50-day, asked for: closes 1..120 give 95.5 for both (the EMA needs 100 sessions of history, so 99 seed only the SMA).
+  const slow = averages(120, { averageSupportSlowPeriod: 50 });
+  assert.deepEqual([slow["50-day SMA"], slow["50-day EMA"]], [95.5, 95.5]);
+  assert.deepEqual(Object.keys(averages(99, { averageSupportSlowPeriod: 50 })).filter(k => k.startsWith("50")), ["50-day SMA"]);
   assert.deepEqual(averages(60, { useAverages: 0 }), {});
 });
 test("the session baseline is every observed candle since 9:32 before the box; the local one is the few just before it", () => {

@@ -19,6 +19,7 @@ export const BOX_SETTINGS = {
   // Off by default (founder, 2026-10-06): "stocks that bounce off the 10 don't have volatility compressions; they do a retest and
   // bounce" — a different trigger, not a box. The row stays so a box at a fast average can still be asked for.
   averageSupportFastPeriod: setting(0, 0, 200, true, "averageSupportFastPeriod", "whole", "Sessions in a fast daily moving average offered as a box support; 0 = none. The 10-day setup is a retest and bounce, not a box, so the default is none. Default {default}."),
+  averageSupportSlowPeriod: setting(0, 0, 200, true, "averageSupportSlowPeriod", "whole", "Sessions in a slow daily moving average offered as a box support (e.g. 50); 0 = none. Default {default}."),
   averageSupportShortPeriod: setting(20, 2, 200, true, "averageSupportShortPeriod", "whole", "Sessions in the first daily moving average offered as a support; default {default}."),
   averageSupportLongPeriod: setting(21, 2, 200, true, "averageSupportLongPeriod", "whole", "Sessions in the second daily moving average offered as a support; default {default}."),
   averageSupportKind: setting(2, 0, 2, true, "averageSupportKind", "whole", "Which daily averages are supports: 0 = simple, 1 = exponential, 2 = both; default {default}."),

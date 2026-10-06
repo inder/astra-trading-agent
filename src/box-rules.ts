@@ -83,7 +83,7 @@ export function staticSupports(daily: DailyBars, config: BoxConfig, frame: Frame
   // The daily averages a stock may bounce off (founder, 2026-10-06: "some stocks do it at 20/21 ema/sma"; "the same rules apply to
   // stocks which find buyers at 10ema/sma"), recomputed each morning
   // from the history before the day. Separate from the runaway gate's averages, which ask a different question.
-  const periods = [...new Set([config.averageSupportFastPeriod, config.averageSupportShortPeriod, config.averageSupportLongPeriod])].filter(p => p > 0).sort((a, b) => a - b);
+  const periods = [...new Set([config.averageSupportFastPeriod, config.averageSupportShortPeriod, config.averageSupportLongPeriod, config.averageSupportSlowPeriod])].filter(p => p > 0).sort((a, b) => a - b);
   if (config.useAverages) for (const period of periods) {
     if (config.averageSupportKind !== 1) { const v = sma(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day SMA`, lo: v, hi: v }); }
     if (config.averageSupportKind !== 0) { const v = ema(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day EMA`, lo: v, hi: v }); }

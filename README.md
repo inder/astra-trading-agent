@@ -608,7 +608,7 @@ backstop and the close-out keep working. An outage of option prices alone never
 halts either: exits wait for a fresh bid (never an invented one), the status shows
 `dataGapSince`, and contracts still unsold at the close are written off.
 
-### Support box (watch-only, strategy 0.1.0)
+### Support box (watch-only, strategy 0.1.1)
 
 A second strategy, `support-box`, watches the stocks you list (**the list is taken to be runaway stocks**: Astra does not pick them) for a tight, contracting 2-minute box resting on support, and
 journals the first candle close above or below it. **It holds no positions, simulates no fills and submits no orders**; it only
@@ -620,16 +620,20 @@ and share count it would use. Entry and exit choices, paper shares and live trad
   rising 10- and 21-session averages, within 10% of the three-month high, and a daily close through a prior resistance zone within the last
   10 sessions (by the levels engine's own break rules, which lag the break by its confirming closes). A stale or too-short daily history is
   `unavailable` with its reason, with the gate on or off, and never a failed gate.
-- **Supports:** zones the price closed above and the high of the breakout session, the two averages, and VWAPs anchored at the
+- **Supports:** zones the price closed above and the high of the breakout session, the daily 20- and 21-day simple and exponential
+  averages (recomputed each morning; periods and kinds are settings), and VWAPs anchored at the
   regular-session open one to three sessions back (typical price times volume over minute bars, including today's finished
   minutes up to the candle just closed).
 - **The box:** 2-minute candles on the grid from 9:32 ET; the first run of at least 10 minutes whose height is at most 0.25 ATR(14),
   whose low rests on a support **at or below it** (no more than 0.15 ATR under the box low; a level above the box low is resistance, never its
-  support), and whose second-half mean candle range is at most 0.8 of the mean range of the five candles before it. The 0.15 was set
-  against the founder's SOXL day only: his two supports sat 0.05 and 0.12 ATR below the box low, while the midday boxes the first defaults also found, citing a support
-  about 0.35 ATR (4 points) below, were judged spurious. It then grows to the right; the first candle that **closes** outside it
+  support), and whose second-half mean candle range is at most 0.8 of the session's mean candle range so far (or, as a setting, of
+  the five candles just before it). The reach (0.08 ATR) and the session baseline were set against two real days: SOXL 2026-10-05
+  (support 0.04 ATR below) and INTC 2026-10-06 (the founder's own trade: support 0.05 ATR below, at the daily 20/21-average
+  cluster); at 0.15 INTC also produced up decisions from midday boxes 0.13 ATR above a support. It then grows to the right; the first candle that **closes** outside it
   decides it (up: bulls, down: bears). A wick past the height limit is counted, never a bound. A candle that closes at a new high or low still inside the height limit stays in the window but cannot be the candle on which the box forms.
   A candle whose close is not known voids a live box (ADR 0001).
+- **Cluster (context, read by no rule):** each box records every support within reach of its low on either side and how tightly the
+  daily averages sit together, in ATRs. On INTC 2026-10-06 three supports sat within 0.06 ATR and the four averages spanned 0.18 ATR.
 - **Journaled levels** for an up decision: entry A (a quarter of the box's height above its low), entry B (the decision candle's
   close), the stop (the box low) and shares for each = risk (default $500) divided by entry minus stop. A large share count at entry
   A is a consequence of its tiny risk per share; the journal records the notional too.

@@ -24,6 +24,13 @@ const shown = (v: number) => Math.round(v * 1e4) / 1e4;
 const ratio = (v: number) => Math.round(v * 1e3) / 1e3;
 const mean = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const sma = (closes: readonly number[], period: number, end = closes.length) => end < period ? null : mean(closes.slice(end - period, end));
+/** Exponential average of the closes, seeded with the simple average of the first `period` (the whole history converges it). */
+const ema = (closes: readonly number[], period: number): number | null => {
+  if (closes.length < period * 2) return null;
+  let e = mean(closes.slice(0, period)); const k = 2 / (period + 1);
+  for (const x of closes.slice(period)) e = x * k + e * (1 - k);
+  return e;
+};
 const atrOf = (daily: DailyBars, n: number) =>
   trailingAtr(daily.time.map((_, i) => ({ high: daily.high[i]!, low: daily.low[i]!, close: daily.close[i]! })), n);
 
@@ -73,8 +80,11 @@ export function staticSupports(daily: DailyBars, config: BoxConfig, frame: Frame
     const i = daily.time.indexOf(z.broke!.on);
     if (i >= 0) out.push({ kind: "breakout_high", label: `high of ${z.broke!.on}`, lo: daily.high[i]!, hi: daily.high[i]! });
   }
-  if (config.useAverages) for (const period of [config.shortAveragePeriod, config.longAveragePeriod]) {
-    const v = sma(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-session average`, lo: v, hi: v });
+  // The daily averages a stock may bounce off (founder, 2026-10-06: "some stocks do it at 20/21 ema/sma"), recomputed each morning
+  // from the history before the day. Separate from the runaway gate's averages, which ask a different question.
+  if (config.useAverages) for (const period of [...new Set([config.averageSupportShortPeriod, config.averageSupportLongPeriod])]) {
+    if (config.averageSupportKind !== 1) { const v = sma(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day SMA`, lo: v, hi: v }); }
+    if (config.averageSupportKind !== 0) { const v = ema(daily.close, period); if (v !== null) out.push({ kind: "average", label: `${period}-day EMA`, lo: v, hi: v }); }
   }
   return out;
 }
@@ -113,7 +123,17 @@ export function supportUnderBox(boxLow: number, supports: readonly Support[], at
   const near = supports.filter(s => boxLow >= s.lo - slack && boxLow <= s.hi + reach)
     .sort((a, b) => Math.abs(boxLow - Math.min(Math.max(boxLow, a.lo), a.hi)) - Math.abs(boxLow - Math.min(Math.max(boxLow, b.lo), b.hi)))[0] ?? null;
   return { fired: near !== null, reason: "at_support", support: near,
-    evidence: { boxLow: shown(boxLow), reach: shown(reach), slack: shown(slack), support: near && { kind: near.kind, label: near.label, lo: shown(near.lo), hi: shown(near.hi) } } };
+    evidence: { boxLow: shown(boxLow), reach: shown(reach), slack: shown(slack), support: near && { kind: near.kind, label: near.label, lo: shown(near.lo), hi: shown(near.hi) },
+      cluster: supportCluster(boxLow, supports, atr, config) } };
+}
+/** Context, read by no rule: every support within reach of the box low on EITHER side (a level a few cents above it is still part of the
+ *  picture), and how tightly the daily averages sit together, in ATRs. Several supports in one place marked the founder's low-risk entries. */
+export function supportCluster(boxLow: number, supports: readonly Support[], atr: number, config: BoxConfig) {
+  const reach = config.supportReachAtr * atr;
+  const near = supports.filter(s => boxLow >= s.lo - reach && boxLow <= s.hi + reach);
+  const averages = supports.filter(s => s.kind === "average").map(s => s.lo);
+  return { withinReach: near.length, levels: near.map(s => ({ label: s.label, level: shown((s.lo + s.hi) / 2), fromBoxLowAtr: ratio(((s.lo + s.hi) / 2 - boxLow) / atr) })),
+    averagesSpreadAtr: averages.length > 1 ? ratio((Math.max(...averages) - Math.min(...averages)) / atr) : null };
 }
 
 // ---- Candles. Offline candles come from minute bars; the live runtime builds the same shape from observed trades.
@@ -144,6 +164,12 @@ export function barCandles(bars: readonly BoxBar[], date: string, candleMinutes:
 const height = (cs: readonly Candle[]) => Math.max(...cs.map(c => c.high)) - Math.min(...cs.map(c => c.low));
 /** Volatility shrinks: the mean candle range of the box's second half against the mean range of the candles just before
  *  it. Not evaluable (not fired) without enough candles before the box. */
+/** The candles a box is measured against: the session so far before it, or the few just before it (contractionBaseline). Unobserved
+ *  candles are left out of the session baseline (a gap earlier in the day never blocks a later box). */
+export function beforeBox(cs: readonly Candle[], start: number, config: BoxConfig): Candle[] {
+  return config.contractionBaseline === 1 ? cs.slice(0, start).filter(c => c.close !== null && Number.isFinite(c.high - c.low))
+    : cs.slice(Math.max(0, start - config.contractionLookbackCandles), start);
+}
 export function contraction(box: readonly Candle[], before: readonly Candle[], config: BoxConfig): RuleDecision<"contraction"> {
   if (before.length < config.contractionLookbackCandles || box.length < 2 || [...box, ...before].some(c => c.close === null || !Number.isFinite(c.high - c.low)))
     return { fired: false, reason: "contraction", evidence: { evaluable: false, candlesBefore: before.length, needed: config.contractionLookbackCandles } };
@@ -157,7 +183,10 @@ export interface BoxLevels { start: number; end: number; high: number; low: numb
 export interface BoxRecord {
   status: "live" | "decided" | "voided";
   box: { start: string; end: string; high: number; low: number; height: number; heightToAtr: number; candles: number; wickOutsideCandles: number };
-  support: unknown; /** The box low when the box formed (the live low can later extend under it within the height limit); the support was judged against this. */ lowAtFormation: number; formedAt: string; contractionAtFormation: Record<string, unknown>; contraction: Record<string, unknown>;
+  support: unknown;
+  /** Context read by no rule: every support within reach of the box low, either side, and how tightly the daily averages sit. */
+  cluster: unknown;
+  /** The box low when the box formed (the live low can later extend under it within the height limit); the support was judged against this. */ lowAtFormation: number; formedAt: string; contractionAtFormation: Record<string, unknown>; contraction: Record<string, unknown>;
   decision: { direction: "up" | "down"; candleStart: string; candleEnd: string; close: number } | null;
   voided: { reason: "candle_unobserved"; candleStart: string } | null;
   /** Long-only. Journaled for an up decision, never opened in this version. */
@@ -227,7 +256,7 @@ export function scanBoxes(candles: readonly Candle[], supportsAt: (asOf: number)
   return out;
 }
 
-interface LiveBox { from: number; to: number; high: number; low: number; lowAtFormation: number; wicks: number; support: unknown; formedAt: number; atFormation: Record<string, unknown> }
+interface LiveBox { from: number; to: number; high: number; low: number; lowAtFormation: number; wicks: number; support: unknown; cluster: unknown; formedAt: number; atFormation: Record<string, unknown> }
 /** A box the scanner has just formed, decided or voided. */
 export interface BoxEvent { type: "formed" | "decided" | "voided"; record: BoxRecord }
 /** Thrown by a `supportsAt` that cannot answer yet (the data it needs has not arrived). The scanner leaves its state exactly as
@@ -257,8 +286,8 @@ export class BoxScanner {
       heightToAtr: ratio((l.high - l.low) / this.#atr), candles: l.to - l.from + 1, wickOutsideCandles: l.wicks };
   }
   #record(l: LiveBox, status: BoxRecord["status"], extra: Partial<BoxRecord>): BoxRecord {
-    const cs = this.#candles, c = this.#config, inside = cs.slice(l.from, l.to + 1), before = cs.slice(Math.max(0, l.from - c.contractionLookbackCandles), l.from);
-    return { status, box: this.#boxOf(l), support: l.support, lowAtFormation: shown(l.lowAtFormation), formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
+    const cs = this.#candles, c = this.#config, inside = cs.slice(l.from, l.to + 1), before = beforeBox(cs, l.from, c);
+    return { status, box: this.#boxOf(l), support: l.support, cluster: l.cluster, lowAtFormation: shown(l.lowAtFormation), formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
       contraction: { ...contraction(inside, before, c).evidence }, decision: null, voided: null, entries: null, ...extra };
   }
   /** The box still open, as it stands now. */
@@ -298,12 +327,12 @@ export class BoxScanner {
     const run = cs.slice(pending, i);
     if (run.length && (c.close > Math.max(...run.map(x => x.high)) || c.close < Math.min(...run.map(x => x.low)))) return [];
     const inside = cs.slice(pending, i + 1), low = Math.min(...inside.map(x => x.low)), high = Math.max(...inside.map(x => x.high));
-    const squeeze = contraction(inside, cs.slice(Math.max(0, pending - config.contractionLookbackCandles), pending), config);
+    const squeeze = contraction(inside, beforeBox(cs, pending, config), config);
     // Supports are asked for only once the box is tight and contracting (a caller may have to fetch data to answer).
     if (!squeeze.fired) return [];
     const at = supportUnderBox(low, supportsAt(c.end), this.#atr, config);
     if (!at.fired) return [];
-    this.#live = { from: pending, to: i, high, low, lowAtFormation: low, wicks: 0, support: at.evidence.support, formedAt: c.end, atFormation: { ...squeeze.evidence } };
+    this.#live = { from: pending, to: i, high, low, lowAtFormation: low, wicks: 0, support: at.evidence.support, cluster: at.evidence.cluster, formedAt: c.end, atFormation: { ...squeeze.evidence } };
     return [{ type: "formed", record: this.#record(this.#live, "live", {}) }];
   }
   #end(l: LiveBox, status: "decided" | "voided", extra: Partial<BoxRecord>, i: number): BoxEvent[] {

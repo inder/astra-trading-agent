@@ -282,6 +282,8 @@ test("the cluster lists every level within reach of the box low, flags the ones 
   assert.deepEqual(k.levels.map(l => [l.label, l.fromBoxLowAtr, l.above]), [["20-day SMA", -0.05, false], ["20-day EMA", 0.005, true]]);
   assert.equal(k.averagesSpreadAtr, 0.086, "the three averages span 99.19..100.05");
   assert.equal(supportCluster(100, [supports[0]!], 10, cfg).averagesSpreadAtr, null, "one average has no spread");
+  const zone = supportCluster(100, [{ kind: "broken_resistance", label: "zone", lo: 99.5, hi: 101 }], 10, cfg).levels[0]!;
+  assert.deepEqual([zone.above, zone.fromBoxLowAtr], [false, 0], "a zone spanning the box low: not above it, and no distance (its edge is at the low)");
   // The box's own support never comes from above: the 3-cent-higher EMA is listed, but the SMA under it is the support.
   assert.equal(supportUnderBox(100, supports, 10, cfg).support!.label, "20-day SMA");
 });

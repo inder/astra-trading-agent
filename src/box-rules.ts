@@ -134,7 +134,9 @@ export function supportCluster(boxLow: number, supports: readonly Support[], atr
   const averages = supports.filter(s => s.kind === "average").map(s => s.lo);
   // A level above the box low is in the picture but is not the box's support (it is resistance until the price closes over it): it is
   // flagged `above`, and counted apart from the levels at or below the low.
-  const levels = near.map(s => { const level = (s.lo + s.hi) / 2; return { label: s.label, level: shown(level), fromBoxLowAtr: ratio((level - boxLow) / atr), above: s.lo > boxLow }; });
+  // Distance from the box low to the NEAREST edge of the level (0 for a zone that spans the low), so its sign always agrees with `above`.
+  const levels = near.map(s => { const edge = Math.min(Math.max(boxLow, s.lo), s.hi);
+    return { label: s.label, level: shown((s.lo + s.hi) / 2), fromBoxLowAtr: ratio((edge - boxLow) / atr), above: s.lo > boxLow }; });
   return { withinReach: levels.length, atOrBelow: levels.filter(l => !l.above).length, above: levels.filter(l => l.above).length, levels,
     averagesSpreadAtr: averages.length > 1 ? ratio((Math.max(...averages) - Math.min(...averages)) / atr) : null };
 }

@@ -30,7 +30,9 @@ interface SymbolState {
   scanner: BoxScanner | null; candles: CandleState; slots: Map<number, { high: number; low: number; trades: number }>; lastTradeCounted: number;
   dailyRetryAt: number; lastUnavailable: { reason: string; evidence: Record<string, unknown> } | null; todayRetryAt: number; todayBackoffMs: number; closing: boolean; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
   /** When the head candle began waiting for today's bars (null: not waiting); and why the VWAP is degraded. */
-  waitingSince: number | null; degradedReason: "reads_failed" | "no_read_slot" | null;
+  waitingSince: number | null;
+  /** The first cause: a candle that waited a whole candle, or reads that failed. It stays until a read succeeds. */
+  degradedReason: "reads_failed" | "waited_a_candle" | null;
   counts: { formed: number; decided: number; voided: number; expired: number; unobserved: number };
 }
 type Arrival = (events: PaperEvent[]) => void;
@@ -219,7 +221,7 @@ export class BoxPaperRuntime implements PaperRuntime {
         // degrades (its VWAP falls back to the prior sessions) so its candles stay live instead of queueing until the close.
         if (st.waitingSince === null) st.waitingSince = now;
         if (now - st.waitingSince < c.candleMinutes * 60000) return;
-        st.degraded = true; st.degradedReason = "no_read_slot"; st.waitingSince = null;
+        st.degraded = true; st.degradedReason = "waited_a_candle"; st.waitingSince = null;
         continue;
       }
       st.waitingSince = null;
@@ -227,13 +229,14 @@ export class BoxPaperRuntime implements PaperRuntime {
       for (const e of out) events.push(this.#journal(symbol, st, e, candle, supportsAt));
     }
   }
-  // The state of today's minute bars, and the one event allowed to change each piece (every row has a test):
+  // The state of today's minute bars, and the one event allowed to change each piece (every row has a test except the
+  // read-slot order, which the fixtures cannot separate: see the contention test in test/box-runtime.test.ts):
   //   inflight `today:S`   a read launched (added) / a read arrived (removed)
   //   todayAttempts        +1 when a read is actually LAUNCHED (never when the cap turns it away); 0 when a read succeeds
   //   todayRetryAt         a launched read failed: now + one poll before degrading, now + the backoff once degraded
   //   todayBackoffMs       doubled when a read fails while degraded (cap 60 s); reset when a read succeeds
   //   degraded             true: a launched read failed and todayAttempts is at or above the cap (it keeps counting while degraded),
-  //                        or the head candle waited a whole candle for a read (degradedReason "no_read_slot"); false: a read succeeded
+  //                        or the head candle waited a whole candle for a read (degradedReason "waited_a_candle"); false: a read succeeded
   //   waitingSince         the head candle first needed today's bars (set); the head candle was processed or the wait degraded (cleared)
   //   read slots           handed out only by #scheduleToday: waiting candles before recovery reads, rotating the first symbol each poll
   //   today (bars, fetchedAt)   a read succeeded

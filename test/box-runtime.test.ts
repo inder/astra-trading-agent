@@ -259,7 +259,7 @@ test("a today's-bars read that never answers: the waiting candle degrades after 
   const { close } = sessionTimes(DAY);
   const events = await flaky((m, c) => { todayReads(m, c, () => false, 8 * 3600000); });   // every read outlasts the session
   const formed = of(events, "box_formed")[0]!;
-  assert.deepEqual([formed.data.vwapTodayDegraded, formed.data.vwapTodayDegradedReason, formed.data.vwapThrough], [true, "no_read_slot", null]);
+  assert.deepEqual([formed.data.vwapTodayDegraded, formed.data.vwapTodayDegradedReason, formed.data.vwapThrough], [true, "waited_a_candle", null]);
   assert.ok(formed.at < close - 5 * 3600000, `journaled live (${new Date(formed.at).toISOString()}), not at the close`);
   assert.equal(of(events, "box_decided")[0]!.data.decision.close, 160.71);
 });
@@ -272,7 +272,7 @@ test("twenty symbols whose today's-bars reads all hang to the deadline: every sy
   const formed = of(events, "box_formed");
   assert.deepEqual(formed.map(e => e.data.symbol).sort(), [...symbols].sort(), "every symbol's box formed");
   assert.ok(formed.every(e => e.at < close - 5 * 3600000), "every box was journaled live, none at the close");
-  assert.ok(formed.every(e => e.data.vwapTodayDegraded === true && ["no_read_slot", "reads_failed"].includes(e.data.vwapTodayDegradedReason)), "degraded, with the reason");
+  assert.ok(formed.every(e => e.data.vwapTodayDegraded === true && ["waited_a_candle", "reads_failed"].includes(e.data.vwapTodayDegradedReason)), "degraded, with the reason");
   const perSymbol = symbols.map(s => reads.calls.filter(c => c.symbol === s).length);
   assert.ok(perSymbol.every(n => n > 0), `every symbol got today's-bars reads: ${perSymbol}`);
   assert.ok(Math.max(...perSymbol) <= 3 * Math.min(...perSymbol) + 3, `reads are shared fairly: ${perSymbol}`);

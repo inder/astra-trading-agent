@@ -3,12 +3,16 @@ import { addDays, isWeekEnder } from "./daily-history.ts";
 import { openingRangeConfig, type StrategySetupInput } from "./orb-config.ts";
 import type { PaperFactory } from "./paper-runtime.ts";
 import { OrbPaperRuntime } from "./orb-paper-runtime.ts";
+import { BoxPaperRuntime } from "./box-paper-runtime.ts";
+import { boxConfigFromInput, parseBoxConfig } from "./box-settings.ts";
+import { boxSample } from "./box-sample.ts";
 
 export interface SampleEvent { sequence: number; type: string; data: unknown }
 export interface SampleResult { events: SampleEvent[]; summary: Record<string, unknown> }
 export interface AgentStrategy {
   id: string; version: string; name: string; description: string;
   capabilities: readonly string[];
+  /** The pinned configuration for a setup (settings omitted take their defaults). Input keys are a strategy's own setting keys. */
   preview(input: StrategySetupInput): unknown;
   runSample(config: unknown): SampleResult;
   paperFactory?: PaperFactory;
@@ -98,4 +102,14 @@ export const openingRangeStrategy: AgentStrategy = {
   },
 };
 
-export const agentStrategies: readonly AgentStrategy[] = [openingRangeStrategy];
+/** Watch-only: finds and journals tight, contracting boxes at support on runaway stocks. It never holds a position. */
+export const supportBoxStrategy: AgentStrategy = {
+  id: "support-box", version: "0.1.0", name: "Support box (watch-only)",
+  description: "Watch-only detector for runaway stocks: a tight, contracting 2-minute box resting on support (a broken breakout level, a moving average or an anchored VWAP), then the first candle close above or below it. It journals each setup with the entry, stop and share count it would use, and opens no position, simulated fill or order.",
+  capabilities: ["synthetic_sample", "configuration_preview", "continuous_paper"],
+  paperFactory: (config, market, clock, checkpoint) => new BoxPaperRuntime(config, market, clock, checkpoint),
+  preview: input => boxConfigFromInput(input as unknown as Record<string, unknown>),
+  runSample: raw => boxSample(parseBoxConfig(raw)),
+};
+
+export const agentStrategies: readonly AgentStrategy[] = [openingRangeStrategy, supportBoxStrategy];

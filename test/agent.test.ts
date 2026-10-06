@@ -16,7 +16,7 @@ test("disconnected startup and preview are honest and write nothing", t => {
   const { service, directory } = fixture(t);
   assert.equal(service.readiness().brokerage, "not_connected");
   assert.equal(service.readiness().requiresOpenAIKey, false);
-  assert.equal(service.catalog().length, 1);
+  assert.deepEqual(service.catalog().map(s => s.id), ["opening-range-options", "support-box"], "the opening-range strategy stays first: the setup guide leads with the first strategy that can run on paper");
   assert.equal(service.preview(request.strategyId, request.symbols, false).started, false);
   assert.deepEqual(readdirSync(directory), []);
   assert.throws(() => service.preview("daily-ma-call", request.symbols, false));

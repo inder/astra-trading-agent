@@ -1,7 +1,7 @@
 // The support-box strategy's settings: one row per number, the founder's placeholder default and a validated range. The
 // same table pattern as SETTINGS in orb-options.ts (the row helper is shared). The founder tunes these; none is a rule's
 // literal. Rules are in box-rules.ts.
-import { setting, type SettingSpec } from "./orb-options.ts";
+import { SETTINGS, setting, type SettingSpec } from "./orb-options.ts";
 import { isTradingDay } from "./daily-history.ts";
 
 export const BOX_SETTINGS = {
@@ -31,6 +31,12 @@ export const BOX_SETTINGS = {
   // Journaled levels (no position is ever opened in this version).
   riskCents: setting(50_000, 1000, 10_000_000, true, "riskDollars", "dollars", "Dollars risked per setup when sizing the journaled shares: risk divided by (entry minus stop); default {default}."),
   entryAFractionOfBox: setting(0.25, 0, 1, false, "entryAPercentOfBox", "percent", "Entry A sits this percent of the box's height above its low; default {default}."),
+  // Observation and history (live run). A candle seen through fewer distinct trades than this has an unknown close (docs/decisions/0002).
+  minCandleTrades: setting(3, 1, 100, true, "minCandleTrades", "whole", "Fewest distinct trades Astra must have seen inside a candle for its close, high and low to count; fewer and the candle is unobserved. Default {default}."),
+  historyDays: setting(760, 120, 1900, true, "historyDays", "whole", "Calendar days of daily history read for each stock before the open (about two years); default {default}."),
+  // Market-data timing: the opening-range strategy's own rows, one definition each (the same ranges, defaults and chat names).
+  pollMs: SETTINGS.pollMs, maxQuoteAgeMs: SETTINGS.maxQuoteAgeMs, maxObservationGapMs: SETTINGS.maxObservationGapMs,
+  heartbeatMs: SETTINGS.heartbeatMs,
 } as const satisfies Record<string, SettingSpec>;
 export type BoxSettingKey = keyof typeof BOX_SETTINGS;
 export const BOX_SETTING_KEYS = Object.keys(BOX_SETTINGS) as BoxSettingKey[];
@@ -45,10 +51,21 @@ export function parseBoxConfig(raw: unknown): BoxConfig {
     new Set(c.symbols).size !== c.symbols.length || c.symbols.some(s => typeof s !== "string" || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(s)) ||
     BOX_SETTING_KEYS.some(k => !inRange(c[k], BOX_SETTINGS[k])) || c.shortAveragePeriod >= c.longAveragePeriod ||
     // A box must hold at least two candles (it has no second half otherwise), and a whole number of them.
-    c.minBoxMinutes < 2 * c.candleMinutes || c.minBoxMinutes % c.candleMinutes !== 0) throw new Error("Invalid support-box configuration");
+    c.minBoxMinutes < 2 * c.candleMinutes || c.minBoxMinutes % c.candleMinutes !== 0 ||
+    // The same timing relations as the opening-range config: a poll fits in the gap twice, a quote may age one poll.
+    c.heartbeatMs < c.pollMs || c.maxObservationGapMs < 2 * c.pollMs || c.maxQuoteAgeMs < c.pollMs) throw new Error("Invalid support-box configuration");
   return structuredClone(c);
 }
 /** A config with every row at its default, for the given day and symbols (and any overrides, which are validated). */
 export function boxConfig(date: string, symbols: string[], overrides: Partial<Record<BoxSettingKey, number>> = {}): BoxConfig {
   return parseBoxConfig({ date, symbols, ...Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, overrides[k] ?? BOX_SETTINGS[k].default])) });
+}
+/** The pinned config for a run from the chat edge's input: defaults for every omitted setting, in one canonical key order (a run's config
+ *  hash covers its JSON). Settings that belong to another strategy, and pre-market bars, are refused rather than ignored. */
+export function boxConfigFromInput(input: Record<string, unknown>): BoxConfig {
+  const { date, symbols, includePremarketLeadMinutes, ...rest } = input;
+  if (includePremarketLeadMinutes) throw new Error("The support-box strategy does not use pre-market bars");
+  const foreign = Object.keys(rest).filter(k => rest[k] !== undefined && !(BOX_SETTING_KEYS as string[]).includes(k));
+  if (foreign.length) throw new Error(`Setting ${foreign.join(", ")} does not apply to the support-box strategy`);
+  return parseBoxConfig({ date, symbols, ...Object.fromEntries(BOX_SETTING_KEYS.map(k => [k, rest[k] ?? BOX_SETTINGS[k].default])) });
 }

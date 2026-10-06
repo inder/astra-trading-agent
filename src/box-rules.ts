@@ -167,6 +167,15 @@ export function sizedEntry(price: number, stop: number, config: BoxConfig): Entr
   return { price: shown(price), shares, riskPerShare: perShare / 1e4, notional: shown(shares * price) };
 }
 
+/** What every scan of a day starts from, however the candles arrive (offline minute bars or the live run): the daily history
+ *  cut to the sessions before the day, the runaway verdict, the ATR and the supports known before the open. */
+export interface DayHead { daily: DailyBars; runaway: RuleDecision<"runaway">; atr: number | null; supports: Support[] }
+export function prepareDay(dailyAll: DailyBars, config: BoxConfig): DayHead {
+  const daily = sessionsBefore(dailyAll, config.date), frame = levelsFrame(daily), runaway = runawayGate(daily, config, frame);
+  if (!runaway.fired) return { daily, runaway, atr: null, supports: [] };
+  return { daily, runaway, atr: atrOf(daily, config.atrPeriod), supports: staticSupports(daily, config, frame) };
+}
+
 export interface DayScan {
   date: string; status: "scanned" | "not_runaway" | "no_atr" | "no_supports" | "no_candles";
   runaway: RuleDecision<"runaway">; atr: number | null; supports: Support[]; candles: number; boxes: BoxRecord[];
@@ -176,68 +185,105 @@ export interface DayScan {
  *  history; sessions on or after the day are dropped. A candle sees only what had finished by its end. At most one box is
  *  live at a time; after one is decided or voided the search starts again after it, so a day may hold several. */
 export function scanDay(bars: readonly BoxBar[], dailyAll: DailyBars, config: BoxConfig): DayScan {
-  const daily = sessionsBefore(dailyAll, config.date), frame = levelsFrame(daily), runaway = runawayGate(daily, config, frame);
-  const blank = { date: config.date, runaway, atr: null as number | null, supports: [] as Support[], candles: 0, boxes: [] as BoxRecord[] };
+  const { daily, runaway, atr, supports: fixed } = prepareDay(dailyAll, config);
+  const blank = { date: config.date, runaway, atr, supports: [] as Support[], candles: 0, boxes: [] as BoxRecord[] };
   if (!runaway.fired) return { ...blank, status: "not_runaway" };
-  const atr = atrOf(daily, config.atrPeriod);
   if (atr === null) return { ...blank, status: "no_atr" };
-  const fixed = staticSupports(daily, config, frame), candles = barCandles(bars, config.date, config.candleMinutes), vbars = vwapBars(bars);
-  if (!candles.length) return { ...blank, atr, supports: fixed, status: "no_candles" };
+  const candles = barCandles(bars, config.date, config.candleMinutes), vbars = vwapBars(bars);
+  if (!candles.length) return { ...blank, supports: fixed, status: "no_candles" };
   const supportsAt = (asOf: number) => [...fixed, ...anchoredVwaps(vbars, daily, config, asOf)];
-  if (!supportsAt(candles[0]!.end).length) return { ...blank, atr, status: "no_supports", candles: candles.length };
-  return { ...blank, atr, supports: supportsAt(candles[0]!.start), candles: candles.length, status: "scanned", boxes: scanBoxes(candles, supportsAt, atr, config) };
+  if (!supportsAt(candles[0]!.end).length) return { ...blank, status: "no_supports", candles: candles.length };
+  return { ...blank, supports: supportsAt(candles[0]!.start), candles: candles.length, status: "scanned", boxes: scanBoxes(candles, supportsAt, atr, config) };
 }
 
-/** The box search over a day's candles (see the settings rows for every number).
+/** The box search over a day's candles, offline: the incremental scanner fed every candle in turn. */
+export function scanBoxes(candles: readonly Candle[], supportsAt: (asOf: number) => Support[], atr: number, config: BoxConfig): BoxRecord[] {
+  const scanner = new BoxScanner(atr, config), out: BoxRecord[] = [];
+  for (const c of candles) for (const e of scanner.push(c, supportsAt)) if (e.type !== "formed") out.push(e.record);
+  const live = scanner.live(); if (live) out.push(live);
+  return out;
+}
+
+interface LiveBox { from: number; to: number; high: number; low: number; wicks: number; support: unknown; formedAt: number; atFormation: Record<string, unknown> }
+/** A box the scanner has just formed, decided or voided. */
+export interface BoxEvent { type: "formed" | "decided" | "voided"; record: BoxRecord }
+/** Thrown by a `supportsAt` that cannot answer yet (the data it needs has not arrived). The scanner leaves its state exactly as
+ *  it was before the candle, so the same candle can be pushed again later. */
+export class NeedsData extends Error { what: string; constructor(what: string) { super(what); this.what = what; this.name = "NeedsData"; } }
+
+/** The incremental box search (see the settings rows for every number). Candles are pushed in order, one per grid slot.
  *
  *  A candidate box starts as the first run of exactly `minBoxMinutes` of candles whose height fits under the limit, and
  *  grows to the right while it still fits; it never reaches back for earlier candles that happen to fit. It FORMS the first
  *  time the box low rests on a support and the contraction holds. Once formed, each new candle is judged in this order:
  *  its close unknown voids the box; its close above the box high or below its low DECIDES it, before any extension, so
- *  a breakout candle that would still fit under the limit is not swallowed; otherwise its high and low extend the box
- *  where the height limit allows (a wick past the limit is counted, never a box bound). */
-export function scanBoxes(candles: readonly Candle[], supportsAt: (asOf: number) => Support[], atr: number, config: BoxConfig): BoxRecord[] {
-  const limit = config.maxBoxHeightAtr * atr, minCandles = Math.ceil(config.minBoxMinutes / config.candleMinutes), out: BoxRecord[] = [];
-  let floor = 0, pending: number | null = null;
-  let live: { from: number; to: number; high: number; low: number; wicks: number; support: unknown; formedAt: number; atFormation: Record<string, unknown> } | null = null;
-  const boxOf = (l: NonNullable<typeof live>) => ({ start: iso(candles[l.from]!.start), end: iso(candles[l.to]!.end), high: shown(l.high), low: shown(l.low),
-    height: shown(l.high - l.low), heightToAtr: ratio((l.high - l.low) / atr), candles: l.to - l.from + 1, wickOutsideCandles: l.wicks });
-  const finish = (l: NonNullable<typeof live>, status: BoxRecord["status"], extra: Partial<BoxRecord>) => {
-    const inside = candles.slice(l.from, l.to + 1), before = candles.slice(Math.max(0, l.from - config.contractionLookbackCandles), l.from);
-    out.push({ status, box: boxOf(l), support: l.support, formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
-      contraction: { ...contraction(inside, before, config).evidence }, decision: null, voided: null, entries: null, ...extra });
-  };
-  for (let i = 0; i < candles.length; i++) {
-    const c = candles[i]!;
-    if (live) {
-      if (c.close === null) { finish(live, "voided", { voided: { reason: "candle_unobserved", candleStart: iso(c.start) } }); live = null; floor = i + 1; pending = null; continue; }
-      if (c.close > live.high || c.close < live.low) {
-        const up = c.close > live.high, stop = live.low, boxHeight = live.high - live.low;
-        finish(live, "decided", { decision: { direction: up ? "up" : "down", candleStart: iso(c.start), candleEnd: iso(c.end), close: shown(c.close) },
-          entries: up ? { A: sizedEntry(live.low + config.entryAFractionOfBox * boxHeight, stop, config), B: sizedEntry(c.close, stop, config), stop: shown(stop) } : null });
-        live = null; floor = i + 1; pending = null; continue;
+ *  a breakout candle that would still fit under the limit is not swallowed; otherwise its high and low extend the box,
+ *  each side only while the box stays within the limit (a wick past it is counted, never a bound). A formed box is sticky:
+ *  nothing later rewrites it. */
+export class BoxScanner {
+  #candles: Candle[] = []; #floor = 0; #pending: number | null = null; #limit: number; #minCandles: number;
+  #live: LiveBox | null = null;
+  #atr: number; #config: BoxConfig;
+  constructor(atr: number, config: BoxConfig) {
+    this.#atr = atr; this.#config = config; this.#limit = config.maxBoxHeightAtr * atr; this.#minCandles = Math.ceil(config.minBoxMinutes / config.candleMinutes);
+  }
+  get candleCount() { return this.#candles.length; }
+  #boxOf(l: LiveBox) {
+    const cs = this.#candles;
+    return { start: iso(cs[l.from]!.start), end: iso(cs[l.to]!.end), high: shown(l.high), low: shown(l.low), height: shown(l.high - l.low),
+      heightToAtr: ratio((l.high - l.low) / this.#atr), candles: l.to - l.from + 1, wickOutsideCandles: l.wicks };
+  }
+  #record(l: LiveBox, status: BoxRecord["status"], extra: Partial<BoxRecord>): BoxRecord {
+    const cs = this.#candles, c = this.#config, inside = cs.slice(l.from, l.to + 1), before = cs.slice(Math.max(0, l.from - c.contractionLookbackCandles), l.from);
+    return { status, box: this.#boxOf(l), support: l.support, formedAt: iso(l.formedAt), contractionAtFormation: l.atFormation,
+      contraction: { ...contraction(inside, before, c).evidence }, decision: null, voided: null, entries: null, ...extra };
+  }
+  /** The box still open, as it stands now. */
+  live(): BoxRecord | null { return this.#live ? this.#record(this.#live, "live", {}) : null; }
+  push(c: Candle, supportsAt: (asOf: number) => Support[]): BoxEvent[] {
+    const saved = { floor: this.#floor, pending: this.#pending };
+    this.#candles.push(c);
+    try { return this.#step(c, supportsAt); }
+    catch (error) { this.#candles.pop(); this.#floor = saved.floor; this.#pending = saved.pending; throw error; }
+  }
+  #step(c: Candle, supportsAt: (asOf: number) => Support[]): BoxEvent[] {
+    const cs = this.#candles, i = cs.length - 1, config = this.#config, limit = this.#limit, l = this.#live;
+    if (l) {
+      if (c.close === null) return this.#end(l, "voided", { voided: { reason: "candle_unobserved", candleStart: iso(c.start) } }, i);
+      if (c.close > l.high || c.close < l.low) {
+        const up = c.close > l.high, stop = l.low, boxHeight = l.high - l.low;
+        return this.#end(l, "decided", { decision: { direction: up ? "up" : "down", candleStart: iso(c.start), candleEnd: iso(c.end), close: shown(c.close) },
+          entries: up ? { A: sizedEntry(l.low + config.entryAFractionOfBox * boxHeight, stop, config), B: sizedEntry(c.close, stop, config), stop: shown(stop) } : null }, i);
       }
       // Each side extends on its own while the box stays within the limit; a side that would break it is a wick, counted only.
-      const high = Math.max(live.high, c.high), low = Math.min(live.low, c.low);
+      const high = Math.max(l.high, c.high), low = Math.min(l.low, c.low);
       let wick = false;
-      if (high > live.high) { if (high - live.low <= limit) live.high = high; else wick = true; }
-      if (low < live.low) { if (live.high - low <= limit) live.low = low; else wick = true; }
-      if (wick) live.wicks++;
-      live.to = i; continue;
+      if (high > l.high) { if (high - l.low <= limit) l.high = high; else wick = true; }
+      if (low < l.low) { if (l.high - low <= limit) l.low = low; else wick = true; }
+      if (wick) l.wicks++;
+      l.to = i; return [];
     }
-    if (c.close === null) { floor = i + 1; pending = null; continue; }
-    if (pending !== null && height(candles.slice(pending, i + 1)) > limit) pending = null;
-    if (pending === null && i - minCandles + 1 >= floor && height(candles.slice(i - minCandles + 1, i + 1)) <= limit) pending = i - minCandles + 1;
-    if (pending === null || i - pending + 1 < minCandles) continue;
+    if (c.close === null) { this.#floor = i + 1; this.#pending = null; return []; }
+    const minCandles = this.#minCandles;
+    if (this.#pending !== null && height(cs.slice(this.#pending, i + 1)) > limit) this.#pending = null;
+    if (this.#pending === null && i - minCandles + 1 >= this.#floor && height(cs.slice(i - minCandles + 1, i + 1)) <= limit) this.#pending = i - minCandles + 1;
+    const pending = this.#pending;
+    if (pending === null || i - pending + 1 < minCandles) return [];
     // A candle that closes beyond the run before it is that run's breakout, not part of its formation.
-    const run = candles.slice(pending, i);
-    if (run.length && (c.close! > Math.max(...run.map(x => x.high)) || c.close! < Math.min(...run.map(x => x.low)))) { pending = null; floor = i + 1; continue; }
-    const inside = candles.slice(pending, i + 1), low = Math.min(...inside.map(x => x.low)), high = Math.max(...inside.map(x => x.high));
-    const squeeze = contraction(inside, candles.slice(Math.max(0, pending - config.contractionLookbackCandles), pending), config);
-    const at = supportUnderBox(low, supportsAt(c.end), atr, config);
-    if (squeeze.fired && at.fired) live = { from: pending, to: i, high, low, wicks: 0, support: at.evidence.support, formedAt: c.end,
-      atFormation: { ...squeeze.evidence } };
+    const run = cs.slice(pending, i);
+    if (run.length && (c.close > Math.max(...run.map(x => x.high)) || c.close < Math.min(...run.map(x => x.low)))) { this.#pending = null; this.#floor = i + 1; return []; }
+    const inside = cs.slice(pending, i + 1), low = Math.min(...inside.map(x => x.low)), high = Math.max(...inside.map(x => x.high));
+    const squeeze = contraction(inside, cs.slice(Math.max(0, pending - config.contractionLookbackCandles), pending), config);
+    // Supports are asked for only once the box is tight and contracting (a caller may have to fetch data to answer).
+    if (!squeeze.fired) return [];
+    const at = supportUnderBox(low, supportsAt(c.end), this.#atr, config);
+    if (!at.fired) return [];
+    this.#live = { from: pending, to: i, high, low, wicks: 0, support: at.evidence.support, formedAt: c.end, atFormation: { ...squeeze.evidence } };
+    return [{ type: "formed", record: this.#record(this.#live, "live", {}) }];
   }
-  if (live) finish(live, "live", {});
-  return out;
+  #end(l: LiveBox, status: "decided" | "voided", extra: Partial<BoxRecord>, i: number): BoxEvent[] {
+    const record = this.#record(l, status, extra);
+    this.#live = null; this.#floor = i + 1; this.#pending = null;
+    return [{ type: status, record }];
+  }
 }

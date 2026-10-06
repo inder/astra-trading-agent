@@ -29,6 +29,8 @@ interface SymbolState {
   phase: Phase; head: DayHead | null; prior: VwapBar[]; anchorsPending: string[]; anchorsMissing: string[];
   scanner: BoxScanner | null; candles: CandleState; slots: Map<number, { high: number; low: number; trades: number }>; lastTradeCounted: number;
   dailyRetryAt: number; lastUnavailable: { reason: string; evidence: Record<string, unknown> } | null; todayRetryAt: number; todayBackoffMs: number; closing: boolean; queue: Candle[]; today: { fetchedAt: number; bars: VwapBar[] } | null; todayAttempts: number; degraded: boolean;
+  /** When the head candle began waiting for today's bars (null: not waiting); and why the VWAP is degraded. */
+  waitingSince: number | null; degradedReason: "reads_failed" | "no_read_slot" | null;
   counts: { formed: number; decided: number; voided: number; expired: number; unobserved: number };
 }
 type Arrival = (events: PaperEvent[]) => void;
@@ -36,7 +38,7 @@ type Arrival = (events: PaperEvent[]) => void;
 export class BoxPaperRuntime implements PaperRuntime {
   #config: BoxConfig; #market: PaperMarket; #clock: () => number; #session: { open: number; close: number }; #grid: number;
   #symbols = new Map<string, SymbolState>(); #reads = new ReadGaps<Source>();
-  #inflight = new Set<string>(); #arrived: Arrival[] = []; #gateOpened = false; #complete = false; #nextHeartbeat = 0;
+  #inflight = new Set<string>(); #arrived: Arrival[] = []; #rotation = 0; #gateOpened = false; #complete = false; #nextHeartbeat = 0;
   #latest = new Map<string, { price: number | null; tradeAt: string | null; fresh: boolean }>();
   constructor(raw: unknown, market: PaperMarket, clock = Date.now, checkpoint?: unknown) {
     if (checkpoint !== undefined) throw new Error("A support-box run holds no positions and cannot be resumed");
@@ -44,7 +46,7 @@ export class BoxPaperRuntime implements PaperRuntime {
     this.#session = sessionTimes(this.#config.date); this.#grid = this.#session.open + OPENING_RANGE_MINUTES * 60000;
     for (const symbol of this.#config.symbols) this.#symbols.set(symbol, { phase: "loading", head: null, prior: [], anchorsPending: [], anchorsMissing: [],
       scanner: null, candles: newCandleState(this.#grid, this.#config.candleMinutes), slots: new Map(), lastTradeCounted: -Infinity, dailyRetryAt: 0, lastUnavailable: null, todayRetryAt: 0, todayBackoffMs: this.#config.maxObservationGapMs, closing: false, queue: [],
-      today: null, todayAttempts: 0, degraded: false, counts: { formed: 0, decided: 0, voided: 0, expired: 0, unobserved: 0 } });
+      today: null, todayAttempts: 0, degraded: false, waitingSince: null, degradedReason: null, counts: { formed: 0, decided: 0, voided: 0, expired: 0, unobserved: 0 } });
   }
   get pollMs() { return this.#config.pollMs; }
   checkpoint() { return { complete: this.#complete, resumed: false }; }
@@ -87,7 +89,8 @@ export class BoxPaperRuntime implements PaperRuntime {
       });
       for (const q of (quotes ?? []).sort((a, b) => (a.tradeAt ?? "").localeCompare(b.tradeAt ?? "") || a.symbol.localeCompare(b.symbol))) this.#observe(q, now, events);
     }
-    for (const [symbol, st] of this.#symbols) if (st.phase === "ready") { this.#drain(symbol, st, now, events); this.#recover(symbol, st, now); }
+    for (const [symbol, st] of this.#symbols) if (st.phase === "ready") this.#drain(symbol, st, now, events);
+    this.#scheduleToday(now);
     if (now >= this.#nextHeartbeat) {
       events.push({ type: "heartbeat", data: { latest: Object.fromEntries(this.#latest), readFailures: this.#reads.takeFailures(), dataGapSince: this.#reads.since(),
         queuedCandles: Object.fromEntries([...this.#symbols].filter(([, st]) => st.queue.length).map(([s, st]) => [s, st.queue.length])) } });
@@ -212,10 +215,14 @@ export class BoxPaperRuntime implements PaperRuntime {
       try { out = st.scanner!.push(st.queue[0]!, supportsAt); }
       catch (error) {
         if (!(error instanceof NeedsData)) throw error;
-        // The candle waits. Nothing changes here: a read is launched (and counted) only by #fetchToday, and a symbol is degraded only by a read that failed.
-        if (!this.#inflight.has(`today:${symbol}`) && now >= st.todayRetryAt) this.#fetchToday(symbol, st, now);
-        return;
+        // The candle waits for a read, which #scheduleToday hands out. Waiting a whole candle is its own event: the symbol
+        // degrades (its VWAP falls back to the prior sessions) so its candles stay live instead of queueing until the close.
+        if (st.waitingSince === null) st.waitingSince = now;
+        if (now - st.waitingSince < c.candleMinutes * 60000) return;
+        st.degraded = true; st.degradedReason = "no_read_slot"; st.waitingSince = null;
+        continue;
       }
+      st.waitingSince = null;
       const candle = st.queue.shift()!;
       for (const e of out) events.push(this.#journal(symbol, st, e, candle, supportsAt));
     }
@@ -225,7 +232,10 @@ export class BoxPaperRuntime implements PaperRuntime {
   //   todayAttempts        +1 when a read is actually LAUNCHED (never when the cap turns it away); 0 when a read succeeds
   //   todayRetryAt         a launched read failed: now + one poll before degrading, now + the backoff once degraded
   //   todayBackoffMs       doubled when a read fails while degraded (cap 60 s); reset when a read succeeds
-  //   degraded             true: a launched read failed and todayAttempts is at or above the cap (it keeps counting while degraded); false: a read succeeded
+  //   degraded             true: a launched read failed and todayAttempts is at or above the cap (it keeps counting while degraded),
+  //                        or the head candle waited a whole candle for a read (degradedReason "no_read_slot"); false: a read succeeded
+  //   waitingSince         the head candle first needed today's bars (set); the head candle was processed or the wait degraded (cleared)
+  //   read slots           handed out only by #scheduleToday: waiting candles before recovery reads, rotating the first symbol each poll
   //   today (bars, fetchedAt)   a read succeeded
   //   closing              the session close (the last candles use what there is); journaled as degraded only for a candle the bars in hand do not cover
   /** Read today's minute bars in the background; true when a read was launched. A success makes them current and clears any degradation. */
@@ -237,10 +247,10 @@ export class BoxPaperRuntime implements PaperRuntime {
       const result = r.ok ? ((r.value as any)?.data?.results ?? []).find((x: any) => x?.symbol === symbol && x?.interval === "minute") : undefined;
       if (r.ok && Array.isArray(result?.bars)) {
         this.#reads.succeeded("bars", this.#clock(), ev);
-        st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; st.todayBackoffMs = this.#config.maxObservationGapMs;
+        st.today = { fetchedAt: startedAt, bars: vwapBars(result.bars) }; st.todayAttempts = 0; st.degraded = false; st.degradedReason = null; st.todayBackoffMs = this.#config.maxObservationGapMs;
       } else {
         this.#reads.failed("bars", this.#clock(), ev, r.ok ? new Error("No minute bars for the day") : r.error);
-        if (st.todayAttempts >= MAX_TODAY_ATTEMPTS) st.degraded = true;
+        if (st.todayAttempts >= MAX_TODAY_ATTEMPTS && !st.degraded) { st.degraded = true; st.degradedReason = "reads_failed"; }
         // A short pause between the first tries (the candle is waiting); once degraded, a doubling backoff.
         st.todayRetryAt = this.#clock() + (st.degraded ? st.todayBackoffMs : this.#config.pollMs);
         if (st.degraded) st.todayBackoffMs = Math.min(st.todayBackoffMs * 2, MAX_TODAY_BACKOFF_MS);
@@ -249,15 +259,22 @@ export class BoxPaperRuntime implements PaperRuntime {
     });
     return true;
   }
-  /** A symbol whose VWAP fell back to the prior sessions keeps asking for today's bars, on a doubling backoff, until they come. */
-  #recover(symbol: string, st: SymbolState, now: number): void {
-    if (st.degraded && !this.#inflight.has(`today:${symbol}`) && now >= st.todayRetryAt) this.#fetchToday(symbol, st, now);
+  /** The one place today's-bars reads are handed out. Free slots go first to symbols with a candle waiting, then to degraded
+   *  symbols retrying on their backoff; the first symbol rotates each poll, so no symbol is starved when reads hang. */
+  #scheduleToday(now: number): void {
+    const ready = [...this.#symbols].filter(([, st]) => st.phase === "ready");
+    if (!ready.length) return;
+    const start = this.#rotation++ % ready.length, order = [...ready.slice(start), ...ready.slice(0, start)];
+    const due = ([symbol, st]: [string, SymbolState]) => !this.#inflight.has(`today:${symbol}`) && now >= st.todayRetryAt;
+    const waiting = order.filter(e => e[1].waitingSince !== null && due(e)), recovering = order.filter(e => e[1].degraded && e[1].waitingSince === null && due(e));
+    for (const [symbol, st] of [...waiting, ...recovering]) if (!this.#fetchToday(symbol, st, now)) return;   // false: every slot is taken
   }
   #journal(symbol: string, st: SymbolState, e: BoxEvent, candle: Candle, _supportsAt: unknown): PaperEvent {
     st.counts[e.type === "formed" ? "formed" : e.type === "decided" ? "decided" : "voided"]++;
     // The last minute the VWAP could see: bars lag, so this may be earlier than the candle's end.
     const through = st.today ? Math.max(0, ...st.today.bars.filter(b => b.at + 60000 <= candle.end).map(b => b.at + 60000)) : 0;
-    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded || (st.closing && !(st.today && st.today.fetchedAt >= candle.end)), ...e.record } };
+    return { type: `box_${e.type}`, data: { symbol, rangesFrom: "observed_trades", vwapThrough: through ? iso(through) : null, vwapTodayDegraded: st.degraded || (st.closing && !(st.today && st.today.fetchedAt >= candle.end)),
+      vwapTodayDegradedReason: st.degraded ? st.degradedReason : st.closing && !(st.today && st.today.fetchedAt >= candle.end) ? "session_close" : null, ...e.record } };
   }
 
   // ---- The close.

@@ -177,7 +177,7 @@ test("today's minute bars failing three times degrade the VWAP, and a later succ
 const FIVE = ["AAA", "BBB", "CCC", "DDD", "EEE"];
 type Call = { symbol: string; at: number; end: number };
 /** Wraps today's-bars reads (start = the open): `fail(call, n)` decides whether this call fails; every call is recorded, with how many were in flight. */
-function todayReads(m: ReplayMarket, clock: () => number, fail: (call: Call, n: number) => boolean, slowMs = 0) {
+function todayReads(m: ReplayMarket, clock: () => number, fail: (call: Call, n: number) => boolean, slowMs: number | ((call: Call) => number) = 0) {
   const calls: Call[] = [], real = m.bars.bind(m), waiting: { until: number; release: () => void }[] = []; let inFlight = 0, peak = 0;
   // A slow read stays in flight for `slowMs` of simulated time: it is released by the quote polls, which tick with the clock.
   const quotes = m.quotes.bind(m);
@@ -186,7 +186,8 @@ function todayReads(m: ReplayMarket, clock: () => number, fail: (call: Call, n: 
     if (a !== open) return real(symbols, a, b, x);
     const call = { symbol: symbols[0]!, at: clock(), end: b }; calls.push(call); inFlight++; peak = Math.max(peak, inFlight);
     try {
-      if (slowMs) await new Promise<void>(release => waiting.push({ until: call.at + slowMs, release }));
+      const slow = typeof slowMs === "function" ? slowMs(call) : slowMs;
+      if (slow) await new Promise<void>(release => waiting.push({ until: call.at + slow, release }));
       if (fail(call, calls.length)) throw new Error("timeout");
       return await real(symbols, a, b, x);
     } finally { inFlight--; }
@@ -254,11 +255,37 @@ test("a success resets the attempt count: two failures, a success, then one fail
   assert.equal(formed.length, 2); assert.ok(reads.calls.length >= 5);
   assert.equal(formed[0]!.data.vwapTodayDegraded, false); assert.equal(formed[1]!.data.vwapTodayDegraded, false, "one failed read after a success is attempt 1 again, not attempt 4");
 });
-test("at the session close, candles still waiting for today's bars are processed on what there is, and journaled as degraded only because no fresh bars cover them", async () => {
+test("a today's-bars read that never answers: the waiting candle degrades after one candle (no read slot) and the box is journaled live, not at the close", async () => {
   const { close } = sessionTimes(DAY);
   const events = await flaky((m, c) => { todayReads(m, c, () => false, 8 * 3600000); });   // every read outlasts the session
-  const formed = of(events, "box_formed")[0]!.data;
-  assert.deepEqual([formed.vwapTodayDegraded, formed.vwapThrough], [true, null]);
-  assert.ok(of(events, "box_formed")[0]!.at >= close, "nothing was journaled before the close: the candles waited");
+  const formed = of(events, "box_formed")[0]!;
+  assert.deepEqual([formed.data.vwapTodayDegraded, formed.data.vwapTodayDegradedReason, formed.data.vwapThrough], [true, "no_read_slot", null]);
+  assert.ok(formed.at < close - 5 * 3600000, `journaled live (${new Date(formed.at).toISOString()}), not at the close`);
   assert.equal(of(events, "box_decided")[0]!.data.decision.close, 160.71);
+});
+
+test("twenty symbols whose today's-bars reads all hang to the deadline: every symbol gets reads, none waits until the close, and every box is journaled live", async () => {
+  const { close } = sessionTimes(DAY), symbols = Array.from({ length: 20 }, (_, i) => `S${String.fromCharCode(65 + i)}`);
+  let reads!: ReturnType<typeof todayReads>;
+  // Each read stays in flight 30 s of simulated time, then fails: an outage seen through the 30 s deadline.
+  const events = await flaky((m, c) => { reads = todayReads(m, c, () => true, 30000); }, false, {}, { symbols, bars: referenceBars() });
+  const formed = of(events, "box_formed");
+  assert.deepEqual(formed.map(e => e.data.symbol).sort(), [...symbols].sort(), "every symbol's box formed");
+  assert.ok(formed.every(e => e.at < close - 5 * 3600000), "every box was journaled live, none at the close");
+  assert.ok(formed.every(e => e.data.vwapTodayDegraded === true && ["no_read_slot", "reads_failed"].includes(e.data.vwapTodayDegradedReason)), "degraded, with the reason");
+  const perSymbol = symbols.map(s => reads.calls.filter(c => c.symbol === s).length);
+  assert.ok(perSymbol.every(n => n > 0), `every symbol got today's-bars reads: ${perSymbol}`);
+  assert.ok(Math.max(...perSymbol) <= 3 * Math.min(...perSymbol) + 3, `reads are shared fairly: ${perSymbol}`);
+  assert.ok(reads.peak() <= 3, `at most three in flight, saw ${reads.peak()}`);
+});
+test("under contention from failing symbols' recovery reads, a healthy symbol still forms its box on today's VWAP", async () => {
+  // Four symbols (D1-D4) whose reads hang 30 s and fail: they degrade, then keep retrying on their backoff, and there are
+  // more of them than the three slots. HLTY's reads answer at once: its box must form on today's VWAP, never degraded for
+  // want of a slot. (The waiting-before-recovery order in #scheduleToday is not separable here: HLTY needs one read all
+  // day, which waits for the first slot to free under either order.)
+  const symbols = ["D1", "D2", "D3", "D4", "HLTY"];
+  const events = await flaky((m, c) => { todayReads(m, c, call => call.symbol !== "HLTY", call => call.symbol === "HLTY" ? 0 : 30000); }, false, {}, { symbols, bars: referenceBars() });
+  const box = (s: string) => of(events, "box_formed").find(e => e.data.symbol === s)!.data;
+  assert.deepEqual([box("HLTY").vwapTodayDegraded, box("HLTY").vwapTodayDegradedReason], [false, null]);
+  assert.ok(["D1", "D2", "D3", "D4"].every(s => box(s).vwapTodayDegraded === true));
 });
